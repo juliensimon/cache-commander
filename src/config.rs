@@ -104,13 +104,7 @@ impl Default for Config {
         let mut roots = vec![home.join(".cache")];
 
         #[cfg(target_os = "macos")]
-        {
-            let homebrew = home.join("Library/Caches/Homebrew");
-            if homebrew.exists() {
-                roots.push(homebrew);
-            }
-            roots.push(home.join("Library/Caches"));
-        }
+        roots.push(home.join("Library/Caches"));
 
         let npm_dir = home.join(".npm");
         if npm_dir.exists() {
