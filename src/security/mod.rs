@@ -75,7 +75,7 @@ pub fn scan_vulns(packages: &[(PathBuf, PackageId)]) -> HashMap<PathBuf, Securit
                 if let Some(pkg) = pkg {
                     for vuln in &mut info.vulns {
                         if let Some(detail) = detail_cache.get(&vuln.id) {
-                            vuln.fix_version = osv::extract_fix_version(detail, &pkg.name, pkg.ecosystem);
+                            vuln.fix_version = osv::extract_fix_version(detail, &pkg.name, pkg.ecosystem, &pkg.version);
                         }
                     }
                 }

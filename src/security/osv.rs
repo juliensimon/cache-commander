@@ -96,6 +96,8 @@ pub struct OsvRange {
 #[derive(Debug, Clone, Deserialize)]
 pub struct OsvEvent {
     #[serde(default)]
+    pub introduced: Option<String>,
+    #[serde(default)]
     pub fixed: Option<String>,
 }
 
@@ -103,21 +105,80 @@ pub fn parse_vuln_detail(json: &str) -> Result<OsvVulnDetail, serde_json::Error>
     serde_json::from_str(json)
 }
 
-pub fn extract_fix_version(detail: &OsvVulnDetail, package_name: &str, ecosystem: &str) -> Option<String> {
+/// Extract the fix version for a specific package version from OSV detail.
+///
+/// OSV `affected` entries can have multiple ranges (e.g., 0.35.x, 0.38.x, 1.x).
+/// We find the range whose `introduced` version best matches `pkg_version` by
+/// comparing version prefixes, then return that range's `fixed` value.
+pub fn extract_fix_version(
+    detail: &OsvVulnDetail,
+    package_name: &str,
+    ecosystem: &str,
+    pkg_version: &str,
+) -> Option<String> {
     for affected in &detail.affected {
         if let Some(pkg) = &affected.package {
             if pkg.name == package_name && pkg.ecosystem == ecosystem {
+                // Collect all (introduced, fixed) pairs from ranges
+                let mut candidates: Vec<(&str, &str)> = Vec::new();
                 for range in &affected.ranges {
+                    let mut intro: Option<&str> = None;
+                    let mut fix: Option<&str> = None;
                     for event in &range.events {
-                        if let Some(fixed) = &event.fixed {
-                            return Some(fixed.clone());
+                        if let Some(i) = &event.introduced {
+                            intro = Some(i);
+                        }
+                        if let Some(f) = &event.fixed {
+                            fix = Some(f);
                         }
                     }
+                    if let (Some(i), Some(f)) = (intro, fix) {
+                        candidates.push((i, f));
+                    }
                 }
+
+                if candidates.is_empty() {
+                    return None;
+                }
+
+                // Find the best matching range: the one whose introduced version
+                // is <= pkg_version with the highest introduced version.
+                // This picks the most specific range that covers our version.
+                let best = candidates.iter()
+                    .filter(|(intro, _)| version_lte(intro, pkg_version))
+                    .max_by(|(a, _), (b, _)| compare_versions(a, b));
+
+                if let Some((_, fix)) = best {
+                    return Some(fix.to_string());
+                }
+
+                // Fallback: return the last fix if no range matched
+                return candidates.last().map(|(_, f)| f.to_string());
             }
         }
     }
     None
+}
+
+/// Compare two version strings numerically component by component.
+fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    let a_parts: Vec<u64> = a.split('.').filter_map(|s| s.parse().ok()).collect();
+    let b_parts: Vec<u64> = b.split('.').filter_map(|s| s.parse().ok()).collect();
+    let len = a_parts.len().max(b_parts.len());
+    for i in 0..len {
+        let a_val = a_parts.get(i).copied().unwrap_or(0);
+        let b_val = b_parts.get(i).copied().unwrap_or(0);
+        match a_val.cmp(&b_val) {
+            std::cmp::Ordering::Equal => continue,
+            ord => return ord,
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+/// Check if version a <= version b.
+fn version_lte(a: &str, b: &str) -> bool {
+    compare_versions(a, b) != std::cmp::Ordering::Greater
 }
 
 pub fn fetch_vuln_detail(vuln_id: &str) -> Result<OsvVulnDetail, String> {
@@ -183,7 +244,7 @@ mod tests {
         }"#;
         let detail = parse_vuln_detail(json).unwrap();
         assert_eq!(detail.id, "CVE-2023-32681");
-        let fix = extract_fix_version(&detail, "requests", "PyPI");
+        let fix = extract_fix_version(&detail, "requests", "PyPI", "2.31.0");
         assert_eq!(fix, Some("2.32.0".to_string()));
     }
 
@@ -200,7 +261,7 @@ mod tests {
             }]
         }"#;
         let detail = parse_vuln_detail(json).unwrap();
-        let fix = extract_fix_version(&detail, "urllib3", "PyPI");
+        let fix = extract_fix_version(&detail, "urllib3", "PyPI", "1.0.0");
         assert_eq!(fix, None);
     }
 
@@ -210,7 +271,7 @@ mod tests {
         let detail = parse_vuln_detail(json).unwrap();
         assert_eq!(detail.id, "CVE-2024-0001");
         assert!(detail.affected.is_empty());
-        let fix = extract_fix_version(&detail, "anything", "PyPI");
+        let fix = extract_fix_version(&detail, "anything", "PyPI", "1.0.0");
         assert_eq!(fix, None);
     }
 
@@ -224,7 +285,7 @@ mod tests {
             }]
         }"#;
         let detail = parse_vuln_detail(json).unwrap();
-        let fix = extract_fix_version(&detail, "flask", "PyPI");
+        let fix = extract_fix_version(&detail, "flask", "PyPI", "2.0.0");
         assert_eq!(fix, None);
     }
 
@@ -238,7 +299,7 @@ mod tests {
             }]
         }"#;
         let detail = parse_vuln_detail(json).unwrap();
-        let fix = extract_fix_version(&detail, "flask", "PyPI");
+        let fix = extract_fix_version(&detail, "flask", "PyPI", "2.0.0");
         assert_eq!(fix, None);
     }
 
@@ -252,7 +313,7 @@ mod tests {
             }]
         }"#;
         let detail = parse_vuln_detail(json).unwrap();
-        let fix = extract_fix_version(&detail, "flask", "PyPI");
+        let fix = extract_fix_version(&detail, "flask", "PyPI", "2.0.0");
         assert_eq!(fix, None);
     }
 
@@ -263,19 +324,19 @@ mod tests {
             "affected": [
                 {
                     "package": {"name": "requests", "ecosystem": "PyPI"},
-                    "ranges": [{"type": "ECOSYSTEM", "events": [{"fixed": "2.32.0"}]}]
+                    "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "2.32.0"}]}]
                 },
                 {
                     "package": {"name": "urllib3", "ecosystem": "PyPI"},
-                    "ranges": [{"type": "ECOSYSTEM", "events": [{"fixed": "1.26.18"}]}]
+                    "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "1.26.18"}]}]
                 }
             ]
         }"#;
         let detail = parse_vuln_detail(json).unwrap();
         assert_eq!(detail.affected.len(), 2);
-        assert_eq!(extract_fix_version(&detail, "requests", "PyPI"), Some("2.32.0".to_string()));
-        assert_eq!(extract_fix_version(&detail, "urllib3", "PyPI"), Some("1.26.18".to_string()));
-        assert_eq!(extract_fix_version(&detail, "flask", "PyPI"), None);
+        assert_eq!(extract_fix_version(&detail, "requests", "PyPI", "2.31.0"), Some("2.32.0".to_string()));
+        assert_eq!(extract_fix_version(&detail, "urllib3", "PyPI", "1.26.5"), Some("1.26.18".to_string()));
+        assert_eq!(extract_fix_version(&detail, "flask", "PyPI", "3.0.0"), None);
     }
 
     #[test]
@@ -284,23 +345,89 @@ mod tests {
             "id": "CVE-2024-0006",
             "affected": [{
                 "package": {"name": "requests", "ecosystem": "PyPI"},
-                "ranges": [{"type": "ECOSYSTEM", "events": [{"fixed": "2.32.0"}]}]
+                "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "2.32.0"}]}]
             }]
         }"#;
         let detail = parse_vuln_detail(json).unwrap();
-        // Right name, wrong ecosystem
-        assert_eq!(extract_fix_version(&detail, "requests", "npm"), None);
+        assert_eq!(extract_fix_version(&detail, "requests", "npm", "2.31.0"), None);
     }
 
     #[test]
     fn parse_vuln_detail_affected_no_package() {
         let json = r#"{
             "id": "CVE-2024-0007",
-            "affected": [{"ranges": [{"type": "ECOSYSTEM", "events": [{"fixed": "1.0"}]}]}]
+            "affected": [{"ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "1.0"}]}]}]
         }"#;
         let detail = parse_vuln_detail(json).unwrap();
         assert!(detail.affected[0].package.is_none());
-        let fix = extract_fix_version(&detail, "anything", "PyPI");
+        let fix = extract_fix_version(&detail, "anything", "PyPI", "0.5.0");
         assert_eq!(fix, None);
+    }
+
+    #[test]
+    fn extract_fix_version_multi_range_picks_correct_major() {
+        // Simulates the rustix case: vuln affects both 0.x and 1.x lines
+        let json = r#"{
+            "id": "GHSA-c827-hfw6-qwvm",
+            "affected": [{
+                "package": {"name": "rustix", "ecosystem": "crates.io"},
+                "ranges": [
+                    {
+                        "type": "ECOSYSTEM",
+                        "events": [
+                            {"introduced": "0"},
+                            {"fixed": "0.35.15"}
+                        ]
+                    },
+                    {
+                        "type": "ECOSYSTEM",
+                        "events": [
+                            {"introduced": "0.36.0"},
+                            {"fixed": "0.36.16"}
+                        ]
+                    },
+                    {
+                        "type": "ECOSYSTEM",
+                        "events": [
+                            {"introduced": "0.37.0"},
+                            {"fixed": "0.37.27"}
+                        ]
+                    },
+                    {
+                        "type": "ECOSYSTEM",
+                        "events": [
+                            {"introduced": "0.38.0"},
+                            {"fixed": "0.38.37"}
+                        ]
+                    },
+                    {
+                        "type": "ECOSYSTEM",
+                        "events": [
+                            {"introduced": "1.0.0"},
+                            {"fixed": "1.0.5"}
+                        ]
+                    }
+                ]
+            }]
+        }"#;
+        let detail = parse_vuln_detail(json).unwrap();
+
+        // Version 1.1.4 should match the 1.x range → fix 1.0.5
+        assert_eq!(
+            extract_fix_version(&detail, "rustix", "crates.io", "1.1.4"),
+            Some("1.0.5".to_string()),
+        );
+
+        // Version 0.38.44 should match the 0.38.x range → fix 0.38.37
+        assert_eq!(
+            extract_fix_version(&detail, "rustix", "crates.io", "0.38.44"),
+            Some("0.38.37".to_string()),
+        );
+
+        // Version 0.35.10 should match the 0.0-0.35 range → fix 0.35.15
+        assert_eq!(
+            extract_fix_version(&detail, "rustix", "crates.io", "0.35.10"),
+            Some("0.35.15".to_string()),
+        );
     }
 }
