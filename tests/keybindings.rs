@@ -768,11 +768,23 @@ fn key_shift_o_checks_all() {
 
 #[test]
 fn vuln_propagates_to_ancestors() {
-    let mut app = test_app_with_children();
-    // Simulate a vuln result on a child node
-    let child_path = app.tree.nodes[1].path.clone();
+    // Use real hierarchical paths so filesystem ancestor walking works
+    let config = Config { roots: vec![], ..Default::default() };
+    let (result_tx, result_rx) = mpsc::channel();
+    let scan_tx = scanner::start(result_tx);
+    let mut app = App::new(config, result_rx, scan_tx);
+
+    let parent_path = PathBuf::from("/cache/uv");
+    let child_path = PathBuf::from("/cache/uv/archive/pkg1");
+
+    app.tree.set_roots(vec![TreeNode {
+        path: parent_path.clone(), name: "uv".into(), size: 0, depth: 0,
+        parent: None, has_children: true, kind: ccmd::tree::node::CacheKind::Uv,
+        last_modified: None, is_root: true, children_loaded: false,
+    }]);
+
     app.vuln_results.insert(
-        child_path,
+        child_path.clone(),
         ccmd::security::SecurityInfo {
             vulns: vec![ccmd::security::Vulnerability {
                 id: "CVE-2023-1234".into(),
@@ -783,22 +795,29 @@ fn vuln_propagates_to_ancestors() {
     );
     app.recompute_node_status();
 
-    // Child should have vuln
-    let child_path = app.tree.nodes[1].path.clone();
     assert!(app.node_status.get(&child_path).unwrap().has_vuln);
-
-    // Parent (root) should inherit vuln status
-    let parent_path = app.tree.nodes[0].path.clone();
     assert!(
         app.node_status.get(&parent_path).unwrap().has_vuln,
-        "Parent should inherit vuln from child"
+        "Parent should inherit vuln from child via path ancestry"
     );
 }
 
 #[test]
 fn outdated_propagates_to_ancestors() {
-    let mut app = test_app_with_children();
-    let child_path = app.tree.nodes[1].path.clone();
+    let config = Config { roots: vec![], ..Default::default() };
+    let (result_tx, result_rx) = mpsc::channel();
+    let scan_tx = scanner::start(result_tx);
+    let mut app = App::new(config, result_rx, scan_tx);
+
+    let parent_path = PathBuf::from("/cache/uv");
+    let child_path = PathBuf::from("/cache/uv/archive/pkg1");
+
+    app.tree.set_roots(vec![TreeNode {
+        path: parent_path.clone(), name: "uv".into(), size: 0, depth: 0,
+        parent: None, has_children: true, kind: ccmd::tree::node::CacheKind::Uv,
+        last_modified: None, is_root: true, children_loaded: false,
+    }]);
+
     app.version_results.insert(
         child_path,
         ccmd::security::VersionInfo {
@@ -809,11 +828,9 @@ fn outdated_propagates_to_ancestors() {
     );
     app.recompute_node_status();
 
-    // Parent should inherit outdated status
-    let parent_path = app.tree.nodes[0].path.clone();
     assert!(
         app.node_status.get(&parent_path).unwrap().has_outdated,
-        "Parent should inherit outdated from child"
+        "Parent should inherit outdated from child via path ancestry"
     );
 }
 

@@ -365,22 +365,28 @@ impl App {
             }
         }
 
-        let paths: Vec<PathBuf> = self.node_status.keys().cloned().collect();
-        for path in paths {
-            let status = self.node_status[&path].clone();
-            if let Some(idx) = self.tree.nodes.iter().position(|n| n.path == path) {
-                let mut current = idx;
-                while let Some(parent_idx) = self.tree.nodes[current].parent {
-                    let parent_path = self.tree.nodes[parent_idx].path.clone();
-                    let parent_status = self.node_status.entry(parent_path).or_default();
-                    if status.has_vuln {
-                        parent_status.has_vuln = true;
-                    }
-                    if status.has_outdated {
-                        parent_status.has_outdated = true;
-                    }
-                    current = parent_idx;
+        // Propagate to all filesystem ancestors so parent folders
+        // inherit status even if they're not expanded in the tree
+        let affected: Vec<(PathBuf, bool, bool)> = self
+            .node_status
+            .iter()
+            .map(|(p, s)| (p.clone(), s.has_vuln, s.has_outdated))
+            .collect();
+        for (path, has_vuln, has_outdated) in affected {
+            let mut ancestor = path.parent().map(|p| p.to_path_buf());
+            while let Some(anc) = ancestor {
+                let s = self.node_status.entry(anc.clone()).or_default();
+                let changed = (has_vuln && !s.has_vuln) || (has_outdated && !s.has_outdated);
+                if has_vuln {
+                    s.has_vuln = true;
                 }
+                if has_outdated {
+                    s.has_outdated = true;
+                }
+                if !changed {
+                    break;
+                }
+                ancestor = anc.parent().map(|p| p.to_path_buf());
             }
         }
     }

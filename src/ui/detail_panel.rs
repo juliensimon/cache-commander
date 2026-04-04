@@ -122,9 +122,12 @@ pub fn render(
             theme::DANGER,
         )));
         for vuln in &sec.vulns {
-            let sev = vuln.severity.as_deref().unwrap_or("?");
+            let sev_str = match &vuln.severity {
+                Some(s) if !s.is_empty() => format!(" ({})", s),
+                _ => String::new(),
+            };
             lines.push(Line::from(Span::styled(
-                format!("  ⚠ {} ({})", vuln.id, sev),
+                format!("  ⚠ {}{}", vuln.id, sev_str),
                 theme::DANGER,
             )));
             if !vuln.summary.is_empty() {
