@@ -21,6 +21,7 @@ pub struct OsvVuln {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct OsvSeverity {
     #[serde(rename = "type")]
     pub severity_type: String,
@@ -61,6 +62,7 @@ pub fn query_osv(packages: &[crate::providers::PackageId]) -> Result<OsvResponse
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct OsvVulnDetail {
     pub id: String,
     #[serde(default)]

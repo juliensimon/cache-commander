@@ -66,12 +66,6 @@ impl TreeState {
         }
     }
 
-    /// Update the cached node_status and recompute dimmed set.
-    pub fn set_node_status(&mut self, status: &HashMap<PathBuf, crate::security::NodeStatus>) {
-        self.node_status = status.clone();
-        self.recompute_dimmed_internal();
-    }
-
     pub fn set_roots(&mut self, roots: Vec<TreeNode>) {
         self.nodes = roots;
         self.expanded.clear();
