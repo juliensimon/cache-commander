@@ -1,7 +1,7 @@
-use cache_explorer::app::{App, AppMode};
-use cache_explorer::config::{Config, SortField};
-use cache_explorer::scanner;
-use cache_explorer::tree::node::TreeNode;
+use ccmd::app::{App, AppMode};
+use ccmd::config::{Config, SortField};
+use ccmd::scanner;
+use ccmd::tree::node::TreeNode;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -41,7 +41,7 @@ fn make_node(name: &str, size: u64, has_children: bool) -> TreeNode {
         depth: 0,
         parent: None,
         has_children,
-        kind: cache_explorer::tree::node::CacheKind::Unknown,
+        kind: ccmd::tree::node::CacheKind::Unknown,
         last_modified: None,
         is_root: true,
         children_loaded: false,
@@ -56,7 +56,7 @@ fn make_child(name: &str, size: u64, parent: usize) -> TreeNode {
         depth: 1,
         parent: Some(parent),
         has_children: false,
-        kind: cache_explorer::tree::node::CacheKind::Unknown,
+        kind: ccmd::tree::node::CacheKind::Unknown,
         last_modified: None,
         is_root: false,
         children_loaded: false,
@@ -249,7 +249,7 @@ fn key_d_without_confirm_deletes_immediately() {
         depth: 0,
         parent: None,
         has_children: true,
-        kind: cache_explorer::tree::node::CacheKind::Unknown,
+        kind: ccmd::tree::node::CacheKind::Unknown,
         last_modified: None,
         is_root: true,
         children_loaded: false,
@@ -299,7 +299,7 @@ fn delete_mode_y_confirms() {
         depth: 0,
         parent: None,
         has_children: true,
-        kind: cache_explorer::tree::node::CacheKind::Unknown,
+        kind: ccmd::tree::node::CacheKind::Unknown,
         last_modified: None,
         is_root: true,
         children_loaded: false,

@@ -92,22 +92,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d20789868f4b01b2f2caec9f5c4e0213b41e3e5702a50157d699ae31ced2fcb"
 
 [[package]]
-name = "cache-explorer"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "clap",
- "crossterm",
- "directories",
- "humansize",
- "jwalk",
- "ratatui",
- "serde",
- "tempfile",
- "toml",
-]
-
-[[package]]
 name = "cassowary"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -130,6 +114,22 @@ checksum = "b7a4d3ec6524d28a329fc53654bbadc9bdd7b0431f5d65f1a56ffb28a1ee5283"
 dependencies = [
  "find-msvc-tools",
  "shlex",
+]
+
+[[package]]
+name = "ccmd"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "crossterm",
+ "directories",
+ "humansize",
+ "jwalk",
+ "ratatui",
+ "serde",
+ "tempfile",
+ "toml",
 ]
 
 [[package]]

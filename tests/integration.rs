@@ -45,10 +45,10 @@ fn scanner_discovers_roots_and_computes_sizes() {
     create_uv_cache(tmp.path());
 
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = cache_explorer::scanner::start(result_tx);
+    let scan_tx = ccmd::scanner::start(result_tx);
 
     scan_tx
-        .send(cache_explorer::scanner::ScanRequest::ScanRoots(vec![
+        .send(ccmd::scanner::ScanRequest::ScanRoots(vec![
             tmp.path().to_path_buf(),
         ]))
         .unwrap();
@@ -56,7 +56,7 @@ fn scanner_discovers_roots_and_computes_sizes() {
     // First message: roots with size=0 (immediate)
     let result = result_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     match result {
-        cache_explorer::scanner::ScanResult::RootsScanned(nodes) => {
+        ccmd::scanner::ScanResult::RootsScanned(nodes) => {
             assert_eq!(nodes.len(), 1);
             assert!(nodes[0].has_children);
         }
@@ -66,7 +66,7 @@ fn scanner_discovers_roots_and_computes_sizes() {
     // Second message: size update
     let result = result_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     match result {
-        cache_explorer::scanner::ScanResult::SizeUpdated(path, size) => {
+        ccmd::scanner::ScanResult::SizeUpdated(path, size) => {
             assert_eq!(path, tmp.path().to_path_buf());
             assert!(size > 0, "Root should have non-zero size");
         }
@@ -84,15 +84,15 @@ fn scanner_expand_discovers_children_with_providers() {
     let cache_dir = tmp.path().to_path_buf();
 
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = cache_explorer::scanner::start(result_tx);
+    let scan_tx = ccmd::scanner::start(result_tx);
 
     scan_tx
-        .send(cache_explorer::scanner::ScanRequest::ExpandNode(cache_dir.clone()))
+        .send(ccmd::scanner::ScanRequest::ExpandNode(cache_dir.clone()))
         .unwrap();
 
     let result = result_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     match result {
-        cache_explorer::scanner::ScanResult::ChildrenScanned(parent_path, children) => {
+        ccmd::scanner::ScanResult::ChildrenScanned(parent_path, children) => {
             assert_eq!(parent_path, cache_dir);
             assert_eq!(children.len(), 3); // huggingface, uv, whisper
 
@@ -103,11 +103,11 @@ fn scanner_expand_discovers_children_with_providers() {
 
             // Check kinds
             let hf = children.iter().find(|n| n.name == "huggingface").unwrap();
-            assert_eq!(hf.kind, cache_explorer::tree::node::CacheKind::HuggingFace);
+            assert_eq!(hf.kind, ccmd::tree::node::CacheKind::HuggingFace);
             let uv = children.iter().find(|n| n.name == "uv").unwrap();
-            assert_eq!(uv.kind, cache_explorer::tree::node::CacheKind::Uv);
+            assert_eq!(uv.kind, ccmd::tree::node::CacheKind::Uv);
             let wh = children.iter().find(|n| n.name == "whisper").unwrap();
-            assert_eq!(wh.kind, cache_explorer::tree::node::CacheKind::Whisper);
+            assert_eq!(wh.kind, ccmd::tree::node::CacheKind::Whisper);
 
             // Small children get instant sizes via quick_size;
             // large ones arrive with size=0 and get async updates
@@ -127,15 +127,15 @@ fn scanner_expand_huggingface_hub_shows_semantic_names() {
     let hub_path = tmp.path().join("huggingface").join("hub");
 
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = cache_explorer::scanner::start(result_tx);
+    let scan_tx = ccmd::scanner::start(result_tx);
 
     scan_tx
-        .send(cache_explorer::scanner::ScanRequest::ExpandNode(hub_path))
+        .send(ccmd::scanner::ScanRequest::ExpandNode(hub_path))
         .unwrap();
 
     let result = result_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     match result {
-        cache_explorer::scanner::ScanResult::ChildrenScanned(_, children) => {
+        ccmd::scanner::ScanResult::ChildrenScanned(_, children) => {
             assert_eq!(children.len(), 2); // model + dataset
 
             let names: Vec<&str> = children.iter().map(|n| n.name.as_str()).collect();
@@ -164,15 +164,15 @@ fn scanner_expand_whisper_shows_model_names() {
     let whisper_path = tmp.path().join("whisper");
 
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = cache_explorer::scanner::start(result_tx);
+    let scan_tx = ccmd::scanner::start(result_tx);
 
     scan_tx
-        .send(cache_explorer::scanner::ScanRequest::ExpandNode(whisper_path))
+        .send(ccmd::scanner::ScanRequest::ExpandNode(whisper_path))
         .unwrap();
 
     let result = result_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     match result {
-        cache_explorer::scanner::ScanResult::ChildrenScanned(_, children) => {
+        ccmd::scanner::ScanResult::ChildrenScanned(_, children) => {
             let names: Vec<&str> = children.iter().map(|n| n.name.as_str()).collect();
             assert!(
                 names.iter().any(|n| n.contains("Whisper") && n.contains("Large")),
@@ -193,12 +193,12 @@ fn full_tree_workflow_expand_navigate_mark_delete() {
     create_hf_cache(tmp.path());
     create_whisper_cache(tmp.path());
 
-    let mut tree = cache_explorer::tree::state::TreeState::new(
-        cache_explorer::config::SortField::Size,
+    let mut tree = ccmd::tree::state::TreeState::new(
+        ccmd::config::SortField::Size,
         true,
     );
 
-    let root = cache_explorer::tree::node::TreeNode::root(tmp.path().to_path_buf());
+    let root = ccmd::tree::node::TreeNode::root(tmp.path().to_path_buf());
     tree.set_roots(vec![root]);
     assert_eq!(tree.visible.len(), 1);
 
@@ -208,16 +208,16 @@ fn full_tree_workflow_expand_navigate_mark_delete() {
 
     // Use scanner to get children
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = cache_explorer::scanner::start(result_tx);
+    let scan_tx = ccmd::scanner::start(result_tx);
 
     scan_tx
-        .send(cache_explorer::scanner::ScanRequest::ExpandNode(
+        .send(ccmd::scanner::ScanRequest::ExpandNode(
             tmp.path().to_path_buf(),
         ))
         .unwrap();
 
     let result = result_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-    if let cache_explorer::scanner::ScanResult::ChildrenScanned(parent_path, children) = result {
+    if let ccmd::scanner::ScanResult::ChildrenScanned(parent_path, children) = result {
         // Resolve parent by path (like the real app does)
         let parent_idx = tree.nodes.iter().position(|n| n.path == parent_path).unwrap();
         tree.insert_children(parent_idx, children);
@@ -242,8 +242,8 @@ fn full_tree_workflow_expand_navigate_mark_delete() {
 
 #[test]
 fn insert_children_twice_does_not_duplicate() {
-    let mut tree = cache_explorer::tree::state::TreeState::new(
-        cache_explorer::config::SortField::Size,
+    let mut tree = ccmd::tree::state::TreeState::new(
+        ccmd::config::SortField::Size,
         true,
     );
 
@@ -272,8 +272,8 @@ fn size_update_by_path_finds_correct_node_after_tree_mutation() {
     std::fs::create_dir_all(&child_a_path).unwrap();
     std::fs::create_dir_all(&child_b_path).unwrap();
 
-    let mut tree = cache_explorer::tree::state::TreeState::new(
-        cache_explorer::config::SortField::Size,
+    let mut tree = ccmd::tree::state::TreeState::new(
+        ccmd::config::SortField::Size,
         true,
     );
 
@@ -310,8 +310,8 @@ fn size_update_after_removing_node_doesnt_corrupt() {
     std::fs::create_dir_all(&child_b).unwrap();
     std::fs::create_dir_all(&child_c).unwrap();
 
-    let mut tree = cache_explorer::tree::state::TreeState::new(
-        cache_explorer::config::SortField::Size,
+    let mut tree = ccmd::tree::state::TreeState::new(
+        ccmd::config::SortField::Size,
         true,
     );
 
@@ -344,15 +344,15 @@ fn async_expand_returns_children_with_zero_size() {
     std::fs::create_dir_all(tmp.path().join("sub2")).unwrap();
 
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = cache_explorer::scanner::start(result_tx);
+    let scan_tx = ccmd::scanner::start(result_tx);
 
     scan_tx
-        .send(cache_explorer::scanner::ScanRequest::ExpandNode(tmp.path().to_path_buf()))
+        .send(ccmd::scanner::ScanRequest::ExpandNode(tmp.path().to_path_buf()))
         .unwrap();
 
     let result = result_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     match result {
-        cache_explorer::scanner::ScanResult::ChildrenScanned(_, children) => {
+        ccmd::scanner::ScanResult::ChildrenScanned(_, children) => {
             assert_eq!(children.len(), 2);
             // Small dirs get instant sizes via quick_size
             let sub1 = children.iter().find(|c| c.path == tmp.path().join("sub1")).unwrap();
@@ -367,24 +367,24 @@ fn scanner_expand_and_size_update_full_cycle() {
     let tmp = tempfile::tempdir().unwrap();
     create_hf_cache(tmp.path());
 
-    let mut tree = cache_explorer::tree::state::TreeState::new(
-        cache_explorer::config::SortField::Size,
+    let mut tree = ccmd::tree::state::TreeState::new(
+        ccmd::config::SortField::Size,
         true,
     );
-    tree.set_roots(vec![cache_explorer::tree::node::TreeNode::root(
+    tree.set_roots(vec![ccmd::tree::node::TreeNode::root(
         tmp.path().to_path_buf(),
     )]);
     tree.expanded.insert(0);
 
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = cache_explorer::scanner::start(result_tx);
+    let scan_tx = ccmd::scanner::start(result_tx);
 
     scan_tx
-        .send(cache_explorer::scanner::ScanRequest::ExpandNode(tmp.path().to_path_buf()))
+        .send(ccmd::scanner::ScanRequest::ExpandNode(tmp.path().to_path_buf()))
         .unwrap();
 
     let result = result_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-    if let cache_explorer::scanner::ScanResult::ChildrenScanned(parent_path, children) = result {
+    if let ccmd::scanner::ScanResult::ChildrenScanned(parent_path, children) = result {
         let parent_idx = tree.nodes.iter().position(|n| n.path == parent_path).unwrap();
         tree.insert_children(parent_idx, children);
         assert!(tree.nodes.len() > 1);
@@ -392,7 +392,7 @@ fn scanner_expand_and_size_update_full_cycle() {
         // Small dirs get instant sizes via quick_size, large ones come via SizeUpdated
         // Drain any remaining size updates
         while let Ok(result) = result_rx.recv_timeout(Duration::from_secs(2)) {
-            if let cache_explorer::scanner::ScanResult::SizeUpdated(path, size) = result {
+            if let ccmd::scanner::ScanResult::SizeUpdated(path, size) = result {
                 if let Some(node) = tree.nodes.iter_mut().find(|n| n.path == path) {
                     node.size = size;
                 }
@@ -416,8 +416,8 @@ fn expand_is_correct_after_sort_reorder() {
     std::fs::create_dir_all(&child_b).unwrap();
     std::fs::create_dir_all(child_a.join("nested")).unwrap();
 
-    let mut tree = cache_explorer::tree::state::TreeState::new(
-        cache_explorer::config::SortField::Size,
+    let mut tree = ccmd::tree::state::TreeState::new(
+        ccmd::config::SortField::Size,
         true, // desc
     );
     tree.set_roots(vec![make_test_node_with_path("root", root_path.clone(), 0, None)]);
@@ -466,15 +466,15 @@ fn make_test_node(
     depth: u16,
     parent: Option<usize>,
     has_children: bool,
-) -> cache_explorer::tree::node::TreeNode {
-    cache_explorer::tree::node::TreeNode {
+) -> ccmd::tree::node::TreeNode {
+    ccmd::tree::node::TreeNode {
         path: std::path::PathBuf::from(format!("/test/{name}")),
         name: name.to_string(),
         size: 0,
         depth,
         parent,
         has_children,
-        kind: cache_explorer::tree::node::CacheKind::Unknown,
+        kind: ccmd::tree::node::CacheKind::Unknown,
         last_modified: None,
         is_root: depth == 0,
         children_loaded: false,
@@ -486,15 +486,15 @@ fn make_test_node_with_path(
     path: std::path::PathBuf,
     depth: u16,
     parent: Option<usize>,
-) -> cache_explorer::tree::node::TreeNode {
-    cache_explorer::tree::node::TreeNode {
+) -> ccmd::tree::node::TreeNode {
+    ccmd::tree::node::TreeNode {
         path,
         name: name.to_string(),
         size: 0,
         depth,
         parent,
         has_children: true,
-        kind: cache_explorer::tree::node::CacheKind::Unknown,
+        kind: ccmd::tree::node::CacheKind::Unknown,
         last_modified: None,
         is_root: depth == 0,
         children_loaded: false,

@@ -1,8 +1,8 @@
 [package]
-name = "cache-explorer"
+name = "ccmd"
 version = "0.1.0"
 edition = "2021"
-description = "A TUI for browsing and managing cache directories"
+description = "Cache Commander — a TUI for browsing and managing cache directories"
 license = "MIT"
 
 [dependencies]

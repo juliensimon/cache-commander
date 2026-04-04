@@ -266,13 +266,13 @@ impl App {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1), // top bar
+                Constraint::Length(5), // banner
                 Constraint::Min(0),   // main area
                 Constraint::Length(1), // bottom bar
             ])
             .split(f.area());
 
-        self.render_top_bar(f, chunks[0]);
+        self.render_banner(f, chunks[0]);
         self.render_main(f, chunks[1]);
         self.render_bottom_bar(f, chunks[2]);
 
@@ -293,7 +293,7 @@ impl App {
         }
     }
 
-    fn render_top_bar(&self, f: &mut Frame, area: Rect) {
+    fn render_banner(&self, f: &mut Frame, area: Rect) {
         let total_size: u64 = self
             .tree
             .nodes
@@ -315,28 +315,40 @@ impl App {
             "scanning...".to_string()
         };
 
-        let left = Span::styled(" cache-explorer", crate::ui::theme::TITLE);
-
-        let right_text = format!(
-            "{} total across {} root{}  │  Sort: {} {}  │  ? help ",
+        let stats = format!(
+            "{}  │  {} root{}  │  sort: {} {}  │  ? help",
             size_str,
             roots_count,
             if roots_count == 1 { "" } else { "s" },
             self.tree.sort_by.label(),
             if self.tree.sort_desc { "↓" } else { "↑" },
         );
-        let right = Span::styled(right_text, crate::ui::theme::HEADER);
 
-        // Pad between left and right
-        let pad_len = (area.width as usize)
-            .saturating_sub(16 + right.width());
-        let padding = Span::raw(" ".repeat(pad_len));
+        use crate::ui::theme;
 
-        let line = Line::from(vec![left, padding, right]);
-        let bar = Paragraph::new(line).style(
-            ratatui::style::Style::default().bg(ratatui::style::Color::Rgb(30, 30, 50)),
+        let banner_lines = vec![
+            Line::from(vec![
+                Span::styled("  ╔═╗╔═╗╔╦╗╔╦╗ ", theme::TITLE),
+                Span::styled("", theme::DIM),
+            ]),
+            Line::from(vec![
+                Span::styled("  ║  ║  ║║║ ║║  ", theme::TITLE),
+                Span::styled("cache commander", theme::DIM),
+            ]),
+            Line::from(vec![
+                Span::styled("  ╚═╝╚═╝╩ ╩═╩╝  ", theme::TITLE),
+                Span::styled(&stats, theme::HEADER),
+            ]),
+            Line::from(Span::styled(
+                format!("  {}", "─".repeat(area.width.saturating_sub(3) as usize)),
+                theme::BORDER,
+            )),
+        ];
+
+        let banner = Paragraph::new(banner_lines).style(
+            ratatui::style::Style::default().bg(ratatui::style::Color::Rgb(15, 15, 26)),
         );
-        f.render_widget(bar, area);
+        f.render_widget(banner, area);
     }
 
     fn render_main(&mut self, f: &mut Frame, area: Rect) {

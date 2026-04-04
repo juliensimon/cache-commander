@@ -4,7 +4,7 @@ use serde::Deserialize;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(name = "cache-explorer", version, about = "Browse and manage cache directories")]
+#[command(name = "ccmd", version, about = "Cache Commander — browse and manage cache directories")]
 pub struct Cli {
     /// Cache root directories to scan (can be specified multiple times)
     #[arg(long = "root", short = 'r')]
@@ -120,7 +120,7 @@ impl Config {
     }
 
     fn load_from_file() -> Option<Self> {
-        let proj = ProjectDirs::from("", "", "cache-explorer")?;
+        let proj = ProjectDirs::from("", "", "ccmd")?;
         let config_path = proj.config_dir().join("config.toml");
         let content = std::fs::read_to_string(config_path).ok()?;
         toml::from_str(&content).ok()
