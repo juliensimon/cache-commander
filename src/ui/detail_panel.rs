@@ -9,7 +9,13 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 use std::time::SystemTime;
 
-pub fn render(f: &mut Frame, area: Rect, tree: &TreeState) {
+pub fn render(
+    f: &mut Frame,
+    area: Rect,
+    tree: &TreeState,
+    vuln_results: &std::collections::HashMap<std::path::PathBuf, crate::security::SecurityInfo>,
+    version_results: &std::collections::HashMap<std::path::PathBuf, crate::security::VersionInfo>,
+) {
     let node = match tree.selected_node() {
         Some(n) => n,
         None => {
@@ -107,6 +113,48 @@ pub fn render(f: &mut Frame, area: Rect, tree: &TreeState) {
         format!("{} {}", safety.icon(), safety.label()),
         safety_style,
     )));
+
+    // Vulnerabilities
+    if let Some(sec) = vuln_results.get(&node.path) {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("VULNERABILITIES ({})", sec.vulns.len()),
+            theme::DANGER,
+        )));
+        for vuln in &sec.vulns {
+            let sev = vuln.severity.as_deref().unwrap_or("?");
+            lines.push(Line::from(Span::styled(
+                format!("  ⚠ {} ({})", vuln.id, sev),
+                theme::DANGER,
+            )));
+            if !vuln.summary.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    format!("    {}", vuln.summary),
+                    theme::DIM,
+                )));
+            }
+        }
+    }
+
+    // Version info
+    if let Some(ver) = version_results.get(&node.path) {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("VERSION", theme::DIM)));
+        lines.push(Line::from(vec![
+            Span::styled("Current  ", theme::DIM),
+            Span::styled(&ver.current, theme::NORMAL),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("Latest   ", theme::DIM),
+            Span::styled(&ver.latest, if ver.is_outdated { theme::CAUTION } else { theme::SAFE }),
+        ]));
+        if ver.is_outdated {
+            lines.push(Line::from(Span::styled(
+                "  ↓ Update available",
+                theme::CAUTION,
+            )));
+        }
+    }
 
     let paragraph = Paragraph::new(lines);
     f.render_widget(paragraph, area);

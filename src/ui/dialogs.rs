@@ -108,6 +108,11 @@ pub fn render_help(f: &mut Frame) {
         ("R", "Refresh all"),
         ("/", "Search / filter"),
         ("Esc", "Clear filter / cancel"),
+        ("", ""),
+        ("v", "Scan selected for CVEs"),
+        ("V", "Scan all for CVEs"),
+        ("o", "Check selected for updates"),
+        ("O", "Check all for updates"),
         ("?", "Toggle help"),
         ("q", "Quit"),
     ];

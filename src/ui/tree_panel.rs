@@ -6,7 +6,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use ratatui::Frame;
 
-pub fn render(f: &mut Frame, area: Rect, tree: &TreeState) {
+pub fn render(
+    f: &mut Frame,
+    area: Rect,
+    tree: &TreeState,
+    node_status: &std::collections::HashMap<std::path::PathBuf, crate::security::NodeStatus>,
+) {
     let block = Block::default()
         .borders(Borders::RIGHT)
         .border_style(theme::BORDER);
@@ -49,10 +54,22 @@ pub fn render(f: &mut Frame, area: Rect, tree: &TreeState) {
 
         // Name (potentially with marker)
         let marker = if is_marked { "● " } else { "" };
+
+        // Status icon based on vuln/outdated flags
+        let status = node_status.get(&node.path);
+        let status_icon = status
+            .map(|s| match (s.has_vuln, s.has_outdated) {
+                (true, true) => "⚠↓",
+                (true, false) => "⚠ ",
+                (false, true) => "↓ ",
+                (false, false) => "",
+            })
+            .unwrap_or("");
+
         let name = &node.name;
 
         // Calculate available space for name
-        let prefix_len = indent.len() + arrow.len() + marker.len();
+        let prefix_len = indent.len() + arrow.len() + marker.len() + status_icon.len();
         let size_len = size_str.len() + 1; // +1 for padding
         let available = width.saturating_sub(prefix_len + size_len + 1);
         let truncated_name = if name.len() > available {
@@ -79,8 +96,19 @@ pub fn render(f: &mut Frame, area: Rect, tree: &TreeState) {
             }
         };
 
+        let icon_style = if let Some(s) = status {
+            if s.has_vuln {
+                theme::DANGER
+            } else {
+                theme::CAUTION
+            }
+        } else {
+            style
+        };
+
         let line = Line::from(vec![
             Span::styled(format!("{indent}{arrow}{marker}"), style),
+            Span::styled(status_icon, if is_selected { style } else { icon_style }),
             Span::styled(truncated_name, style),
             Span::styled(padding, style),
             Span::styled(format!("{size_str} "), if is_selected { style } else { theme::SIZE }),

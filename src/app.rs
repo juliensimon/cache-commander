@@ -502,8 +502,8 @@ impl App {
         let viewport_height = chunks[0].height as usize;
         self.tree.adjust_scroll(viewport_height);
 
-        tree_panel::render(f, chunks[0], &self.tree);
-        detail_panel::render(f, chunks[1], &self.tree);
+        tree_panel::render(f, chunks[0], &self.tree, &self.node_status);
+        detail_panel::render(f, chunks[1], &self.tree, &self.vuln_results, &self.version_results);
     }
 
     fn render_bottom_bar(&self, f: &mut Frame, area: Rect) {
