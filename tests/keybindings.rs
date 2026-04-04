@@ -220,8 +220,16 @@ fn key_space_unmarks() {
 }
 
 #[test]
-fn key_d_enters_delete_mode_with_confirm() {
+fn key_d_does_nothing_without_marks() {
     let mut app = test_app();
+    app.process_key(key(KeyCode::Char('d')));
+    assert_eq!(app.mode, AppMode::Normal, "d should do nothing when nothing is marked");
+}
+
+#[test]
+fn key_d_enters_delete_mode_with_marked_items() {
+    let mut app = test_app();
+    app.process_key(key(KeyCode::Char(' '))); // mark first
     app.process_key(key(KeyCode::Char('d')));
     assert_eq!(app.mode, AppMode::Deleting);
 }
@@ -255,7 +263,8 @@ fn key_d_without_confirm_deletes_immediately() {
         children_loaded: false,
     }]);
 
-    app.process_key(key(KeyCode::Char('d')));
+    app.process_key(key(KeyCode::Char(' '))); // mark it
+    app.process_key(key(KeyCode::Char('d'))); // delete marked
     assert_eq!(app.mode, AppMode::Normal);
     assert!(!dir.exists(), "Directory should be deleted");
 }
@@ -263,8 +272,8 @@ fn key_d_without_confirm_deletes_immediately() {
 #[test]
 fn key_shift_d_enters_delete_mode_with_marked_items() {
     let mut app = test_app();
-    app.tree.marked.insert(0);
-    app.tree.marked.insert(1);
+    app.process_key(key(KeyCode::Char(' '))); // mark first
+    app.process_key(key(KeyCode::Char(' '))); // mark second
     app.process_key(key(KeyCode::Char('D')));
     assert_eq!(app.mode, AppMode::Deleting);
 }
@@ -305,6 +314,7 @@ fn delete_mode_y_confirms() {
         children_loaded: false,
     }]);
 
+    app.process_key(key(KeyCode::Char(' '))); // mark it
     app.process_key(key(KeyCode::Char('d'))); // enter delete mode
     assert_eq!(app.mode, AppMode::Deleting);
 
@@ -316,6 +326,7 @@ fn delete_mode_y_confirms() {
 #[test]
 fn delete_mode_n_cancels() {
     let mut app = test_app();
+    app.process_key(key(KeyCode::Char(' '))); // mark
     app.process_key(key(KeyCode::Char('d')));
     assert_eq!(app.mode, AppMode::Deleting);
 
@@ -327,6 +338,7 @@ fn delete_mode_n_cancels() {
 #[test]
 fn delete_mode_esc_cancels() {
     let mut app = test_app();
+    app.process_key(key(KeyCode::Char(' '))); // mark
     app.process_key(key(KeyCode::Char('d')));
     app.process_key(key(KeyCode::Esc));
     assert_eq!(app.mode, AppMode::Normal);
@@ -673,13 +685,15 @@ fn normal_keys_dont_work_in_help_mode() {
 #[test]
 fn normal_keys_dont_work_in_delete_mode() {
     let mut app = test_app();
+    app.process_key(key(KeyCode::Char(' '))); // mark first, advances to 1
     app.process_key(key(KeyCode::Char('d')));
     assert_eq!(app.mode, AppMode::Deleting);
 
-    // 'j' should do nothing
+    let selected_before = app.tree.selected;
+    // 'j' should do nothing in delete mode
     app.process_key(key(KeyCode::Char('j')));
     assert_eq!(app.mode, AppMode::Deleting);
-    assert_eq!(app.tree.selected, 0);
+    assert_eq!(app.tree.selected, selected_before);
 }
 
 // === Refresh ===

@@ -125,17 +125,7 @@ impl App {
             KeyCode::Char('g') => self.tree.go_top(),
             KeyCode::Char('G') => self.tree.go_bottom(),
             KeyCode::Char(' ') => self.tree.toggle_mark(),
-            KeyCode::Char('d') => {
-                if let Some(idx) = self.tree.selected_node_index() {
-                    self.delete_candidates = vec![self.tree.nodes[idx].path.clone()];
-                    if self.config.confirm_delete {
-                        self.mode = AppMode::Deleting;
-                    } else {
-                        self.perform_delete();
-                    }
-                }
-            }
-            KeyCode::Char('D') => {
+            KeyCode::Char('d') | KeyCode::Char('D') => {
                 if !self.tree.marked.is_empty() {
                     self.delete_candidates = self.tree.marked.iter()
                         .filter_map(|&idx| self.tree.nodes.get(idx).map(|n| n.path.clone()))
@@ -385,6 +375,13 @@ impl App {
     }
 
     fn render_bottom_bar(&self, f: &mut Frame, area: Rect) {
+        let marked_count = self.tree.marked.len();
+        let marked_hint = if marked_count > 0 {
+            format!(" [{marked_count} marked]")
+        } else {
+            String::new()
+        };
+
         let line = if self.mode == AppMode::Filtering {
             Line::from(vec![
                 Span::styled(" /", crate::ui::theme::KEY),
@@ -402,14 +399,15 @@ impl App {
                 Span::styled(" navigate  ", crate::ui::theme::NORMAL),
                 Span::styled("←→", crate::ui::theme::KEY),
                 Span::styled(" expand  ", crate::ui::theme::NORMAL),
+                Span::styled("Space", crate::ui::theme::KEY),
+                Span::styled(" mark  ", crate::ui::theme::NORMAL),
                 Span::styled("d", crate::ui::theme::KEY),
-                Span::styled(" delete  ", crate::ui::theme::NORMAL),
+                Span::styled(" delete marked  ", crate::ui::theme::NORMAL),
                 Span::styled("s", crate::ui::theme::KEY),
                 Span::styled(" sort  ", crate::ui::theme::NORMAL),
-                Span::styled("r", crate::ui::theme::KEY),
-                Span::styled(" refresh  ", crate::ui::theme::NORMAL),
                 Span::styled("/", crate::ui::theme::KEY),
-                Span::styled(" search", crate::ui::theme::NORMAL),
+                Span::styled(" search  ", crate::ui::theme::NORMAL),
+                Span::styled(&marked_hint, crate::ui::theme::CAUTION),
             ])
         };
 
