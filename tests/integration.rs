@@ -516,3 +516,33 @@ fn discover_packages_finds_uv_dist_info() {
     assert!(names.contains(&"requests"), "Should find requests: {:?}", names);
     assert_eq!(packages.len(), 2);
 }
+
+#[test]
+fn osv_query_finds_urllib3_vulns() {
+    // This test hits the real OSV.dev API
+    let packages = vec![ccmd::providers::PackageId {
+        ecosystem: "PyPI",
+        name: "urllib3".to_string(),
+        version: "1.26.5".to_string(),
+    }];
+    
+    let query = ccmd::security::osv::build_query(&packages);
+    eprintln!("Query: {}", query);
+    
+    match ccmd::security::osv::query_osv(&packages) {
+        Ok(resp) => {
+            eprintln!("Results: {} queries returned", resp.results.len());
+            assert_eq!(resp.results.len(), 1);
+            let vulns = &resp.results[0].vulns;
+            eprintln!("Vulns found: {}", vulns.len());
+            for v in vulns {
+                eprintln!("  {} - {:?}", v.id, v.summary);
+            }
+            assert!(vulns.len() > 0, "urllib3 1.26.5 should have known vulns");
+        }
+        Err(e) => {
+            eprintln!("OSV query failed: {}", e);
+            // Don't fail the test if network is unavailable
+        }
+    }
+}

@@ -25,7 +25,9 @@ pub enum ScanResult {
 }
 
 /// Walk a set of root paths to find all identifiable packages.
+/// Deduplicates by (ecosystem, name, version) — each unique package is returned once.
 pub fn discover_packages(roots: &[PathBuf]) -> Vec<(PathBuf, crate::providers::PackageId)> {
+    let mut seen = std::collections::HashSet::new();
     let mut packages = Vec::new();
     for root in roots {
         if !root.exists() {
@@ -38,7 +40,10 @@ pub fn discover_packages(roots: &[PathBuf]) -> Vec<(PathBuf, crate::providers::P
             let path = entry.path();
             let kind = crate::providers::detect(&path);
             if let Some(id) = crate::providers::package_id(kind, &path) {
-                packages.push((path.to_path_buf(), id));
+                let key = (id.ecosystem, id.name.clone(), id.version.clone());
+                if seen.insert(key) {
+                    packages.push((path.to_path_buf(), id));
+                }
             }
         }
     }
