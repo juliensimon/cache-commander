@@ -1,6 +1,11 @@
 # ccmd — Cache Commander
 
-A terminal UI for exploring, auditing, and cleaning cache directories on macOS and Linux.
+[![CI](https://github.com/juliensimon/cache-commander/actions/workflows/ci.yml/badge.svg)](https://github.com/juliensimon/cache-commander/actions/workflows/ci.yml)
+[![Release](https://github.com/juliensimon/cache-commander/actions/workflows/release.yml/badge.svg)](https://github.com/juliensimon/cache-commander/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![GitHub release](https://img.shields.io/github/v/release/juliensimon/cache-commander)](https://github.com/juliensimon/cache-commander/releases)
+
+A terminal UI (TUI) for exploring, auditing, and cleaning developer cache directories on macOS and Linux. Scan cached packages for known CVEs, find outdated dependencies, and reclaim disk space — all from one tool.
 
 Developer machines accumulate tens of gigabytes of invisible cache data — ML models, package archives, build artifacts, downloaded bottles. `ccmd` makes it all visible, scannable for vulnerabilities, and safely deletable.
 
@@ -244,6 +249,14 @@ src/
 - **Flat arena tree** — avoids recursive structs and borrow checker issues
 - **Background scanning** — UI stays responsive during API calls and directory walks
 
+## Contributing
+
+Contributions are welcome! Please open an issue or submit a pull request on [GitHub](https://github.com/juliensimon/cache-commander).
+
+## Author
+
+**Julien Simon** — [julien@julien.org](mailto:julien@julien.org) — [github.com/juliensimon](https://github.com/juliensimon)
+
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE) for details.
