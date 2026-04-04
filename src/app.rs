@@ -124,7 +124,14 @@ impl App {
             }
             KeyCode::Char('g') => self.tree.go_top(),
             KeyCode::Char('G') => self.tree.go_bottom(),
-            KeyCode::Char(' ') => self.tree.toggle_mark(),
+            KeyCode::Char(' ') => {
+                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    self.tree.marked.clear();
+                } else {
+                    self.tree.toggle_mark();
+                }
+            }
+            KeyCode::Char('u') => self.tree.marked.clear(),
             KeyCode::Char('d') | KeyCode::Char('D') => {
                 if !self.tree.marked.is_empty() {
                     self.delete_candidates = self.tree.marked.iter()

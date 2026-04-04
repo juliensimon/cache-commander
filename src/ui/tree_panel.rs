@@ -3,7 +3,7 @@ use crate::ui::theme;
 use humansize::{format_size, BINARY};
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use ratatui::Frame;
 
 pub fn render(f: &mut Frame, area: Rect, tree: &TreeState) {
@@ -91,4 +91,14 @@ pub fn render(f: &mut Frame, area: Rect, tree: &TreeState) {
 
     let paragraph = Paragraph::new(lines);
     f.render_widget(paragraph, inner);
+
+    // Scrollbar
+    if tree.visible.len() > height {
+        let mut scrollbar_state = ScrollbarState::new(tree.visible.len())
+            .position(tree.scroll_offset);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .thumb_style(ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray))
+            .track_style(ratatui::style::Style::default().fg(ratatui::style::Color::Rgb(30, 30, 50)));
+        f.render_stateful_widget(scrollbar, inner, &mut scrollbar_state);
+    }
 }

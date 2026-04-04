@@ -101,6 +101,7 @@ pub fn render_help(f: &mut Frame) {
         ("G", "Jump to bottom"),
         ("", ""),
         ("Space", "Mark / unmark item"),
+        ("u", "Unmark all"),
         ("d/D", "Delete marked items"),
         ("s", "Cycle sort (size/name/modified)"),
         ("r", "Refresh selected"),
