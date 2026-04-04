@@ -121,22 +121,20 @@ impl App {
         if (self.auto_vulnscan_pending || self.auto_versioncheck_pending)
             && !self.tree.nodes.is_empty()
         {
-            let packages = self.collect_all_packages();
-            if !packages.is_empty() {
-                if self.auto_vulnscan_pending {
-                    self.auto_vulnscan_pending = false;
-                    self.vulnscan_in_progress = true;
-                    let _ = self
-                        .scan_tx
-                        .send(crate::scanner::ScanRequest::ScanVulns(packages.clone()));
-                }
-                if self.auto_versioncheck_pending {
-                    self.auto_versioncheck_pending = false;
-                    self.versioncheck_in_progress = true;
-                    let _ = self
-                        .scan_tx
-                        .send(crate::scanner::ScanRequest::CheckVersions(packages));
-                }
+            let roots = self.config.roots.clone();
+            if self.auto_vulnscan_pending {
+                self.auto_vulnscan_pending = false;
+                self.vulnscan_in_progress = true;
+                let _ = self
+                    .scan_tx
+                    .send(crate::scanner::ScanRequest::ScanVulns(roots.clone()));
+            }
+            if self.auto_versioncheck_pending {
+                self.auto_versioncheck_pending = false;
+                self.versioncheck_in_progress = true;
+                let _ = self
+                    .scan_tx
+                    .send(crate::scanner::ScanRequest::CheckVersions(roots));
             }
         }
     }
@@ -196,32 +194,30 @@ impl App {
             }
             KeyCode::Char('u') => self.tree.marked.clear(),
             KeyCode::Char('v') => {
-                let packages = self.collect_packages_for_selected();
-                if !packages.is_empty() {
+                if let Some(idx) = self.tree.selected_node_index() {
                     self.vulnscan_in_progress = true;
-                    let _ = self.scan_tx.send(crate::scanner::ScanRequest::ScanVulns(packages));
+                    let path = self.tree.nodes[idx].path.clone();
+                    let _ = self.scan_tx.send(crate::scanner::ScanRequest::ScanVulns(vec![path]));
                 }
             }
             KeyCode::Char('V') => {
-                let packages = self.collect_all_packages();
-                if !packages.is_empty() {
-                    self.vulnscan_in_progress = true;
-                    let _ = self.scan_tx.send(crate::scanner::ScanRequest::ScanVulns(packages));
-                }
+                self.vulnscan_in_progress = true;
+                let _ = self.scan_tx.send(crate::scanner::ScanRequest::ScanVulns(
+                    self.config.roots.clone(),
+                ));
             }
             KeyCode::Char('o') => {
-                let packages = self.collect_packages_for_selected();
-                if !packages.is_empty() {
+                if let Some(idx) = self.tree.selected_node_index() {
                     self.versioncheck_in_progress = true;
-                    let _ = self.scan_tx.send(crate::scanner::ScanRequest::CheckVersions(packages));
+                    let path = self.tree.nodes[idx].path.clone();
+                    let _ = self.scan_tx.send(crate::scanner::ScanRequest::CheckVersions(vec![path]));
                 }
             }
             KeyCode::Char('O') => {
-                let packages = self.collect_all_packages();
-                if !packages.is_empty() {
-                    self.versioncheck_in_progress = true;
-                    let _ = self.scan_tx.send(crate::scanner::ScanRequest::CheckVersions(packages));
-                }
+                self.versioncheck_in_progress = true;
+                let _ = self.scan_tx.send(crate::scanner::ScanRequest::CheckVersions(
+                    self.config.roots.clone(),
+                ));
             }
             KeyCode::Char('d') | KeyCode::Char('D') => {
                 if !self.tree.marked.is_empty() {
@@ -350,30 +346,6 @@ impl App {
         self.delete_candidates.clear();
     }
 
-    fn collect_packages_for_selected(&self) -> Vec<(PathBuf, crate::providers::PackageId)> {
-        let mut packages = Vec::new();
-        if let Some(idx) = self.tree.selected_node_index() {
-            let end = find_subtree_end(&self.tree.nodes, idx);
-            for i in idx..end {
-                let node = &self.tree.nodes[i];
-                if let Some(id) = crate::providers::package_id(node.kind, &node.path) {
-                    packages.push((node.path.clone(), id));
-                }
-            }
-        }
-        packages
-    }
-
-    fn collect_all_packages(&self) -> Vec<(PathBuf, crate::providers::PackageId)> {
-        self.tree
-            .nodes
-            .iter()
-            .filter_map(|node| {
-                crate::providers::package_id(node.kind, &node.path)
-                    .map(|id| (node.path.clone(), id))
-            })
-            .collect()
-    }
 
     pub fn recompute_node_status(&mut self) {
         self.node_status.clear();

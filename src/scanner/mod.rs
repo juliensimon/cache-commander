@@ -8,18 +8,39 @@ use std::sync::mpsc;
 pub enum ScanRequest {
     ScanRoots(Vec<PathBuf>),
     ExpandNode(PathBuf),
-    ScanVulns(Vec<(std::path::PathBuf, crate::providers::PackageId)>),
-    CheckVersions(Vec<(std::path::PathBuf, crate::providers::PackageId)>),
+    /// Walk given paths to discover packages, then query OSV.dev
+    ScanVulns(Vec<PathBuf>),
+    /// Walk given paths to discover packages, then query registries
+    CheckVersions(Vec<PathBuf>),
 }
 
 pub enum ScanResult {
     RootsScanned(Vec<TreeNode>),
-    /// Children identified by parent path (not index — indices shift)
     ChildrenScanned(PathBuf, Vec<TreeNode>),
-    /// Size update identified by path (safe even after tree mutations)
     SizeUpdated(PathBuf, u64),
-    VulnsScanned(std::collections::HashMap<std::path::PathBuf, crate::security::SecurityInfo>),
-    VersionsChecked(std::collections::HashMap<std::path::PathBuf, crate::security::VersionInfo>),
+    VulnsScanned(std::collections::HashMap<PathBuf, crate::security::SecurityInfo>),
+    VersionsChecked(std::collections::HashMap<PathBuf, crate::security::VersionInfo>),
+}
+
+/// Walk a set of root paths to find all identifiable packages.
+fn discover_packages(roots: &[PathBuf]) -> Vec<(PathBuf, crate::providers::PackageId)> {
+    let mut packages = Vec::new();
+    for root in roots {
+        if !root.exists() {
+            continue;
+        }
+        let walk = jwalk::WalkDir::new(root)
+            .skip_hidden(false)
+            .max_depth(6);
+        for entry in walk.into_iter().filter_map(|e| e.ok()) {
+            let path = entry.path();
+            let kind = crate::providers::detect(&path);
+            if let Some(id) = crate::providers::package_id(kind, &path) {
+                packages.push((path.to_path_buf(), id));
+            }
+        }
+    }
+    packages
 }
 
 pub fn start(
@@ -31,7 +52,6 @@ pub fn start(
         while let Ok(request) = request_rx.recv() {
             match request {
                 ScanRequest::ScanRoots(roots) => {
-                    // Send roots immediately with size=0
                     let mut nodes = Vec::new();
                     for root in &roots {
                         if !root.exists() {
@@ -46,8 +66,6 @@ pub fn start(
                     }
                     let _ = result_tx.send(ScanResult::RootsScanned(nodes));
 
-                    // Spawn a background thread for each root's size computation
-                    // so the scanner stays responsive to ExpandNode requests
                     for root in roots {
                         if !root.exists() {
                             continue;
@@ -59,22 +77,23 @@ pub fn start(
                         });
                     }
                 }
-                ScanRequest::ScanVulns(packages) => {
+                ScanRequest::ScanVulns(roots) => {
                     let tx = result_tx.clone();
                     std::thread::spawn(move || {
+                        let packages = discover_packages(&roots);
                         let results = crate::security::scan_vulns(&packages);
                         let _ = tx.send(ScanResult::VulnsScanned(results));
                     });
                 }
-                ScanRequest::CheckVersions(packages) => {
+                ScanRequest::CheckVersions(roots) => {
                     let tx = result_tx.clone();
                     std::thread::spawn(move || {
+                        let packages = discover_packages(&roots);
                         let results = crate::security::check_versions(&packages);
                         let _ = tx.send(ScanResult::VersionsChecked(results));
                     });
                 }
                 ScanRequest::ExpandNode(path) => {
-                    // Send children immediately with metadata but size=0
                     let children_paths = walker::list_children(&path);
                     let mut children: Vec<TreeNode> = children_paths
                         .iter()
@@ -95,8 +114,6 @@ pub fn start(
                         })
                         .collect();
 
-                    // Try quick_size for small dirs before sending children
-                    // This gives instant sizes for most entries
                     let mut deferred: Vec<PathBuf> = Vec::new();
                     for (i, child_path) in children_paths.iter().enumerate() {
                         if let Some(size) = walker::quick_size(child_path) {
@@ -109,7 +126,6 @@ pub fn start(
                     let _ = result_tx
                         .send(ScanResult::ChildrenScanned(path.clone(), children));
 
-                    // Only spawn threads for large dirs that need full walks
                     for child_path in deferred {
                         let tx = result_tx.clone();
                         std::thread::spawn(move || {
