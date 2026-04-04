@@ -154,6 +154,15 @@ pub fn package_id(kind: CacheKind, path: &Path) -> Option<PackageId> {
     }
 }
 
+pub fn upgrade_command(kind: CacheKind, name: &str, version: &str) -> Option<String> {
+    match kind {
+        CacheKind::Pip | CacheKind::Uv => Some(format!("pip install {name}>={version}")),
+        CacheKind::Npm => Some(format!("npm install {name}@{version}")),
+        CacheKind::Cargo => Some(format!("cargo update -p {name}")),
+        _ => None,
+    }
+}
+
 /// Get safety level for deletion.
 pub fn safety(kind: CacheKind, _path: &Path) -> SafetyLevel {
     match kind {
@@ -293,5 +302,42 @@ mod tests {
         assert_ne!(icons[0], icons[1]);
         assert_ne!(icons[1], icons[2]);
         assert_ne!(icons[0], icons[2]);
+    }
+
+    #[test]
+    fn upgrade_command_pip() {
+        assert_eq!(
+            upgrade_command(CacheKind::Pip, "requests", "2.32.0"),
+            Some("pip install requests>=2.32.0".to_string())
+        );
+    }
+
+    #[test]
+    fn upgrade_command_uv() {
+        assert_eq!(
+            upgrade_command(CacheKind::Uv, "flask", "3.1.0"),
+            Some("pip install flask>=3.1.0".to_string())
+        );
+    }
+
+    #[test]
+    fn upgrade_command_npm() {
+        assert_eq!(
+            upgrade_command(CacheKind::Npm, "express", "4.19.0"),
+            Some("npm install express@4.19.0".to_string())
+        );
+    }
+
+    #[test]
+    fn upgrade_command_cargo() {
+        assert_eq!(
+            upgrade_command(CacheKind::Cargo, "serde", "1.0.200"),
+            Some("cargo update -p serde".to_string())
+        );
+    }
+
+    #[test]
+    fn upgrade_command_unknown_returns_none() {
+        assert_eq!(upgrade_command(CacheKind::Unknown, "foo", "1.0"), None);
     }
 }

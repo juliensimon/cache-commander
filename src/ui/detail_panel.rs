@@ -136,6 +136,22 @@ pub fn render(
                     theme::DIM,
                 )));
             }
+            if let Some(fix) = &vuln.fix_version {
+                lines.push(Line::from(Span::styled(
+                    format!("    Fix: ≥{}", fix),
+                    theme::SAFE,
+                )));
+                if let Some(cmd) = crate::providers::upgrade_command(node.kind, &extract_package_name(&node.name), fix) {
+                    lines.push(Line::from(Span::styled(
+                        format!("    → {}", cmd),
+                        theme::DIM,
+                    )));
+                }
+            }
+            lines.push(Line::from(Span::styled(
+                format!("    osv.dev/vulnerability/{}", vuln.id),
+                theme::DIM,
+            )));
         }
     }
 
@@ -144,16 +160,54 @@ pub fn render(
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled("VERSION", theme::DIM)));
         lines.push(Line::from(vec![
-            Span::styled("Current  ", theme::DIM),
+            Span::styled("  Current  ", theme::DIM),
             Span::styled(&ver.current, theme::NORMAL),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("Latest   ", theme::DIM),
+            Span::styled("  →  ", theme::DIM),
             Span::styled(&ver.latest, if ver.is_outdated { theme::CAUTION } else { theme::SAFE }),
         ]));
         if ver.is_outdated {
             lines.push(Line::from(Span::styled(
                 "  ↓ Update available",
+                theme::CAUTION,
+            )));
+            if let Some(cmd) = crate::providers::upgrade_command(node.kind, &extract_package_name(&node.name), &ver.latest) {
+                lines.push(Line::from(Span::styled(
+                    format!("  → {}", cmd),
+                    theme::DIM,
+                )));
+            }
+        }
+    }
+
+    // Contextual delete hint
+    let has_vuln = vuln_results.contains_key(&node.path);
+    let has_outdated = version_results.get(&node.path).map_or(false, |v| v.is_outdated);
+    if has_vuln || has_outdated {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("ACTION", theme::DIM)));
+
+        if has_vuln {
+            if let Some(ver) = version_results.get(&node.path) {
+                if ver.latest != ver.current {
+                    lines.push(Line::from(Span::styled(
+                        format!("  ● Safe to delete — {} also available", ver.latest),
+                        theme::SAFE,
+                    )));
+                } else {
+                    lines.push(Line::from(Span::styled(
+                        "  ○ Delete to force re-download of patched version",
+                        theme::CAUTION,
+                    )));
+                }
+            } else {
+                lines.push(Line::from(Span::styled(
+                    "  ○ Delete to force re-download of patched version",
+                    theme::CAUTION,
+                )));
+            }
+        } else {
+            lines.push(Line::from(Span::styled(
+                "  ○ Delete to free space (outdated cached artifact)",
                 theme::CAUTION,
             )));
         }
@@ -178,4 +232,13 @@ fn format_elapsed(d: std::time::Duration) -> String {
     } else {
         format!("{} years ago", secs / (86400 * 365))
     }
+}
+
+fn extract_package_name(name: &str) -> String {
+    let stripped = if let Some(rest) = name.strip_prefix('[') {
+        rest.split_once("] ").map(|(_, n)| n).unwrap_or(name)
+    } else {
+        name
+    };
+    stripped.split_whitespace().next().unwrap_or(stripped).to_string()
 }
