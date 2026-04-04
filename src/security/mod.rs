@@ -10,6 +10,7 @@ pub struct Vulnerability {
     pub id: String,
     pub summary: String,
     pub severity: Option<String>,
+    pub fix_version: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -39,27 +40,76 @@ pub fn scan_vulns(packages: &[(PathBuf, PackageId)]) -> HashMap<PathBuf, Securit
     let ids: Vec<PackageId> = packages.iter().map(|(_, id)| id.clone()).collect();
     match osv::query_osv(&ids) {
         Ok(response) => {
+            let mut vuln_ids_to_fetch: Vec<String> = Vec::new();
+
             for (i, query_result) in response.results.iter().enumerate() {
                 if i >= packages.len() {
                     break;
                 }
                 if !query_result.vulns.is_empty() {
-                    let vulns = query_result
+                    let vulns: Vec<Vulnerability> = query_result
                         .vulns
                         .iter()
-                        .map(|v| Vulnerability {
-                            id: v.id.clone(),
-                            summary: v.summary.clone().unwrap_or_default(),
-                            severity: v.severity.first().map(|s| s.score.clone()),
+                        .map(|v| {
+                            if !vuln_ids_to_fetch.contains(&v.id) {
+                                vuln_ids_to_fetch.push(v.id.clone());
+                            }
+                            Vulnerability {
+                                id: v.id.clone(),
+                                summary: v.summary.clone().unwrap_or_default(),
+                                severity: v.severity.first().map(|s| s.score.clone()),
+                                fix_version: None,
+                            }
                         })
                         .collect();
                     results.insert(packages[i].0.clone(), SecurityInfo { vulns });
+                }
+            }
+
+            // Fetch fix versions from detail endpoint
+            let detail_cache = fetch_fix_versions(&vuln_ids_to_fetch);
+
+            // Backfill fix_version into results
+            for (path, info) in results.iter_mut() {
+                let pkg = packages.iter().find(|(p, _)| p == path).map(|(_, id)| id);
+                if let Some(pkg) = pkg {
+                    for vuln in &mut info.vulns {
+                        if let Some(detail) = detail_cache.get(&vuln.id) {
+                            vuln.fix_version = osv::extract_fix_version(detail, &pkg.name, pkg.ecosystem);
+                        }
+                    }
                 }
             }
         }
         Err(_) => {}
     }
     results
+}
+
+fn fetch_fix_versions(vuln_ids: &[String]) -> HashMap<String, osv::OsvVulnDetail> {
+    use std::sync::{Arc, Mutex};
+
+    let cache = Arc::new(Mutex::new(HashMap::new()));
+
+    for chunk in vuln_ids.chunks(20) {
+        let handles: Vec<_> = chunk
+            .iter()
+            .map(|id| {
+                let id = id.clone();
+                let cache = Arc::clone(&cache);
+                std::thread::spawn(move || {
+                    if let Ok(detail) = osv::fetch_vuln_detail(&id) {
+                        cache.lock().unwrap().insert(id, detail);
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            let _ = handle.join();
+        }
+    }
+
+    Arc::try_unwrap(cache).unwrap().into_inner().unwrap()
 }
 
 pub fn check_versions(packages: &[(PathBuf, PackageId)]) -> HashMap<PathBuf, VersionInfo> {

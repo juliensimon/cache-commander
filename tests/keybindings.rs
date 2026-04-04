@@ -823,6 +823,7 @@ fn vuln_propagates_to_ancestors() {
                 id: "CVE-2023-1234".into(),
                 summary: "test vuln".into(),
                 severity: Some("7.5".into()),
+                fix_version: None,
             }],
         },
     );
@@ -903,6 +904,7 @@ fn node_status_cleared_on_recompute() {
                 id: "CVE-2023-1234".into(),
                 summary: "test".into(),
                 severity: None,
+                fix_version: None,
             }],
         },
     );
