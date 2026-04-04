@@ -1,0 +1,20 @@
+[package]
+name = "cache-explorer"
+version = "0.1.0"
+edition = "2021"
+description = "A TUI for browsing and managing cache directories"
+license = "MIT"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+jwalk = "0.8"
+directories = "5"
+humansize = "2"
+chrono = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
