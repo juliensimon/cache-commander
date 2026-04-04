@@ -49,8 +49,11 @@ pub fn build_query(packages: &[crate::providers::PackageId]) -> String {
 
 pub fn query_osv(packages: &[crate::providers::PackageId]) -> Result<OsvResponse, String> {
     let body = build_query(packages);
-    let resp = ureq::post("https://api.osv.dev/v1/querybatch")
+    let resp = ureq::agent()
+        .post("https://api.osv.dev/v1/querybatch")
+        .timeout(std::time::Duration::from_secs(30))
         .set("Content-Type", "application/json")
+        .set("User-Agent", "ccmd/0.1 (https://github.com/ccmd)")
         .send_string(&body)
         .map_err(|e| format!("OSV request failed: {e}"))?;
     let text = resp.into_string().map_err(|e| format!("OSV read failed: {e}"))?;

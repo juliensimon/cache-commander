@@ -92,26 +92,26 @@ impl App {
                         node.size = size;
                     }
                 }
-                ScanResult::VulnsScanned(results) => {
+                ScanResult::VulnsScanned(scanned, results) => {
                     self.vuln_results.extend(results);
                     self.vulnscan_in_progress = false;
                     self.recompute_node_status();
-                    let count = self.vuln_results.values().map(|s| s.vulns.len()).sum::<usize>();
-                    self.status_msg = Some(if count > 0 {
-                        format!("Scan complete — {} vulnerabilit{} found", count, if count == 1 { "y" } else { "ies" })
+                    let vuln_count = self.vuln_results.values().map(|s| s.vulns.len()).sum::<usize>();
+                    self.status_msg = Some(if vuln_count > 0 {
+                        format!("Scanned {} packages — {} vulnerabilit{} found", scanned, vuln_count, if vuln_count == 1 { "y" } else { "ies" })
                     } else {
-                        "Scan complete — no vulnerabilities found".to_string()
+                        format!("Scanned {} packages — no vulnerabilities found", scanned)
                     });
                 }
-                ScanResult::VersionsChecked(results) => {
+                ScanResult::VersionsChecked(checked, results) => {
                     self.version_results.extend(results);
                     self.versioncheck_in_progress = false;
                     self.recompute_node_status();
                     let outdated = self.version_results.values().filter(|v| v.is_outdated).count();
                     self.status_msg = Some(if outdated > 0 {
-                        format!("Check complete — {} outdated package{}", outdated, if outdated == 1 { "" } else { "s" })
+                        format!("Checked {} packages — {} outdated", checked, outdated)
                     } else {
-                        "Check complete — all packages up to date".to_string()
+                        format!("Checked {} packages — all up to date", checked)
                     });
                 }
             }

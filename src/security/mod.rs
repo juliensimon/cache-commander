@@ -63,19 +63,37 @@ pub fn scan_vulns(packages: &[(PathBuf, PackageId)]) -> HashMap<PathBuf, Securit
 }
 
 pub fn check_versions(packages: &[(PathBuf, PackageId)]) -> HashMap<PathBuf, VersionInfo> {
-    let mut results = HashMap::new();
-    for (path, pkg) in packages {
-        if let Ok(Some(latest)) = registry::check_latest(pkg) {
-            let is_outdated = latest != pkg.version;
-            results.insert(
-                path.clone(),
-                VersionInfo {
-                    current: pkg.version.clone(),
-                    latest,
-                    is_outdated,
-                },
-            );
+    use std::sync::{Arc, Mutex};
+
+    let results = Arc::new(Mutex::new(HashMap::new()));
+
+    // Process in chunks of 8 for bounded parallelism
+    for chunk in packages.chunks(8) {
+        let handles: Vec<_> = chunk
+            .iter()
+            .map(|(path, pkg)| {
+                let path = path.clone();
+                let pkg = pkg.clone();
+                let results = Arc::clone(&results);
+                std::thread::spawn(move || {
+                    if let Ok(Some(latest)) = registry::check_latest(&pkg) {
+                        let is_outdated = latest != pkg.version;
+                        results.lock().unwrap().insert(
+                            path,
+                            VersionInfo {
+                                current: pkg.version.clone(),
+                                latest,
+                                is_outdated,
+                            },
+                        );
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            let _ = handle.join();
         }
     }
-    results
+    Arc::try_unwrap(results).unwrap().into_inner().unwrap()
 }

@@ -18,8 +18,10 @@ pub enum ScanResult {
     RootsScanned(Vec<TreeNode>),
     ChildrenScanned(PathBuf, Vec<TreeNode>),
     SizeUpdated(PathBuf, u64),
-    VulnsScanned(std::collections::HashMap<PathBuf, crate::security::SecurityInfo>),
-    VersionsChecked(std::collections::HashMap<PathBuf, crate::security::VersionInfo>),
+    /// (packages_scanned, results)
+    VulnsScanned(usize, std::collections::HashMap<PathBuf, crate::security::SecurityInfo>),
+    /// (packages_checked, results)
+    VersionsChecked(usize, std::collections::HashMap<PathBuf, crate::security::VersionInfo>),
 }
 
 /// Walk a set of root paths to find all identifiable packages.
@@ -81,16 +83,18 @@ pub fn start(
                     let tx = result_tx.clone();
                     std::thread::spawn(move || {
                         let packages = discover_packages(&roots);
+                        let count = packages.len();
                         let results = crate::security::scan_vulns(&packages);
-                        let _ = tx.send(ScanResult::VulnsScanned(results));
+                        let _ = tx.send(ScanResult::VulnsScanned(count, results));
                     });
                 }
                 ScanRequest::CheckVersions(roots) => {
                     let tx = result_tx.clone();
                     std::thread::spawn(move || {
                         let packages = discover_packages(&roots);
+                        let count = packages.len();
                         let results = crate::security::check_versions(&packages);
-                        let _ = tx.send(ScanResult::VersionsChecked(results));
+                        let _ = tx.send(ScanResult::VersionsChecked(count, results));
                     });
                 }
                 ScanRequest::ExpandNode(path) => {

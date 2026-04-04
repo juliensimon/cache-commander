@@ -21,7 +21,10 @@ pub fn check_latest(pkg: &crate::providers::PackageId) -> Result<Option<String>,
         _ => return Ok(None),
     };
 
-    let resp = ureq::get(&url)
+    let resp = ureq::agent()
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(10))
+        .set("User-Agent", "ccmd/0.1 (https://github.com/ccmd)")
         .call()
         .map_err(|e| format!("Registry request failed: {e}"))?;
     let text = resp.into_string().map_err(|e| format!("Registry read failed: {e}"))?;
