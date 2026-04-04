@@ -1,6 +1,7 @@
 use super::node::TreeNode;
 use crate::config::SortField;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FilterMode {
@@ -44,6 +45,7 @@ pub struct TreeState {
     pub filter: String,
     pub filter_mode: FilterMode,
     pub dimmed: HashSet<usize>,
+    node_status: HashMap<PathBuf, crate::security::NodeStatus>,
 }
 
 impl TreeState {
@@ -60,7 +62,14 @@ impl TreeState {
             filter: String::new(),
             filter_mode: FilterMode::None,
             dimmed: HashSet::new(),
+            node_status: HashMap::new(),
         }
+    }
+
+    /// Update the cached node_status and recompute dimmed set.
+    pub fn set_node_status(&mut self, status: &HashMap<PathBuf, crate::security::NodeStatus>) {
+        self.node_status = status.clone();
+        self.recompute_dimmed_internal();
     }
 
     pub fn set_roots(&mut self, roots: Vec<TreeNode>) {
@@ -86,6 +95,7 @@ impl TreeState {
         if !self.visible.is_empty() && self.selected >= self.visible.len() {
             self.selected = self.visible.len() - 1;
         }
+        self.recompute_dimmed_internal();
     }
 
     fn is_visible(&self, idx: usize, filter: &str) -> bool {
@@ -547,8 +557,13 @@ impl TreeState {
 
     pub fn recompute_dimmed(
         &mut self,
-        node_status: &std::collections::HashMap<std::path::PathBuf, crate::security::NodeStatus>,
+        node_status: &HashMap<PathBuf, crate::security::NodeStatus>,
     ) {
+        self.node_status = node_status.clone();
+        self.recompute_dimmed_internal();
+    }
+
+    fn recompute_dimmed_internal(&mut self) {
         self.dimmed.clear();
         if self.filter_mode == FilterMode::None {
             return;
@@ -556,7 +571,7 @@ impl TreeState {
         let mut matches_filter: HashSet<usize> = HashSet::new();
         for &idx in &self.visible {
             let node = &self.nodes[idx];
-            let status = node_status.get(&node.path);
+            let status = self.node_status.get(&node.path);
             let matches = match self.filter_mode {
                 FilterMode::None => true,
                 FilterMode::Vuln => status.map_or(false, |s| s.has_vuln),

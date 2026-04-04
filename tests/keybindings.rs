@@ -1120,3 +1120,41 @@ fn full_workflow_filter_mark_delete() {
     assert!(safe_dir.exists(), "safe-pkg should still exist");
     assert!(outdated_dir.exists(), "outdated-pkg should still exist");
 }
+
+#[test]
+fn dimmed_survives_expand_collapse() {
+    let mut app = test_app_with_children();
+    // visible: alpha(0), child-big(1), child-small(2), beta(3), gamma(4)
+
+    // Mark child-big as vulnerable, alpha as parent with vuln child
+    let child_big_path = app.tree.nodes[1].path.clone();
+    let alpha_path = app.tree.nodes[0].path.clone();
+    app.node_status.insert(
+        child_big_path,
+        ccmd::security::NodeStatus { has_vuln: true, has_outdated: false },
+    );
+    app.node_status.insert(
+        alpha_path,
+        ccmd::security::NodeStatus { has_vuln: true, has_outdated: false },
+    );
+
+    // Activate vuln filter
+    app.tree.filter_mode = ccmd::tree::state::FilterMode::Vuln;
+    app.tree.recompute_dimmed(&app.node_status);
+    assert!(app.tree.dimmed.contains(&2), "child-small should be dimmed before collapse");
+
+    // Collapse alpha — this calls recompute_visible internally
+    app.tree.selected = 0;
+    app.process_key(key(KeyCode::Char('h')));
+
+    // Expand alpha again
+    app.process_key(key(KeyCode::Char('l')));
+    app.tree.recompute_visible();
+
+    // Dimmed should still be populated after expand/collapse
+    // beta and gamma should still be dimmed (not vuln)
+    let beta_idx = app.tree.nodes.iter().position(|n| n.name == "beta").unwrap();
+    let gamma_idx = app.tree.nodes.iter().position(|n| n.name == "gamma").unwrap();
+    assert!(app.tree.dimmed.contains(&beta_idx), "beta should still be dimmed after expand");
+    assert!(app.tree.dimmed.contains(&gamma_idx), "gamma should still be dimmed after expand");
+}
