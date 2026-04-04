@@ -40,18 +40,31 @@ Developer machines accumulate tens of gigabytes of invisible cache data — ML m
 
 ## Install
 
+### Homebrew (macOS and Linux)
+
 ```bash
-cargo install --path .
+brew tap juliensimon/tap
+brew install ccmd
 ```
 
-Or build from source:
+### From crates.io
 
 ```bash
-git clone https://github.com/julsimon/ccmd
-cd ccmd
+cargo install ccmd
+```
+
+### From source
+
+```bash
+git clone https://github.com/juliensimon/cache-commander
+cd cache-commander
 cargo build --release
 ./target/release/ccmd
 ```
+
+### Prebuilt binaries
+
+Download from [GitHub Releases](https://github.com/juliensimon/cache-commander/releases) — available for macOS (x86_64, Apple Silicon) and Linux (x86_64, aarch64).
 
 ## Quick Start
 

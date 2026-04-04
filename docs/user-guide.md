@@ -4,16 +4,30 @@
 
 ### Installation
 
+#### Homebrew (macOS and Linux)
+
 ```bash
-# From source
-git clone https://github.com/julsimon/ccmd
-cd ccmd
+brew tap juliensimon/tap
+brew install ccmd
+```
+
+#### From crates.io
+
+```bash
+cargo install ccmd
+```
+
+#### Prebuilt binaries
+
+Download from [GitHub Releases](https://github.com/juliensimon/cache-commander/releases) for macOS (x86_64, Apple Silicon) and Linux (x86_64, aarch64). Extract and place `ccmd` in your `PATH`.
+
+#### From source
+
+```bash
+git clone https://github.com/juliensimon/cache-commander
+cd cache-commander
 cargo build --release
 ./target/release/ccmd
-
-# Or install globally
-cargo install --path .
-ccmd
 ```
 
 ### First Run
