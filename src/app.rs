@@ -221,24 +221,32 @@ impl App {
     }
 
     fn perform_delete(&mut self) {
+        // Measure sizes from disk BEFORE deleting (node.size may be stale)
+        let candidates: Vec<(usize, std::path::PathBuf, u64)> = self
+            .delete_candidates
+            .iter()
+            .filter(|&&idx| idx < self.tree.nodes.len())
+            .map(|&idx| {
+                let path = self.tree.nodes[idx].path.clone();
+                let size = crate::scanner::walker::dir_size(&path);
+                (idx, path, size)
+            })
+            .collect();
+
         let mut deleted = Vec::new();
-        for &idx in &self.delete_candidates {
-            if idx < self.tree.nodes.len() {
-                let path = &self.tree.nodes[idx].path;
-                if path.is_dir() {
-                    if std::fs::remove_dir_all(path).is_ok() {
-                        deleted.push(idx);
-                    }
-                } else if std::fs::remove_file(path).is_ok() {
-                    deleted.push(idx);
-                }
+        let mut freed = 0u64;
+
+        for (idx, path, size) in &candidates {
+            let ok = if path.is_dir() {
+                std::fs::remove_dir_all(path).is_ok()
+            } else {
+                std::fs::remove_file(path).is_ok()
+            };
+            if ok {
+                deleted.push(*idx);
+                freed += size;
             }
         }
-
-        let freed: u64 = deleted
-            .iter()
-            .map(|&idx| self.tree.nodes[idx].size)
-            .sum();
 
         if !deleted.is_empty() {
             self.tree.remove_nodes(&deleted);
