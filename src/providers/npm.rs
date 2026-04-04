@@ -33,8 +33,8 @@ fn npx_package_name(path: &Path) -> Option<String> {
             let pkg_rest = &rest[pkg_pos..];
             // Find the array contents
             if let Some(bracket_start) = pkg_rest.find('[') {
-                if let Some(bracket_end) = pkg_rest.find(']') {
-                    let array_str = &pkg_rest[bracket_start + 1..bracket_end];
+                if let Some(bracket_end) = pkg_rest[bracket_start..].find(']') {
+                    let array_str = &pkg_rest[bracket_start + 1..bracket_start + bracket_end];
                     let packages: Vec<&str> = array_str
                         .split(',')
                         .map(|s| s.trim().trim_matches('"').trim())
@@ -58,8 +58,8 @@ fn npx_package_name(path: &Path) -> Option<String> {
     if let Some(deps_pos) = content.find("\"dependencies\"") {
         let rest = &content[deps_pos..];
         if let Some(brace_start) = rest.find('{') {
-            if let Some(brace_end) = rest.find('}') {
-                let deps_str = &rest[brace_start + 1..brace_end];
+            if let Some(brace_end) = rest[brace_start..].find('}') {
+                let deps_str = &rest[brace_start + 1..brace_start + brace_end];
                 let dep_names: Vec<&str> = deps_str
                     .split(',')
                     .filter_map(|entry| {
@@ -252,6 +252,58 @@ mod tests {
         let result = semantic_name(&hash_dir).unwrap();
         assert!(result.contains("[npx] create-react-app"), "{}", result);
         assert!(result.contains("+1 more"), "{}", result);
+    }
+
+    #[test]
+    fn semantic_name_complex_package_json_no_panic() {
+        // Regression: package.json with ] appearing before [ in substring caused slice panic
+        let tmp = tempfile::tempdir().unwrap();
+        let hash_dir = tmp.path().join("complex");
+        std::fs::create_dir_all(&hash_dir).unwrap();
+        std::fs::write(
+            hash_dir.join("package.json"),
+            r#"{
+                "scripts": {
+                    "build": { "dependencies": ["rollup", "tsc"] },
+                    "e2e": { "files": ["tests/**/*.py"], "dependencies": ["build"] }
+                },
+                "_npx": { "packages": ["my-tool"] }
+            }"#,
+        ).unwrap();
+
+        let result = semantic_name(&hash_dir);
+        assert_eq!(result, Some("[npx] my-tool".into()));
+    }
+
+    #[test]
+    fn semantic_name_nested_braces_in_deps() {
+        // Dependencies block with nested objects before the actual deps
+        let tmp = tempfile::tempdir().unwrap();
+        let hash_dir = tmp.path().join("nested");
+        std::fs::create_dir_all(&hash_dir).unwrap();
+        std::fs::write(
+            hash_dir.join("package.json"),
+            r#"{
+                "config": { "nested": { "deep": true } },
+                "dependencies": { "express": "^4.0.0" }
+            }"#,
+        ).unwrap();
+
+        let result = semantic_name(&hash_dir);
+        assert_eq!(result, Some("[npx] express".into()));
+    }
+
+    #[test]
+    fn semantic_name_no_npx_no_deps() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hash_dir = tmp.path().join("empty");
+        std::fs::create_dir_all(&hash_dir).unwrap();
+        std::fs::write(
+            hash_dir.join("package.json"),
+            r#"{"name": "something", "version": "1.0.0"}"#,
+        ).unwrap();
+
+        assert_eq!(semantic_name(&hash_dir), None);
     }
 
     #[test]
