@@ -121,7 +121,24 @@ pub fn render(
             format!("VULNERABILITIES ({})", sec.vulns.len()),
             theme::DANGER,
         )));
-        for vuln in &sec.vulns {
+        let mut sorted_vulns = sec.vulns.clone();
+        sorted_vulns.sort_by(|a, b| {
+            let a_parts: Vec<u64> = a.fix_version.as_deref().unwrap_or("0")
+                .split('.').filter_map(|s| s.parse().ok()).collect();
+            let b_parts: Vec<u64> = b.fix_version.as_deref().unwrap_or("0")
+                .split('.').filter_map(|s| s.parse().ok()).collect();
+            let len = a_parts.len().max(b_parts.len());
+            for i in 0..len {
+                let av = a_parts.get(i).copied().unwrap_or(0);
+                let bv = b_parts.get(i).copied().unwrap_or(0);
+                match bv.cmp(&av) {
+                    std::cmp::Ordering::Equal => continue,
+                    ord => return ord,
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
+        for vuln in &sorted_vulns {
             let sev_str = match &vuln.severity {
                 Some(s) if !s.is_empty() => format!(" ({})", s),
                 _ => String::new(),
