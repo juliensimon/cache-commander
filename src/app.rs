@@ -18,6 +18,7 @@ pub enum AppMode {
     Deleting,
     Help,
     Filtering,
+    MarkingAll,
 }
 
 pub struct App {
@@ -33,6 +34,7 @@ pub struct App {
     pub version_results: HashMap<PathBuf, crate::security::VersionInfo>,
     pub node_status: HashMap<PathBuf, crate::security::NodeStatus>,
     delete_candidates: Vec<std::path::PathBuf>,
+    pub mark_all_count: usize,
     auto_vulnscan_pending: bool,
     auto_versioncheck_pending: bool,
     vulnscan_in_progress: bool,
@@ -61,6 +63,7 @@ impl App {
             version_results: HashMap::new(),
             node_status: HashMap::new(),
             delete_candidates: Vec::new(),
+            mark_all_count: 0,
             auto_vulnscan_pending: auto_vuln,
             auto_versioncheck_pending: auto_ver,
             vulnscan_in_progress: false,
@@ -157,6 +160,7 @@ impl App {
             AppMode::Deleting => self.handle_delete_key(key),
             AppMode::Help => self.handle_help_key(key),
             AppMode::Filtering => self.handle_filter_key(key),
+            AppMode::MarkingAll => self.handle_mark_all_key(key),
         }
     }
 
@@ -247,6 +251,18 @@ impl App {
                     }
                 }
             }
+            KeyCode::Char('m') => {
+                let count = self.tree.visible.iter()
+                    .filter(|&&idx| !self.tree.dimmed.contains(&idx) && !self.tree.marked.contains(&idx))
+                    .count();
+                if count == 0 {
+                    self.status_msg = Some("No items to mark".into());
+                } else {
+                    self.mark_all_count = count;
+                    self.status_msg = Some(format!("Mark {} items? [y/n]", count));
+                    self.mode = AppMode::MarkingAll;
+                }
+            }
             KeyCode::Char('r') => {
                 if let Some(idx) = self.tree.selected_node_index() {
                     let path = self.tree.nodes[idx].path.clone();
@@ -316,6 +332,25 @@ impl App {
             KeyCode::Char(c) => {
                 self.filter_text.push(c);
                 self.tree.set_filter(&self.filter_text);
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_mark_all_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                for &idx in &self.tree.visible {
+                    if !self.tree.dimmed.contains(&idx) {
+                        self.tree.marked.insert(idx);
+                    }
+                }
+                self.status_msg = Some(format!("Marked {} items", self.mark_all_count));
+                self.mode = AppMode::Normal;
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                self.status_msg = None;
+                self.mode = AppMode::Normal;
             }
             _ => {}
         }

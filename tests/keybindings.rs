@@ -971,3 +971,152 @@ fn go_top_skips_dimmed_root() {
     let selected_node = app.tree.selected_node().unwrap();
     assert_eq!(selected_node.name, "beta");
 }
+
+// === Bulk Mark ===
+
+#[test]
+fn key_m_enters_marking_mode() {
+    let mut app = test_app();
+    app.process_key(key(KeyCode::Char('m')));
+    assert_eq!(app.mode, AppMode::MarkingAll);
+}
+
+#[test]
+fn marking_mode_y_marks_all_non_dimmed_visible() {
+    let mut app = test_app_with_children();
+    // visible: alpha(0), child-big(1), child-small(2), beta(3), gamma(4)
+    // Dim beta and gamma
+    app.tree.dimmed.insert(3); // beta node index
+    app.tree.dimmed.insert(4); // gamma node index
+
+    app.process_key(key(KeyCode::Char('m')));
+    assert_eq!(app.mode, AppMode::MarkingAll);
+
+    app.process_key(key(KeyCode::Char('y')));
+    assert_eq!(app.mode, AppMode::Normal);
+
+    // alpha (idx 0), child-big (idx 1), child-small (idx 2) should be marked
+    assert!(app.tree.marked.contains(&0), "alpha should be marked");
+    assert!(app.tree.marked.contains(&1), "child-big should be marked");
+    assert!(app.tree.marked.contains(&2), "child-small should be marked");
+    // beta (idx 3) and gamma (idx 4) should NOT be marked (dimmed)
+    assert!(!app.tree.marked.contains(&3), "beta should not be marked (dimmed)");
+    assert!(!app.tree.marked.contains(&4), "gamma should not be marked (dimmed)");
+}
+
+#[test]
+fn marking_mode_n_cancels() {
+    let mut app = test_app();
+    app.process_key(key(KeyCode::Char('m')));
+    assert_eq!(app.mode, AppMode::MarkingAll);
+
+    app.process_key(key(KeyCode::Char('n')));
+    assert_eq!(app.mode, AppMode::Normal);
+    assert!(app.tree.marked.is_empty());
+}
+
+#[test]
+fn marking_mode_esc_cancels() {
+    let mut app = test_app();
+    app.process_key(key(KeyCode::Char('m')));
+    app.process_key(key(KeyCode::Esc));
+    assert_eq!(app.mode, AppMode::Normal);
+    assert!(app.tree.marked.is_empty());
+}
+
+#[test]
+fn key_m_with_no_items_to_mark_shows_message() {
+    let mut app = test_app();
+    // Dim everything
+    for &idx in app.tree.visible.clone().iter() {
+        app.tree.dimmed.insert(idx);
+    }
+    app.process_key(key(KeyCode::Char('m')));
+    assert_eq!(app.mode, AppMode::Normal);
+    assert!(app.status_msg.as_ref().unwrap().contains("No items"));
+}
+
+#[test]
+fn full_workflow_filter_mark_delete() {
+    let tmp = tempfile::tempdir().unwrap();
+    let vuln_dir = tmp.path().join("vulnerable-pkg");
+    let safe_dir = tmp.path().join("safe-pkg");
+    let outdated_dir = tmp.path().join("outdated-pkg");
+    std::fs::create_dir_all(&vuln_dir).unwrap();
+    std::fs::create_dir_all(&safe_dir).unwrap();
+    std::fs::create_dir_all(&outdated_dir).unwrap();
+    std::fs::write(vuln_dir.join("data"), "x".repeat(100)).unwrap();
+    std::fs::write(safe_dir.join("data"), "y".repeat(100)).unwrap();
+    std::fs::write(outdated_dir.join("data"), "z".repeat(100)).unwrap();
+
+    let config = Config {
+        roots: vec![],
+        sort_by: SortField::Name,
+        sort_desc: false,
+        confirm_delete: false,
+        ..Default::default()
+    };
+    let (result_tx, result_rx) = mpsc::channel();
+    let scan_tx = scanner::start(result_tx);
+    let mut app = App::new(config, result_rx, scan_tx);
+
+    app.tree.set_roots(vec![
+        TreeNode {
+            path: vuln_dir.clone(), name: "vulnerable-pkg".into(), size: 100, depth: 0,
+            parent: None, has_children: true, kind: ccmd::tree::node::CacheKind::Pip,
+            last_modified: None, is_root: true, children_loaded: false,
+        },
+        TreeNode {
+            path: safe_dir.clone(), name: "safe-pkg".into(), size: 100, depth: 0,
+            parent: None, has_children: true, kind: ccmd::tree::node::CacheKind::Pip,
+            last_modified: None, is_root: true, children_loaded: false,
+        },
+        TreeNode {
+            path: outdated_dir.clone(), name: "outdated-pkg".into(), size: 100, depth: 0,
+            parent: None, has_children: true, kind: ccmd::tree::node::CacheKind::Pip,
+            last_modified: None, is_root: true, children_loaded: false,
+        },
+    ]);
+
+    // Simulate scan results
+    app.vuln_results.insert(
+        vuln_dir.clone(),
+        ccmd::security::SecurityInfo {
+            vulns: vec![ccmd::security::Vulnerability {
+                id: "CVE-2023-1234".into(),
+                summary: "test".into(),
+                severity: Some("7.5".into()),
+                fix_version: Some("2.0.0".into()),
+            }],
+        },
+    );
+    app.recompute_node_status();
+
+    // Filter to vuln only
+    app.process_key(key(KeyCode::Char('f')));
+    assert_eq!(app.tree.filter_mode, ccmd::tree::state::FilterMode::Vuln);
+
+    // safe-pkg and outdated-pkg should be dimmed
+    let safe_idx = app.tree.nodes.iter().position(|n| n.name == "safe-pkg").unwrap();
+    let outdated_idx = app.tree.nodes.iter().position(|n| n.name == "outdated-pkg").unwrap();
+    assert!(app.tree.dimmed.contains(&safe_idx));
+    assert!(app.tree.dimmed.contains(&outdated_idx));
+
+    // Bulk mark
+    app.process_key(key(KeyCode::Char('m')));
+    assert_eq!(app.mode, AppMode::MarkingAll);
+    app.process_key(key(KeyCode::Char('y')));
+
+    // Only vuln_dir should be marked
+    let vuln_idx = app.tree.nodes.iter().position(|n| n.name == "vulnerable-pkg").unwrap();
+    assert!(app.tree.marked.contains(&vuln_idx));
+    assert!(!app.tree.marked.contains(&safe_idx));
+    assert!(!app.tree.marked.contains(&outdated_idx));
+
+    // Delete
+    app.process_key(key(KeyCode::Char('d')));
+
+    assert!(!vuln_dir.exists(), "vulnerable-pkg should be deleted");
+    assert!(safe_dir.exists(), "safe-pkg should still exist");
+    assert!(outdated_dir.exists(), "outdated-pkg should still exist");
+}
