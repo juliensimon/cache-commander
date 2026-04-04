@@ -37,6 +37,8 @@ pub fn render(f: &mut Frame, area: Rect, tree: &TreeState) {
         Span::styled(
             if node.size > 0 {
                 format_size(node.size, BINARY)
+            } else if node.children_loaded || !node.has_children {
+                "0 B".to_string()
             } else {
                 "calculating...".to_string()
             },

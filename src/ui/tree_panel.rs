@@ -43,8 +43,6 @@ pub fn render(f: &mut Frame, area: Rect, tree: &TreeState) {
         // Size string
         let size_str = if node.size > 0 {
             format_size(node.size, BINARY)
-        } else if node.has_children && !node.children_loaded {
-            "...".to_string()
         } else {
             String::new()
         };
