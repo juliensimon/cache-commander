@@ -113,9 +113,7 @@ impl TreeNode {
     }
 
     pub fn root(path: PathBuf) -> Self {
-        let display = path
-            .to_string_lossy()
-            .replace(&dirs_home(), "~");
+        let display = path.to_string_lossy().replace(&dirs_home(), "~");
 
         Self {
             name: display,
@@ -183,7 +181,11 @@ mod tests {
             CacheKind::Whisper,
         ];
         for kind in &kinds {
-            assert!(!kind.label().is_empty(), "{:?} should have a non-empty label", kind);
+            assert!(
+                !kind.label().is_empty(),
+                "{:?} should have a non-empty label",
+                kind
+            );
         }
         assert_eq!(CacheKind::Unknown.label(), "");
     }

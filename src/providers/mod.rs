@@ -182,17 +182,26 @@ mod tests {
 
     #[test]
     fn detect_huggingface() {
-        assert_eq!(detect(&PathBuf::from("/home/user/.cache/huggingface")), CacheKind::HuggingFace);
+        assert_eq!(
+            detect(&PathBuf::from("/home/user/.cache/huggingface")),
+            CacheKind::HuggingFace
+        );
     }
 
     #[test]
     fn detect_pip() {
-        assert_eq!(detect(&PathBuf::from("/home/user/.cache/pip")), CacheKind::Pip);
+        assert_eq!(
+            detect(&PathBuf::from("/home/user/.cache/pip")),
+            CacheKind::Pip
+        );
     }
 
     #[test]
     fn detect_uv() {
-        assert_eq!(detect(&PathBuf::from("/home/user/.cache/uv")), CacheKind::Uv);
+        assert_eq!(
+            detect(&PathBuf::from("/home/user/.cache/uv")),
+            CacheKind::Uv
+        );
     }
 
     #[test]
@@ -202,47 +211,74 @@ mod tests {
 
     #[test]
     fn detect_npm_plain() {
-        assert_eq!(detect(&PathBuf::from("/Library/Caches/npm")), CacheKind::Npm);
+        assert_eq!(
+            detect(&PathBuf::from("/Library/Caches/npm")),
+            CacheKind::Npm
+        );
     }
 
     #[test]
     fn detect_homebrew() {
-        assert_eq!(detect(&PathBuf::from("/Library/Caches/Homebrew")), CacheKind::Homebrew);
+        assert_eq!(
+            detect(&PathBuf::from("/Library/Caches/Homebrew")),
+            CacheKind::Homebrew
+        );
     }
 
     #[test]
     fn detect_pre_commit() {
-        assert_eq!(detect(&PathBuf::from("/home/user/.cache/pre-commit")), CacheKind::PreCommit);
+        assert_eq!(
+            detect(&PathBuf::from("/home/user/.cache/pre-commit")),
+            CacheKind::PreCommit
+        );
     }
 
     #[test]
     fn detect_whisper() {
-        assert_eq!(detect(&PathBuf::from("/home/user/.cache/whisper")), CacheKind::Whisper);
+        assert_eq!(
+            detect(&PathBuf::from("/home/user/.cache/whisper")),
+            CacheKind::Whisper
+        );
     }
 
     #[test]
     fn detect_cargo_registry_context() {
-        assert_eq!(detect(&PathBuf::from("/home/user/.cargo/registry/cache")), CacheKind::Cargo);
+        assert_eq!(
+            detect(&PathBuf::from("/home/user/.cargo/registry/cache")),
+            CacheKind::Cargo
+        );
     }
 
     #[test]
     fn detect_huggingface_subdir_context() {
-        assert_eq!(detect(&PathBuf::from("/cache/huggingface/hub")), CacheKind::HuggingFace);
+        assert_eq!(
+            detect(&PathBuf::from("/cache/huggingface/hub")),
+            CacheKind::HuggingFace
+        );
     }
 
     #[test]
     fn detect_npm_subdir_context() {
-        assert_eq!(detect(&PathBuf::from("/home/user/.npm/_cacache")), CacheKind::Npm);
+        assert_eq!(
+            detect(&PathBuf::from("/home/user/.npm/_cacache")),
+            CacheKind::Npm
+        );
     }
 
     #[test]
     fn detect_gh() {
-        assert_eq!(detect(&PathBuf::from("/home/user/.cache/gh")), CacheKind::Gh);
+        assert_eq!(
+            detect(&PathBuf::from("/home/user/.cache/gh")),
+            CacheKind::Gh
+        );
     }
 
     #[test]
     fn detect_unknown() {
-        assert_eq!(detect(&PathBuf::from("/home/user/.cache/something_random")), CacheKind::Unknown);
+        assert_eq!(
+            detect(&PathBuf::from("/home/user/.cache/something_random")),
+            CacheKind::Unknown
+        );
     }
 
     // --- semantic_name() dispatch ---
@@ -250,13 +286,19 @@ mod tests {
     #[test]
     fn semantic_name_dispatches_to_huggingface() {
         let path = PathBuf::from("/cache/hub/models--org--model");
-        assert_eq!(semantic_name(CacheKind::HuggingFace, &path), Some("[model] org/model".into()));
+        assert_eq!(
+            semantic_name(CacheKind::HuggingFace, &path),
+            Some("[model] org/model".into())
+        );
     }
 
     #[test]
     fn semantic_name_dispatches_to_whisper() {
         let path = PathBuf::from("/cache/whisper/large-v3.pt");
-        assert_eq!(semantic_name(CacheKind::Whisper, &path), Some("Whisper Large V3".into()));
+        assert_eq!(
+            semantic_name(CacheKind::Whisper, &path),
+            Some("Whisper Large V3".into())
+        );
     }
 
     #[test]
@@ -286,7 +328,10 @@ mod tests {
 
     #[test]
     fn safety_unknown_is_caution() {
-        assert_eq!(safety(CacheKind::Unknown, &PathBuf::from("/tmp")), SafetyLevel::Caution);
+        assert_eq!(
+            safety(CacheKind::Unknown, &PathBuf::from("/tmp")),
+            SafetyLevel::Caution
+        );
     }
 
     // --- SafetyLevel ---
@@ -300,7 +345,11 @@ mod tests {
 
     #[test]
     fn safety_level_icons_are_distinct() {
-        let icons = [SafetyLevel::Safe.icon(), SafetyLevel::Caution.icon(), SafetyLevel::Unsafe.icon()];
+        let icons = [
+            SafetyLevel::Safe.icon(),
+            SafetyLevel::Caution.icon(),
+            SafetyLevel::Unsafe.icon(),
+        ];
         assert_ne!(icons[0], icons[1]);
         assert_ne!(icons[1], icons[2]);
         assert_ne!(icons[0], icons[2]);

@@ -19,9 +19,15 @@ pub enum ScanResult {
     ChildrenScanned(PathBuf, Vec<TreeNode>),
     SizeUpdated(PathBuf, u64),
     /// (packages_scanned, results)
-    VulnsScanned(usize, std::collections::HashMap<PathBuf, crate::security::SecurityInfo>),
+    VulnsScanned(
+        usize,
+        std::collections::HashMap<PathBuf, crate::security::SecurityInfo>,
+    ),
     /// (packages_checked, results)
-    VersionsChecked(usize, std::collections::HashMap<PathBuf, crate::security::VersionInfo>),
+    VersionsChecked(
+        usize,
+        std::collections::HashMap<PathBuf, crate::security::VersionInfo>,
+    ),
 }
 
 /// Walk a set of root paths to find all identifiable packages.
@@ -33,9 +39,7 @@ pub fn discover_packages(roots: &[PathBuf]) -> Vec<(PathBuf, crate::providers::P
         if !root.exists() {
             continue;
         }
-        let walk = jwalk::WalkDir::new(root)
-            .skip_hidden(false)
-            .max_depth(6);
+        let walk = jwalk::WalkDir::new(root).skip_hidden(false).max_depth(6);
         for entry in walk.into_iter().filter_map(|e| e.ok()) {
             let path = entry.path();
             let kind = crate::providers::detect(&path);
@@ -50,9 +54,7 @@ pub fn discover_packages(roots: &[PathBuf]) -> Vec<(PathBuf, crate::providers::P
     packages
 }
 
-pub fn start(
-    result_tx: mpsc::Sender<ScanResult>,
-) -> mpsc::Sender<ScanRequest> {
+pub fn start(result_tx: mpsc::Sender<ScanResult>) -> mpsc::Sender<ScanRequest> {
     let (request_tx, request_rx) = mpsc::channel::<ScanRequest>();
 
     std::thread::spawn(move || {
@@ -65,10 +67,7 @@ pub fn start(
                             continue;
                         }
                         let mut node = TreeNode::root(root.clone());
-                        node.last_modified = root
-                            .metadata()
-                            .ok()
-                            .and_then(|m| m.modified().ok());
+                        node.last_modified = root.metadata().ok().and_then(|m| m.modified().ok());
                         nodes.push(node);
                     }
                     let _ = result_tx.send(ScanResult::RootsScanned(nodes));
@@ -107,15 +106,11 @@ pub fn start(
                     let mut children: Vec<TreeNode> = children_paths
                         .iter()
                         .map(|child_path| {
-                            let mut node =
-                                TreeNode::new(child_path.clone(), 0, None);
-                            node.last_modified = child_path
-                                .metadata()
-                                .ok()
-                                .and_then(|m| m.modified().ok());
+                            let mut node = TreeNode::new(child_path.clone(), 0, None);
+                            node.last_modified =
+                                child_path.metadata().ok().and_then(|m| m.modified().ok());
                             node.kind = providers::detect(child_path);
-                            if let Some(semantic) =
-                                providers::semantic_name(node.kind, child_path)
+                            if let Some(semantic) = providers::semantic_name(node.kind, child_path)
                             {
                                 node.name = semantic;
                             }
@@ -132,8 +127,7 @@ pub fn start(
                         }
                     }
 
-                    let _ = result_tx
-                        .send(ScanResult::ChildrenScanned(path.clone(), children));
+                    let _ = result_tx.send(ScanResult::ChildrenScanned(path.clone(), children));
 
                     for child_path in deferred {
                         let tx = result_tx.clone();

@@ -34,7 +34,10 @@ pub fn semantic_name(path: &Path) -> Option<String> {
     if is_hex_hash(&name) {
         // Check if parent is "snapshots" → show short hash
         if let Some(parent) = path.parent() {
-            let parent_name = parent.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let parent_name = parent
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
             if parent_name == "snapshots" {
                 return Some(format!("[rev] {}", &name[..8.min(name.len())]));
             }
@@ -72,7 +75,8 @@ fn identify_blob_via_snapshots(blob_path: &Path) -> Option<String> {
     }
 
     // Check the first snapshot for symlinks
-    let snapshot = std::fs::read_dir(&snapshots_dir).ok()?
+    let snapshot = std::fs::read_dir(&snapshots_dir)
+        .ok()?
         .filter_map(|e| e.ok())
         .next()?;
 
@@ -211,13 +215,19 @@ mod tests {
     #[test]
     fn semantic_name_model_single_org() {
         let path = PathBuf::from("/cache/huggingface/hub/models--meta-llama--Llama-3.1-8B");
-        assert_eq!(semantic_name(&path), Some("[model] meta-llama/Llama-3.1-8B".into()));
+        assert_eq!(
+            semantic_name(&path),
+            Some("[model] meta-llama/Llama-3.1-8B".into())
+        );
     }
 
     #[test]
     fn semantic_name_model_nested_org() {
         let path = PathBuf::from("/cache/hub/models--openai--whisper-large-v3");
-        assert_eq!(semantic_name(&path), Some("[model] openai/whisper-large-v3".into()));
+        assert_eq!(
+            semantic_name(&path),
+            Some("[model] openai/whisper-large-v3".into())
+        );
     }
 
     #[test]
@@ -243,7 +253,9 @@ mod tests {
 
     #[test]
     fn semantic_name_snapshot_hash() {
-        let path = PathBuf::from("/cache/hub/models--org--m/snapshots/5c38ec7c405ec4b44b94cc5a9bb96e735b38267a");
+        let path = PathBuf::from(
+            "/cache/hub/models--org--m/snapshots/5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
+        );
         assert_eq!(semantic_name(&path), Some("[rev] 5c38ec7c".into()));
     }
 
@@ -255,7 +267,8 @@ mod tests {
         std::fs::write(
             hash_dir.join("dataset_info.json"),
             r#"{"dataset_name": "iris", "config_name": "default"}"#,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(semantic_name(&hash_dir), Some("[info] iris".into()));
     }
 
@@ -267,14 +280,19 @@ mod tests {
         let snapshots = model.join("snapshots/abc123");
         std::fs::create_dir_all(&blobs).unwrap();
         std::fs::create_dir_all(&snapshots).unwrap();
-        std::fs::write(blobs.join("deadbeef1234567890abcdef1234567890abcdef"), "data").unwrap();
+        std::fs::write(
+            blobs.join("deadbeef1234567890abcdef1234567890abcdef"),
+            "data",
+        )
+        .unwrap();
         // Create symlink in snapshot pointing to blob
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink(
                 "../../blobs/deadbeef1234567890abcdef1234567890abcdef",
                 snapshots.join("model.safetensors"),
-            ).unwrap();
+            )
+            .unwrap();
         }
         let blob_path = blobs.join("deadbeef1234567890abcdef1234567890abcdef");
         let result = semantic_name(&blob_path);

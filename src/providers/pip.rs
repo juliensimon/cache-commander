@@ -82,11 +82,6 @@ fn count_files_with_ext(path: &Path, ext: &str) -> usize {
         .skip_hidden(false)
         .into_iter()
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .map(|x| x == ext)
-                .unwrap_or(false)
-        })
+        .filter(|e| e.path().extension().map(|x| x == ext).unwrap_or(false))
         .count()
 }

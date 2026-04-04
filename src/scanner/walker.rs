@@ -47,10 +47,7 @@ pub fn quick_size(path: &Path) -> Option<u64> {
 /// List immediate children of a directory.
 pub fn list_children(path: &Path) -> Vec<std::path::PathBuf> {
     match std::fs::read_dir(path) {
-        Ok(entries) => entries
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .collect(),
+        Ok(entries) => entries.filter_map(|e| e.ok()).map(|e| e.path()).collect(),
         Err(_) => Vec::new(),
     }
 }
@@ -71,10 +68,10 @@ mod tests {
     fn dir_size_directory() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("a.txt"), "aaaa").unwrap(); // 4
-        std::fs::write(tmp.path().join("b.txt"), "bb").unwrap();   // 2
+        std::fs::write(tmp.path().join("b.txt"), "bb").unwrap(); // 2
         let sub = tmp.path().join("sub");
         std::fs::create_dir(&sub).unwrap();
-        std::fs::write(sub.join("c.txt"), "ccc").unwrap();         // 3
+        std::fs::write(sub.join("c.txt"), "ccc").unwrap(); // 3
         assert_eq!(dir_size(tmp.path()), 9);
     }
 
@@ -100,8 +97,10 @@ mod tests {
 
         let children = list_children(tmp.path());
         assert_eq!(children.len(), 3); // file1, file2, subdir
-        // nested.txt should NOT appear
-        assert!(!children.iter().any(|p| p.file_name().unwrap() == "nested.txt"));
+                                       // nested.txt should NOT appear
+        assert!(!children
+            .iter()
+            .any(|p| p.file_name().unwrap() == "nested.txt"));
     }
 
     #[test]

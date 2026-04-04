@@ -28,7 +28,10 @@ pub fn semantic_name(path: &Path) -> Option<String> {
 
 pub fn metadata(path: &Path) -> Vec<MetadataField> {
     let mut fields = Vec::new();
-    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
 
     if name.ends_with(".pth") || name.ends_with(".pt") {
         fields.push(MetadataField {
@@ -53,7 +56,10 @@ mod tests {
     #[test]
     fn semantic_name_pth_with_hash() {
         let path = PathBuf::from("/cache/torch/hub/checkpoints/mobilenet_v2-b0353104.pth");
-        assert_eq!(semantic_name(&path), Some("[checkpoint] mobilenet_v2".into()));
+        assert_eq!(
+            semantic_name(&path),
+            Some("[checkpoint] mobilenet_v2".into())
+        );
     }
 
     #[test]

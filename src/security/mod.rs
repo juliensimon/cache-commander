@@ -92,10 +92,12 @@ pub fn scan_vulns(packages: &[(PathBuf, PackageId)]) -> HashMap<PathBuf, Securit
         if let Some(pkg) = pkg {
             for vuln in &mut info.vulns {
                 if let Some(detail) = detail_cache.get(&vuln.id) {
-                    vuln.fix_version = osv::extract_fix_version(detail, &pkg.name, pkg.ecosystem, &pkg.version);
+                    vuln.fix_version =
+                        osv::extract_fix_version(detail, &pkg.name, pkg.ecosystem, &pkg.version);
                 }
             }
-            info.vulns.retain(|vuln| is_vuln_active(&vuln.fix_version, &pkg.version));
+            info.vulns
+                .retain(|vuln| is_vuln_active(&vuln.fix_version, &pkg.version));
         }
     }
     results.retain(|_, info| !info.vulns.is_empty());
@@ -144,7 +146,8 @@ pub fn check_versions(packages: &[(PathBuf, PackageId)]) -> HashMap<PathBuf, Ver
                 let results = Arc::clone(&results);
                 std::thread::spawn(move || {
                     if let Ok(Some(latest)) = registry::check_latest(&pkg) {
-                        let is_outdated = osv::compare_versions(&pkg.version, &latest) == std::cmp::Ordering::Less;
+                        let is_outdated = osv::compare_versions(&pkg.version, &latest)
+                            == std::cmp::Ordering::Less;
                         results.lock().unwrap().insert(
                             path,
                             VersionInfo {
@@ -213,11 +216,15 @@ mod tests {
 
         // Simulate the retain + remove logic from scan_vulns
         for info in results.values_mut() {
-            info.vulns.retain(|v| is_vuln_active(&v.fix_version, "2.0.0"));
+            info.vulns
+                .retain(|v| is_vuln_active(&v.fix_version, "2.0.0"));
         }
         results.retain(|_, info| !info.vulns.is_empty());
 
-        assert!(results.is_empty(), "Entry should be removed when all vulns filtered");
+        assert!(
+            results.is_empty(),
+            "Entry should be removed when all vulns filtered"
+        );
     }
 
     #[test]
@@ -245,7 +252,8 @@ mod tests {
 
         let pkg_version = "2.0.0";
         for info in results.values_mut() {
-            info.vulns.retain(|v| is_vuln_active(&v.fix_version, pkg_version));
+            info.vulns
+                .retain(|v| is_vuln_active(&v.fix_version, pkg_version));
         }
         results.retain(|_, info| !info.vulns.is_empty());
 

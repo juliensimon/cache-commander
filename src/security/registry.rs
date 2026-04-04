@@ -27,7 +27,9 @@ pub fn check_latest(pkg: &crate::providers::PackageId) -> Result<Option<String>,
         .set("User-Agent", "ccmd/0.1 (https://github.com/ccmd)")
         .call()
         .map_err(|e| format!("Registry request failed: {e}"))?;
-    let text = resp.into_string().map_err(|e| format!("Registry read failed: {e}"))?;
+    let text = resp
+        .into_string()
+        .map_err(|e| format!("Registry read failed: {e}"))?;
 
     let latest = match pkg.ecosystem {
         "PyPI" => parse_pypi_latest(&text),

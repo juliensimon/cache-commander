@@ -15,7 +15,9 @@ pub fn semantic_name(path: &Path) -> Option<String> {
     }
 
     // Platform dirs: darwin-arm64, linux-x64, etc.
-    if name.contains('-') && (name.starts_with("darwin") || name.starts_with("linux") || name.starts_with("windows")) {
+    if name.contains('-')
+        && (name.starts_with("darwin") || name.starts_with("linux") || name.starts_with("windows"))
+    {
         return Some(format!("[platform] {name}"));
     }
 
@@ -24,7 +26,10 @@ pub fn semantic_name(path: &Path) -> Option<String> {
 
 pub fn metadata(path: &Path) -> Vec<MetadataField> {
     let mut fields = Vec::new();
-    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
 
     if name.len() == 40 && name.chars().all(|c| c.is_ascii_hexdigit()) {
         fields.push(MetadataField {

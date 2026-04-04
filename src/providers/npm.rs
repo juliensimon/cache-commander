@@ -161,7 +161,11 @@ pub fn metadata(path: &Path) -> Vec<MetadataField> {
         let depth = dep_depth(path);
         fields.push(MetadataField {
             label: "Dep depth".to_string(),
-            value: if depth == 0 { "direct".to_string() } else { format!("transitive (depth {})", depth) },
+            value: if depth == 0 {
+                "direct".to_string()
+            } else {
+                format!("transitive (depth {})", depth)
+            },
         });
 
         // Install script detection
@@ -218,12 +222,18 @@ mod tests {
 
     #[test]
     fn semantic_name_cacache() {
-        assert_eq!(semantic_name(&PathBuf::from("/npm/_cacache")), Some("Content Cache".into()));
+        assert_eq!(
+            semantic_name(&PathBuf::from("/npm/_cacache")),
+            Some("Content Cache".into())
+        );
     }
 
     #[test]
     fn semantic_name_npx() {
-        assert_eq!(semantic_name(&PathBuf::from("/npm/_npx")), Some("npx Cache".into()));
+        assert_eq!(
+            semantic_name(&PathBuf::from("/npm/_npx")),
+            Some("npx Cache".into())
+        );
     }
 
     #[test]
@@ -234,7 +244,8 @@ mod tests {
         std::fs::write(
             hash_dir.join("package.json"),
             r#"{"dependencies":{"lighthouse":"^12"},"_npx":{"packages":["lighthouse"]}}"#,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(semantic_name(&hash_dir), Some("[npx] lighthouse".into()));
     }
@@ -247,7 +258,8 @@ mod tests {
         std::fs::write(
             hash_dir.join("package.json"),
             r#"{"_npx":{"packages":["create-react-app","typescript"]}}"#,
-        ).unwrap();
+        )
+        .unwrap();
 
         let result = semantic_name(&hash_dir).unwrap();
         assert!(result.contains("[npx] create-react-app"), "{}", result);
@@ -269,7 +281,8 @@ mod tests {
                 },
                 "_npx": { "packages": ["my-tool"] }
             }"#,
-        ).unwrap();
+        )
+        .unwrap();
 
         let result = semantic_name(&hash_dir);
         assert_eq!(result, Some("[npx] my-tool".into()));
@@ -287,7 +300,8 @@ mod tests {
                 "config": { "nested": { "deep": true } },
                 "dependencies": { "express": "^4.0.0" }
             }"#,
-        ).unwrap();
+        )
+        .unwrap();
 
         let result = semantic_name(&hash_dir);
         assert_eq!(result, Some("[npx] express".into()));
@@ -301,7 +315,8 @@ mod tests {
         std::fs::write(
             hash_dir.join("package.json"),
             r#"{"name": "something", "version": "1.0.0"}"#,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(semantic_name(&hash_dir), None);
     }
@@ -322,7 +337,8 @@ mod tests {
         std::fs::write(
             pkg_dir.join("package.json"),
             r#"{"name": "express", "version": "4.21.0"}"#,
-        ).unwrap();
+        )
+        .unwrap();
 
         let id = package_id(&pkg_dir).unwrap();
         assert_eq!(id.name, "express");
@@ -356,9 +372,13 @@ mod tests {
         std::fs::write(
             pkg_dir.join("package.json"),
             r#"{"name":"esbuild","version":"0.27.2","scripts":{"postinstall":"node install.js"}}"#,
-        ).unwrap();
+        )
+        .unwrap();
 
-        assert_eq!(detect_install_scripts(&pkg_dir), Some("postinstall".to_string()));
+        assert_eq!(
+            detect_install_scripts(&pkg_dir),
+            Some("postinstall".to_string())
+        );
     }
 
     #[test]
@@ -384,7 +404,8 @@ mod tests {
         std::fs::write(
             pkg_dir.join("package.json"),
             r#"{"name":"safe","scripts":{"test":"jest","build":"tsc"}}"#,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(detect_install_scripts(&pkg_dir), None);
     }
@@ -397,7 +418,8 @@ mod tests {
         std::fs::write(
             pkg_dir.join("package.json"),
             r#"{"name":"minimal","version":"1.0.0"}"#,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(detect_install_scripts(&pkg_dir), None);
     }

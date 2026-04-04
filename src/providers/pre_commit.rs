@@ -34,9 +34,7 @@ fn repo_name_from_git_remote(path: &Path) -> Option<String> {
     let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
     // https://github.com/org/repo.git → org/repo
     // https://github.com/org/repo     → org/repo
-    let cleaned = url
-        .strip_suffix(".git")
-        .unwrap_or(&url);
+    let cleaned = url.strip_suffix(".git").unwrap_or(&url);
 
     // Extract last two path segments
     let parts: Vec<&str> = cleaned.rsplitn(3, '/').collect();

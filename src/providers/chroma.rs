@@ -12,7 +12,8 @@ pub fn semantic_name(path: &Path) -> Option<String> {
     }
 
     // Model directories inside onnx_models/
-    let parent_name = path.parent()
+    let parent_name = path
+        .parent()
         .and_then(|p| p.file_name())
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
@@ -26,7 +27,10 @@ pub fn semantic_name(path: &Path) -> Option<String> {
 
 pub fn metadata(path: &Path) -> Vec<MetadataField> {
     let mut fields = Vec::new();
-    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
 
     if name == "onnx_models" {
         fields.push(MetadataField {
@@ -52,6 +56,9 @@ mod tests {
     #[test]
     fn semantic_name_model_dir() {
         let path = PathBuf::from("/cache/chroma/onnx_models/all-MiniLM-L6-v2");
-        assert_eq!(semantic_name(&path), Some("[embed] all-MiniLM-L6-v2".into()));
+        assert_eq!(
+            semantic_name(&path),
+            Some("[embed] all-MiniLM-L6-v2".into())
+        );
     }
 }

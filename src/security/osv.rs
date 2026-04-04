@@ -57,7 +57,9 @@ pub fn query_osv(packages: &[crate::providers::PackageId]) -> Result<OsvResponse
         .set("User-Agent", "ccmd/0.1 (https://github.com/ccmd)")
         .send_string(&body)
         .map_err(|e| format!("OSV request failed: {e}"))?;
-    let text = resp.into_string().map_err(|e| format!("OSV read failed: {e}"))?;
+    let text = resp
+        .into_string()
+        .map_err(|e| format!("OSV read failed: {e}"))?;
     parse_response(&text).map_err(|e| format!("OSV parse failed: {e}"))
 }
 
@@ -146,7 +148,8 @@ pub fn extract_fix_version(
                 // Find the best matching range: the one whose introduced version
                 // is <= pkg_version with the highest introduced version.
                 // This picks the most specific range that covers our version.
-                let best = candidates.iter()
+                let best = candidates
+                    .iter()
                     .filter(|(intro, _)| version_lte(intro, pkg_version))
                     .max_by(|(a, _), (b, _)| compare_versions(a, b));
 
@@ -191,7 +194,9 @@ pub fn fetch_vuln_detail(vuln_id: &str) -> Result<OsvVulnDetail, String> {
         .set("User-Agent", "ccmd/0.1 (https://github.com/ccmd)")
         .call()
         .map_err(|e| format!("OSV detail request failed: {e}"))?;
-    let text = resp.into_string().map_err(|e| format!("OSV detail read failed: {e}"))?;
+    let text = resp
+        .into_string()
+        .map_err(|e| format!("OSV detail read failed: {e}"))?;
     parse_vuln_detail(&text).map_err(|e| format!("OSV detail parse failed: {e}"))
 }
 
@@ -213,7 +218,10 @@ mod tests {
         let resp = parse_response(json).unwrap();
         assert_eq!(resp.results[0].vulns.len(), 1);
         assert_eq!(resp.results[0].vulns[0].id, "CVE-2023-1234");
-        assert_eq!(resp.results[0].vulns[0].summary.as_deref(), Some("Bad thing"));
+        assert_eq!(
+            resp.results[0].vulns[0].summary.as_deref(),
+            Some("Bad thing")
+        );
     }
 
     #[test]
@@ -336,8 +344,14 @@ mod tests {
         }"#;
         let detail = parse_vuln_detail(json).unwrap();
         assert_eq!(detail.affected.len(), 2);
-        assert_eq!(extract_fix_version(&detail, "requests", "PyPI", "2.31.0"), Some("2.32.0".to_string()));
-        assert_eq!(extract_fix_version(&detail, "urllib3", "PyPI", "1.26.5"), Some("1.26.18".to_string()));
+        assert_eq!(
+            extract_fix_version(&detail, "requests", "PyPI", "2.31.0"),
+            Some("2.32.0".to_string())
+        );
+        assert_eq!(
+            extract_fix_version(&detail, "urllib3", "PyPI", "1.26.5"),
+            Some("1.26.18".to_string())
+        );
         assert_eq!(extract_fix_version(&detail, "flask", "PyPI", "3.0.0"), None);
     }
 
@@ -351,7 +365,10 @@ mod tests {
             }]
         }"#;
         let detail = parse_vuln_detail(json).unwrap();
-        assert_eq!(extract_fix_version(&detail, "requests", "npm", "2.31.0"), None);
+        assert_eq!(
+            extract_fix_version(&detail, "requests", "npm", "2.31.0"),
+            None
+        );
     }
 
     #[test]
@@ -375,12 +392,18 @@ mod tests {
 
     #[test]
     fn compare_versions_basic_greater() {
-        assert_eq!(compare_versions("2.0.0", "1.9.9"), std::cmp::Ordering::Greater);
+        assert_eq!(
+            compare_versions("2.0.0", "1.9.9"),
+            std::cmp::Ordering::Greater
+        );
     }
 
     #[test]
     fn compare_versions_equal() {
-        assert_eq!(compare_versions("2.0.0", "2.0.0"), std::cmp::Ordering::Equal);
+        assert_eq!(
+            compare_versions("2.0.0", "2.0.0"),
+            std::cmp::Ordering::Equal
+        );
     }
 
     #[test]
@@ -405,19 +428,28 @@ mod tests {
         // "1.0.0rc1" → "0rc1" fails parse → [1, 0] compared to [1, 0, 0] = Equal
         let result = compare_versions("1.0.0rc1", "1.0.0");
         // Pre-release is NOT properly handled — this documents the limitation
-        assert!(result == std::cmp::Ordering::Equal || result == std::cmp::Ordering::Less,
-            "Pre-release should be <= stable, got {:?}", result);
+        assert!(
+            result == std::cmp::Ordering::Equal || result == std::cmp::Ordering::Less,
+            "Pre-release should be <= stable, got {:?}",
+            result
+        );
     }
 
     #[test]
     fn compare_versions_non_semantic() {
         // "latest" has no numeric parts → []
-        assert_eq!(compare_versions("latest", "1.0.0"), std::cmp::Ordering::Less);
+        assert_eq!(
+            compare_versions("latest", "1.0.0"),
+            std::cmp::Ordering::Less
+        );
     }
 
     #[test]
     fn compare_versions_both_non_semantic() {
-        assert_eq!(compare_versions("latest", "main"), std::cmp::Ordering::Equal);
+        assert_eq!(
+            compare_versions("latest", "main"),
+            std::cmp::Ordering::Equal
+        );
     }
 
     #[test]
@@ -432,7 +464,10 @@ mod tests {
 
     #[test]
     fn compare_versions_long_versions() {
-        assert_eq!(compare_versions("1.2.3.4.5", "1.2.3.4.6"), std::cmp::Ordering::Less);
+        assert_eq!(
+            compare_versions("1.2.3.4.5", "1.2.3.4.6"),
+            std::cmp::Ordering::Less
+        );
     }
 
     // --- Group 2: version_lte ---
@@ -496,7 +531,10 @@ mod tests {
         }"#;
         let detail = parse_vuln_detail(json).unwrap();
         // Last introduced=2.0, last fixed=3.0 → single candidate (2.0, 3.0)
-        assert_eq!(extract_fix_version(&detail, "pkg", "PyPI", "2.5"), Some("3.0".to_string()));
+        assert_eq!(
+            extract_fix_version(&detail, "pkg", "PyPI", "2.5"),
+            Some("3.0".to_string())
+        );
     }
 
     #[test]
@@ -526,7 +564,10 @@ mod tests {
             }]
         }"#;
         let detail = parse_vuln_detail(json).unwrap();
-        assert_eq!(extract_fix_version(&detail, "pkg", "PyPI", "0.5"), Some("1.5".to_string()));
+        assert_eq!(
+            extract_fix_version(&detail, "pkg", "PyPI", "0.5"),
+            Some("1.5".to_string())
+        );
     }
 
     #[test]
@@ -540,7 +581,10 @@ mod tests {
         }"#;
         let detail = parse_vuln_detail(json).unwrap();
         // Fix version is still extracted even when equal to installed — filtering happens elsewhere
-        assert_eq!(extract_fix_version(&detail, "pkg", "PyPI", "2.0.0"), Some("2.0.0".to_string()));
+        assert_eq!(
+            extract_fix_version(&detail, "pkg", "PyPI", "2.0.0"),
+            Some("2.0.0".to_string())
+        );
     }
 
     #[test]
@@ -553,7 +597,10 @@ mod tests {
             }]
         }"#;
         let detail = parse_vuln_detail(json).unwrap();
-        assert_eq!(extract_fix_version(&detail, "Requests", "PyPI", "1.0"), None);
+        assert_eq!(
+            extract_fix_version(&detail, "Requests", "PyPI", "1.0"),
+            None
+        );
     }
 
     #[test]

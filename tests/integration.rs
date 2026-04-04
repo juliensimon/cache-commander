@@ -48,9 +48,9 @@ fn scanner_discovers_roots_and_computes_sizes() {
     let scan_tx = ccmd::scanner::start(result_tx);
 
     scan_tx
-        .send(ccmd::scanner::ScanRequest::ScanRoots(vec![
-            tmp.path().to_path_buf(),
-        ]))
+        .send(ccmd::scanner::ScanRequest::ScanRoots(vec![tmp
+            .path()
+            .to_path_buf()]))
         .unwrap();
 
     // First message: roots with size=0 (immediate)
@@ -97,9 +97,17 @@ fn scanner_expand_discovers_children_with_providers() {
             assert_eq!(children.len(), 3); // huggingface, uv, whisper
 
             let names: Vec<&str> = children.iter().map(|n| n.name.as_str()).collect();
-            assert!(names.contains(&"huggingface"), "Should find huggingface: {:?}", names);
+            assert!(
+                names.contains(&"huggingface"),
+                "Should find huggingface: {:?}",
+                names
+            );
             assert!(names.contains(&"uv"), "Should find uv: {:?}", names);
-            assert!(names.contains(&"whisper"), "Should find whisper: {:?}", names);
+            assert!(
+                names.contains(&"whisper"),
+                "Should find whisper: {:?}",
+                names
+            );
 
             // Check kinds
             let hf = children.iter().find(|n| n.name == "huggingface").unwrap();
@@ -141,15 +149,18 @@ fn scanner_expand_huggingface_hub_shows_semantic_names() {
             let names: Vec<&str> = children.iter().map(|n| n.name.as_str()).collect();
             assert!(
                 names.iter().any(|n| n.contains("meta-llama")),
-                "Should show semantic model name: {:?}", names
+                "Should show semantic model name: {:?}",
+                names
             );
             assert!(
                 names.iter().any(|n| n.contains("squad")),
-                "Should show semantic dataset name: {:?}", names
+                "Should show semantic dataset name: {:?}",
+                names
             );
             assert!(
                 !names.iter().any(|n| n.starts_with("models--")),
-                "Should not show raw dir names: {:?}", names
+                "Should not show raw dir names: {:?}",
+                names
             );
         }
         _ => panic!("Expected ChildrenScanned"),
@@ -175,12 +186,18 @@ fn scanner_expand_whisper_shows_model_names() {
         ccmd::scanner::ScanResult::ChildrenScanned(_, children) => {
             let names: Vec<&str> = children.iter().map(|n| n.name.as_str()).collect();
             assert!(
-                names.iter().any(|n| n.contains("Whisper") && n.contains("Large")),
-                "Should show 'Whisper Large V3': {:?}", names
+                names
+                    .iter()
+                    .any(|n| n.contains("Whisper") && n.contains("Large")),
+                "Should show 'Whisper Large V3': {:?}",
+                names
             );
             assert!(
-                names.iter().any(|n| n.contains("Whisper") && n.contains("Tiny")),
-                "Should show 'Whisper Tiny': {:?}", names
+                names
+                    .iter()
+                    .any(|n| n.contains("Whisper") && n.contains("Tiny")),
+                "Should show 'Whisper Tiny': {:?}",
+                names
             );
         }
         _ => panic!("Expected ChildrenScanned"),
@@ -193,10 +210,7 @@ fn full_tree_workflow_expand_navigate_mark_delete() {
     create_hf_cache(tmp.path());
     create_whisper_cache(tmp.path());
 
-    let mut tree = ccmd::tree::state::TreeState::new(
-        ccmd::config::SortField::Size,
-        true,
-    );
+    let mut tree = ccmd::tree::state::TreeState::new(ccmd::config::SortField::Size, true);
 
     let root = ccmd::tree::node::TreeNode::root(tmp.path().to_path_buf());
     tree.set_roots(vec![root]);
@@ -219,11 +233,19 @@ fn full_tree_workflow_expand_navigate_mark_delete() {
     let result = result_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     if let ccmd::scanner::ScanResult::ChildrenScanned(parent_path, children) = result {
         // Resolve parent by path (like the real app does)
-        let parent_idx = tree.nodes.iter().position(|n| n.path == parent_path).unwrap();
+        let parent_idx = tree
+            .nodes
+            .iter()
+            .position(|n| n.path == parent_path)
+            .unwrap();
         tree.insert_children(parent_idx, children);
     }
 
-    assert!(tree.visible.len() >= 3, "Should have root + 2 children, got {}", tree.visible.len());
+    assert!(
+        tree.visible.len() >= 3,
+        "Should have root + 2 children, got {}",
+        tree.visible.len()
+    );
 
     tree.move_down();
     assert_eq!(tree.selected, 1);
@@ -242,25 +264,23 @@ fn full_tree_workflow_expand_navigate_mark_delete() {
 
 #[test]
 fn insert_children_twice_does_not_duplicate() {
-    let mut tree = ccmd::tree::state::TreeState::new(
-        ccmd::config::SortField::Size,
-        true,
-    );
+    let mut tree = ccmd::tree::state::TreeState::new(ccmd::config::SortField::Size, true);
 
     let root = make_test_node("root", 0, None, true);
     tree.set_roots(vec![root]);
     tree.expanded.insert(0);
 
-    tree.insert_children(0, vec![
-        make_test_node("child-a", 1, Some(0), true),
-        make_test_node("child-b", 1, Some(0), true),
-    ]);
+    tree.insert_children(
+        0,
+        vec![
+            make_test_node("child-a", 1, Some(0), true),
+            make_test_node("child-b", 1, Some(0), true),
+        ],
+    );
     assert_eq!(tree.nodes.len(), 3);
 
     // Second insert should be ignored
-    tree.insert_children(0, vec![
-        make_test_node("child-c", 1, Some(0), true),
-    ]);
+    tree.insert_children(0, vec![make_test_node("child-c", 1, Some(0), true)]);
     assert_eq!(tree.nodes.len(), 3, "Should NOT duplicate children");
 }
 
@@ -272,17 +292,22 @@ fn size_update_by_path_finds_correct_node_after_tree_mutation() {
     std::fs::create_dir_all(&child_a_path).unwrap();
     std::fs::create_dir_all(&child_b_path).unwrap();
 
-    let mut tree = ccmd::tree::state::TreeState::new(
-        ccmd::config::SortField::Size,
-        true,
-    );
+    let mut tree = ccmd::tree::state::TreeState::new(ccmd::config::SortField::Size, true);
 
-    tree.set_roots(vec![make_test_node_with_path("root", tmp.path().to_path_buf(), 0, None)]);
+    tree.set_roots(vec![make_test_node_with_path(
+        "root",
+        tmp.path().to_path_buf(),
+        0,
+        None,
+    )]);
     tree.expanded.insert(0);
-    tree.insert_children(0, vec![
-        make_test_node_with_path("aaa", child_a_path.clone(), 1, Some(0)),
-        make_test_node_with_path("bbb", child_b_path.clone(), 1, Some(0)),
-    ]);
+    tree.insert_children(
+        0,
+        vec![
+            make_test_node_with_path("aaa", child_a_path.clone(), 1, Some(0)),
+            make_test_node_with_path("bbb", child_b_path.clone(), 1, Some(0)),
+        ],
+    );
 
     assert_eq!(tree.nodes[1].size, 0);
     assert_eq!(tree.nodes[2].size, 0);
@@ -310,18 +335,23 @@ fn size_update_after_removing_node_doesnt_corrupt() {
     std::fs::create_dir_all(&child_b).unwrap();
     std::fs::create_dir_all(&child_c).unwrap();
 
-    let mut tree = ccmd::tree::state::TreeState::new(
-        ccmd::config::SortField::Size,
-        true,
-    );
+    let mut tree = ccmd::tree::state::TreeState::new(ccmd::config::SortField::Size, true);
 
-    tree.set_roots(vec![make_test_node_with_path("root", tmp.path().to_path_buf(), 0, None)]);
+    tree.set_roots(vec![make_test_node_with_path(
+        "root",
+        tmp.path().to_path_buf(),
+        0,
+        None,
+    )]);
     tree.expanded.insert(0);
-    tree.insert_children(0, vec![
-        make_test_node_with_path("aaa", child_a.clone(), 1, Some(0)),
-        make_test_node_with_path("bbb", child_b.clone(), 1, Some(0)),
-        make_test_node_with_path("ccc", child_c.clone(), 1, Some(0)),
-    ]);
+    tree.insert_children(
+        0,
+        vec![
+            make_test_node_with_path("aaa", child_a.clone(), 1, Some(0)),
+            make_test_node_with_path("bbb", child_b.clone(), 1, Some(0)),
+            make_test_node_with_path("ccc", child_c.clone(), 1, Some(0)),
+        ],
+    );
 
     tree.remove_nodes(&[2]);
     assert_eq!(tree.nodes.len(), 3);
@@ -347,7 +377,9 @@ fn async_expand_returns_children_with_zero_size() {
     let scan_tx = ccmd::scanner::start(result_tx);
 
     scan_tx
-        .send(ccmd::scanner::ScanRequest::ExpandNode(tmp.path().to_path_buf()))
+        .send(ccmd::scanner::ScanRequest::ExpandNode(
+            tmp.path().to_path_buf(),
+        ))
         .unwrap();
 
     let result = result_rx.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -355,8 +387,14 @@ fn async_expand_returns_children_with_zero_size() {
         ccmd::scanner::ScanResult::ChildrenScanned(_, children) => {
             assert_eq!(children.len(), 2);
             // Small dirs get instant sizes via quick_size
-            let sub1 = children.iter().find(|c| c.path == tmp.path().join("sub1")).unwrap();
-            assert!(sub1.size > 0, "sub1 should have instant size via quick_size");
+            let sub1 = children
+                .iter()
+                .find(|c| c.path == tmp.path().join("sub1"))
+                .unwrap();
+            assert!(
+                sub1.size > 0,
+                "sub1 should have instant size via quick_size"
+            );
         }
         _ => panic!("Expected ChildrenScanned first"),
     }
@@ -367,10 +405,7 @@ fn scanner_expand_and_size_update_full_cycle() {
     let tmp = tempfile::tempdir().unwrap();
     create_hf_cache(tmp.path());
 
-    let mut tree = ccmd::tree::state::TreeState::new(
-        ccmd::config::SortField::Size,
-        true,
-    );
+    let mut tree = ccmd::tree::state::TreeState::new(ccmd::config::SortField::Size, true);
     tree.set_roots(vec![ccmd::tree::node::TreeNode::root(
         tmp.path().to_path_buf(),
     )]);
@@ -380,12 +415,18 @@ fn scanner_expand_and_size_update_full_cycle() {
     let scan_tx = ccmd::scanner::start(result_tx);
 
     scan_tx
-        .send(ccmd::scanner::ScanRequest::ExpandNode(tmp.path().to_path_buf()))
+        .send(ccmd::scanner::ScanRequest::ExpandNode(
+            tmp.path().to_path_buf(),
+        ))
         .unwrap();
 
     let result = result_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     if let ccmd::scanner::ScanResult::ChildrenScanned(parent_path, children) = result {
-        let parent_idx = tree.nodes.iter().position(|n| n.path == parent_path).unwrap();
+        let parent_idx = tree
+            .nodes
+            .iter()
+            .position(|n| n.path == parent_path)
+            .unwrap();
         tree.insert_children(parent_idx, children);
         assert!(tree.nodes.len() > 1);
 
@@ -420,12 +461,20 @@ fn expand_is_correct_after_sort_reorder() {
         ccmd::config::SortField::Size,
         true, // desc
     );
-    tree.set_roots(vec![make_test_node_with_path("root", root_path.clone(), 0, None)]);
+    tree.set_roots(vec![make_test_node_with_path(
+        "root",
+        root_path.clone(),
+        0,
+        None,
+    )]);
     tree.expanded.insert(0);
-    tree.insert_children(0, vec![
-        make_test_node_with_path("aaa", child_a.clone(), 1, Some(0)),
-        make_test_node_with_path("bbb", child_b.clone(), 1, Some(0)),
-    ]);
+    tree.insert_children(
+        0,
+        vec![
+            make_test_node_with_path("aaa", child_a.clone(), 1, Some(0)),
+            make_test_node_with_path("bbb", child_b.clone(), 1, Some(0)),
+        ],
+    );
 
     // aaa is at index 1, bbb at index 2
     assert_eq!(tree.nodes[1].name, "aaa");
@@ -446,9 +495,12 @@ fn expand_is_correct_after_sort_reorder() {
     tree.expanded.insert(aaa_idx);
 
     // Simulate ChildrenScanned arriving with parent_path
-    let nested_children = vec![
-        make_test_node_with_path("nested", child_a.join("nested"), 2, None),
-    ];
+    let nested_children = vec![make_test_node_with_path(
+        "nested",
+        child_a.join("nested"),
+        2,
+        None,
+    )];
     // App resolves parent by path:
     let parent_idx = tree.nodes.iter().position(|n| n.path == child_a).unwrap();
     tree.nodes[parent_idx].children_loaded = false; // allow insertion
@@ -456,7 +508,11 @@ fn expand_is_correct_after_sort_reorder() {
 
     // Verify nested is under aaa, not bbb
     let nested_node = tree.nodes.iter().find(|n| n.name == "nested").unwrap();
-    assert_eq!(nested_node.parent, Some(aaa_idx), "nested should be child of aaa");
+    assert_eq!(
+        nested_node.parent,
+        Some(aaa_idx),
+        "nested should be child of aaa"
+    );
 }
 
 // === Test helpers ===
@@ -512,8 +568,16 @@ fn discover_packages_finds_uv_dist_info() {
 
     let packages = ccmd::scanner::discover_packages(&[tmp.path().to_path_buf()]);
     let names: Vec<&str> = packages.iter().map(|(_, id)| id.name.as_str()).collect();
-    assert!(names.contains(&"urllib3"), "Should find urllib3: {:?}", names);
-    assert!(names.contains(&"requests"), "Should find requests: {:?}", names);
+    assert!(
+        names.contains(&"urllib3"),
+        "Should find urllib3: {:?}",
+        names
+    );
+    assert!(
+        names.contains(&"requests"),
+        "Should find requests: {:?}",
+        names
+    );
     assert_eq!(packages.len(), 2);
 }
 
@@ -525,10 +589,10 @@ fn osv_query_finds_urllib3_vulns() {
         name: "urllib3".to_string(),
         version: "1.26.5".to_string(),
     }];
-    
+
     let query = ccmd::security::osv::build_query(&packages);
     eprintln!("Query: {}", query);
-    
+
     match ccmd::security::osv::query_osv(&packages) {
         Ok(resp) => {
             eprintln!("Results: {} queries returned", resp.results.len());
@@ -555,7 +619,8 @@ fn create_npx_cache(root: &std::path::Path) {
     std::fs::write(
         npx.join("package.json"),
         r#"{"dependencies":{"express":"^4"},"_npx":{"packages":["express"]}}"#,
-    ).unwrap();
+    )
+    .unwrap();
 
     // Direct dependency
     let express = npx.join("node_modules/express");
@@ -563,7 +628,8 @@ fn create_npx_cache(root: &std::path::Path) {
     std::fs::write(
         express.join("package.json"),
         r#"{"name":"express","version":"4.21.0","scripts":{"test":"mocha"}}"#,
-    ).unwrap();
+    )
+    .unwrap();
 
     // Transitive dependency with install script
     let native = npx.join("node_modules/express/node_modules/native-addon");
@@ -571,7 +637,8 @@ fn create_npx_cache(root: &std::path::Path) {
     std::fs::write(
         native.join("package.json"),
         r#"{"name":"native-addon","version":"1.0.0","scripts":{"postinstall":"node-gyp rebuild"}}"#,
-    ).unwrap();
+    )
+    .unwrap();
 
     // Transitive dependency without install script
     let qs = npx.join("node_modules/qs");
@@ -579,7 +646,8 @@ fn create_npx_cache(root: &std::path::Path) {
     std::fs::write(
         qs.join("package.json"),
         r#"{"name":"qs","version":"6.11.0","scripts":{"test":"tape"}}"#,
-    ).unwrap();
+    )
+    .unwrap();
 }
 
 #[test]
@@ -590,10 +658,24 @@ fn npm_discover_packages_finds_node_modules() {
     let packages = ccmd::scanner::discover_packages(&[tmp.path().join(".npm")]);
 
     let names: Vec<&str> = packages.iter().map(|(_, id)| id.name.as_str()).collect();
-    assert!(names.contains(&"express"), "Should find express: {:?}", names);
+    assert!(
+        names.contains(&"express"),
+        "Should find express: {:?}",
+        names
+    );
     assert!(names.contains(&"qs"), "Should find qs: {:?}", names);
-    assert!(names.contains(&"native-addon"), "Should find native-addon: {:?}", names);
-    assert_eq!(packages.iter().filter(|(_, id)| id.ecosystem == "npm").count(), 3);
+    assert!(
+        names.contains(&"native-addon"),
+        "Should find native-addon: {:?}",
+        names
+    );
+    assert_eq!(
+        packages
+            .iter()
+            .filter(|(_, id)| id.ecosystem == "npm")
+            .count(),
+        3
+    );
 }
 
 #[test]
@@ -601,11 +683,17 @@ fn npm_install_script_detection() {
     let tmp = tempfile::tempdir().unwrap();
     create_npx_cache(tmp.path());
 
-    let native = tmp.path().join(".npm/_npx/abc123/node_modules/express/node_modules/native-addon");
+    let native = tmp
+        .path()
+        .join(".npm/_npx/abc123/node_modules/express/node_modules/native-addon");
     let meta = ccmd::providers::metadata(ccmd::tree::node::CacheKind::Npm, &native);
 
     let scripts_field = meta.iter().find(|f| f.label.contains("Scripts"));
-    assert!(scripts_field.is_some(), "Should detect install scripts: {:?}", meta);
+    assert!(
+        scripts_field.is_some(),
+        "Should detect install scripts: {:?}",
+        meta
+    );
     assert!(scripts_field.unwrap().value.contains("postinstall"));
 }
 
@@ -622,7 +710,9 @@ fn npm_dep_depth_in_metadata() {
     assert_eq!(depth_field.unwrap().value, "direct");
 
     // Transitive dep
-    let native = tmp.path().join(".npm/_npx/abc123/node_modules/express/node_modules/native-addon");
+    let native = tmp
+        .path()
+        .join(".npm/_npx/abc123/node_modules/express/node_modules/native-addon");
     let meta = ccmd::providers::metadata(ccmd::tree::node::CacheKind::Npm, &native);
     let depth_field = meta.iter().find(|f| f.label == "Dep depth");
     assert!(depth_field.is_some());

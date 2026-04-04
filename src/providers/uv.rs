@@ -175,7 +175,10 @@ mod tests {
         std::fs::write(archive.join("pkg2.tar.gz"), "x").unwrap();
 
         let fields = metadata(&archive);
-        assert_eq!(fields[0].value, "Downloaded package archives (.tar.gz, .zip)");
+        assert_eq!(
+            fields[0].value,
+            "Downloaded package archives (.tar.gz, .zip)"
+        );
         let pkg_field = fields.iter().find(|f| f.label == "Packages").unwrap();
         assert_eq!(pkg_field.value, "2");
     }
@@ -212,7 +215,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let hash_dir = tmp.path().join("xyz");
         std::fs::create_dir_all(hash_dir.join("annotated_types-0.7.0.dist-info")).unwrap();
-        assert_eq!(semantic_name(&hash_dir), Some("annotated-types 0.7.0".into()));
+        assert_eq!(
+            semantic_name(&hash_dir),
+            Some("annotated-types 0.7.0".into())
+        );
     }
 
     #[test]

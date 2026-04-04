@@ -3,7 +3,9 @@ use crate::ui::theme;
 use humansize::{format_size, BINARY};
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use ratatui::widgets::{
+    Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+};
 use ratatui::Frame;
 
 pub fn render(
@@ -80,8 +82,7 @@ pub fn render(
         };
 
         // Padding between name and size
-        let padding_len = width
-            .saturating_sub(prefix_len + truncated_name.len() + size_len);
+        let padding_len = width.saturating_sub(prefix_len + truncated_name.len() + size_len);
         let padding = " ".repeat(padding_len);
 
         let style = if is_dimmed {
@@ -118,7 +119,16 @@ pub fn render(
             Span::styled(status_icon, if is_selected { style } else { icon_style }),
             Span::styled(truncated_name, style),
             Span::styled(padding, style),
-            Span::styled(format!("{size_str} "), if is_dimmed { theme::DIMMED } else if is_selected { style } else { theme::SIZE }),
+            Span::styled(
+                format!("{size_str} "),
+                if is_dimmed {
+                    theme::DIMMED
+                } else if is_selected {
+                    style
+                } else {
+                    theme::SIZE
+                },
+            ),
         ]);
 
         lines.push(line);
@@ -129,11 +139,13 @@ pub fn render(
 
     // Scrollbar
     if tree.visible.len() > height {
-        let mut scrollbar_state = ScrollbarState::new(tree.visible.len())
-            .position(tree.scroll_offset);
+        let mut scrollbar_state =
+            ScrollbarState::new(tree.visible.len()).position(tree.scroll_offset);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .thumb_style(ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray))
-            .track_style(ratatui::style::Style::default().fg(ratatui::style::Color::Rgb(30, 30, 50)));
+            .track_style(
+                ratatui::style::Style::default().fg(ratatui::style::Color::Rgb(30, 30, 50)),
+            );
         f.render_stateful_widget(scrollbar, inner, &mut scrollbar_state);
     }
 }

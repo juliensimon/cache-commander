@@ -16,7 +16,12 @@ pub fn semantic_name(path: &Path) -> Option<String> {
         if let Some(pos) = stem.rfind('-') {
             let pkg = &stem[..pos];
             let ver = &stem[pos + 1..];
-            if ver.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+            if ver
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_digit())
+                .unwrap_or(false)
+            {
                 return Some(format!("{pkg} {ver}"));
             }
         }
@@ -28,7 +33,12 @@ pub fn semantic_name(path: &Path) -> Option<String> {
         if parts.len() == 2 {
             let ver = parts[0];
             let pkg = parts[1];
-            if ver.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+            if ver
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_digit())
+                .unwrap_or(false)
+            {
                 return Some(format!("{pkg} {ver}"));
             }
         }
@@ -47,7 +57,12 @@ pub fn package_id(path: &Path) -> Option<super::PackageId> {
         if let Some(pos) = stem.rfind('-') {
             let pkg = &stem[..pos];
             let ver = &stem[pos + 1..];
-            if ver.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+            if ver
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_digit())
+                .unwrap_or(false)
+            {
                 return Some(super::PackageId {
                     ecosystem: "crates.io",
                     name: pkg.to_string(),
@@ -79,12 +94,7 @@ pub fn metadata(path: &Path) -> Vec<MetadataField> {
                     if let Ok(sub) = std::fs::read_dir(entry.path()) {
                         count += sub
                             .filter_map(|e| e.ok())
-                            .filter(|e| {
-                                e.path()
-                                    .extension()
-                                    .map(|x| x == "crate")
-                                    .unwrap_or(false)
-                            })
+                            .filter(|e| e.path().extension().map(|x| x == "crate").unwrap_or(false))
                             .count();
                     }
                 }
