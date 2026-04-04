@@ -17,7 +17,9 @@ pub const DANGER: Style = Style::new().fg(Color::Red);
 pub const PROVIDER: Style = Style::new().fg(Color::Rgb(251, 191, 36));
 pub const _BAR_BG: Color = Color::Rgb(30, 30, 50);
 pub const _BAR_FG: Color = Color::Cyan;
-pub const DIMMED: Style = Style::new().fg(Color::Rgb(100, 100, 100));
+pub const DIMMED: Style = Style::new()
+    .fg(Color::Rgb(80, 80, 100))
+    .add_modifier(Modifier::DIM);
 pub const BORDER: Style = Style::new().fg(Color::Rgb(68, 68, 68));
 pub const KEY: Style = Style::new().fg(Color::Cyan);
 pub const DIALOG_BORDER: Style = Style::new().fg(Color::Red);
