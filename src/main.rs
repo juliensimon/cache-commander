@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod providers;
 mod scanner;
+mod security;
 mod tree;
 mod ui;
 
