@@ -678,6 +678,313 @@ impl ServerHandler for CcmdMcp {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tree::node::CacheKind;
+    use std::os::unix::fs::symlink;
+    use tempfile::TempDir;
+
+    // --- is_under_roots ---
+
+    #[test]
+    fn is_under_roots_valid_child() {
+        let dir = TempDir::new().unwrap();
+        let child = dir.path().join("subdir");
+        std::fs::create_dir(&child).unwrap();
+        assert!(is_under_roots(&child, &[dir.path().to_path_buf()]));
+    }
+
+    #[test]
+    fn is_under_roots_rejects_outside_path() {
+        let root = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let file = outside.path().join("file.txt");
+        std::fs::write(&file, "test").unwrap();
+        assert!(!is_under_roots(&file, &[root.path().to_path_buf()]));
+    }
+
+    #[test]
+    fn is_under_roots_rejects_nonexistent() {
+        let root = TempDir::new().unwrap();
+        assert!(!is_under_roots(
+            &root.path().join("nope"),
+            &[root.path().to_path_buf()]
+        ));
+    }
+
+    #[test]
+    fn is_under_roots_resolves_symlinks() {
+        let root = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let target = outside.path().join("secret");
+        std::fs::write(&target, "secret data").unwrap();
+
+        // Create symlink inside root pointing outside
+        let link = root.path().join("link");
+        symlink(&target, &link).unwrap();
+
+        // String-based check would pass, but canonicalize catches it
+        assert!(!is_under_roots(&link, &[root.path().to_path_buf()]));
+    }
+
+    #[test]
+    fn is_under_roots_multiple_roots() {
+        let root1 = TempDir::new().unwrap();
+        let root2 = TempDir::new().unwrap();
+        let child = root2.path().join("pkg");
+        std::fs::create_dir(&child).unwrap();
+        assert!(is_under_roots(
+            &child,
+            &[root1.path().to_path_buf(), root2.path().to_path_buf()]
+        ));
+    }
+
+    // --- provider_label ---
+
+    #[test]
+    fn provider_label_known_kind() {
+        let mut node = TreeNode::new(PathBuf::from("/tmp/test"), 1, None);
+        node.kind = CacheKind::Pip;
+        assert_eq!(CcmdMcp::provider_label(&node), "pip");
+    }
+
+    #[test]
+    fn provider_label_unknown_under_library_caches() {
+        let mut node = TreeNode::new(
+            PathBuf::from("/Users/test/Library/Caches/com.apple.something"),
+            1,
+            None,
+        );
+        node.kind = CacheKind::Unknown;
+        assert_eq!(CcmdMcp::provider_label(&node), "~/Library/Caches");
+    }
+
+    #[test]
+    fn provider_label_unknown_elsewhere() {
+        let mut node = TreeNode::new(PathBuf::from("/home/user/.cache/something"), 1, None);
+        node.kind = CacheKind::Unknown;
+        assert_eq!(CcmdMcp::provider_label(&node), "Other");
+    }
+
+    // --- VulnScanReport aggregation ---
+
+    #[test]
+    fn vuln_report_counts() {
+        let packages = vec![
+            VulnResult {
+                name: "pkg1".into(),
+                version: "1.0".into(),
+                ecosystem: "pip".into(),
+                path: "/a".into(),
+                vulnerabilities: vec![
+                    VulnEntry {
+                        id: "CVE-1".into(),
+                        summary: "bad".into(),
+                        severity: None,
+                        fix_version: Some("1.1".into()),
+                        upgrade_command: None,
+                    },
+                    VulnEntry {
+                        id: "CVE-2".into(),
+                        summary: "worse".into(),
+                        severity: None,
+                        fix_version: None,
+                        upgrade_command: None,
+                    },
+                ],
+            },
+            VulnResult {
+                name: "pkg2".into(),
+                version: "2.0".into(),
+                ecosystem: "npm".into(),
+                path: "/b".into(),
+                vulnerabilities: vec![VulnEntry {
+                    id: "CVE-3".into(),
+                    summary: "also bad".into(),
+                    severity: None,
+                    fix_version: Some("2.1".into()),
+                    upgrade_command: None,
+                }],
+            },
+        ];
+
+        let total_vulns: usize = packages.iter().map(|r| r.vulnerabilities.len()).sum();
+        let fixable: usize = packages
+            .iter()
+            .flat_map(|r| &r.vulnerabilities)
+            .filter(|v| v.fix_version.is_some())
+            .count();
+
+        let report = VulnScanReport {
+            vulnerable_packages: packages.len(),
+            total_vulnerabilities: total_vulns,
+            fixable,
+            unfixable: total_vulns - fixable,
+            packages,
+        };
+
+        assert_eq!(report.vulnerable_packages, 2);
+        assert_eq!(report.total_vulnerabilities, 3);
+        assert_eq!(report.fixable, 2);
+        assert_eq!(report.unfixable, 1);
+    }
+
+    // --- OutdatedReport aggregation ---
+
+    #[test]
+    fn outdated_report_by_ecosystem() {
+        let packages = vec![
+            OutdatedResult {
+                name: "a".into(),
+                version: "1.0".into(),
+                latest: "2.0".into(),
+                ecosystem: "pip".into(),
+                path: "/a".into(),
+                upgrade_command: None,
+            },
+            OutdatedResult {
+                name: "b".into(),
+                version: "1.0".into(),
+                latest: "3.0".into(),
+                ecosystem: "pip".into(),
+                path: "/b".into(),
+                upgrade_command: None,
+            },
+            OutdatedResult {
+                name: "c".into(),
+                version: "1.0".into(),
+                latest: "2.0".into(),
+                ecosystem: "npm".into(),
+                path: "/c".into(),
+                upgrade_command: None,
+            },
+        ];
+
+        let mut by_ecosystem: HashMap<String, usize> = HashMap::new();
+        for pkg in &packages {
+            *by_ecosystem.entry(pkg.ecosystem.clone()).or_default() += 1;
+        }
+
+        let report = OutdatedReport {
+            outdated_packages: packages.len(),
+            by_ecosystem,
+            packages,
+        };
+
+        assert_eq!(report.outdated_packages, 3);
+        assert_eq!(report.by_ecosystem["pip"], 2);
+        assert_eq!(report.by_ecosystem["npm"], 1);
+    }
+
+    // --- PreviewResult counts ---
+
+    #[test]
+    fn preview_result_counts() {
+        let result = PreviewResult {
+            deletable_count: 5,
+            needs_confirmation_count: 2,
+            rejected_count: 1,
+            total_deletable_size: "100 MiB".into(),
+            total_deletable_size_bytes: 100 * 1024 * 1024,
+            items: vec![],
+        };
+        assert_eq!(
+            result.deletable_count + result.needs_confirmation_count + result.rejected_count,
+            8
+        );
+    }
+
+    // --- DeleteResult counts ---
+
+    #[test]
+    fn delete_result_counts_match_arrays() {
+        let result = DeleteResult {
+            deleted_count: 2,
+            skipped_count: 1,
+            space_freed: "50 MiB".into(),
+            space_freed_bytes: 50 * 1024 * 1024,
+            deleted: vec![
+                DeletedItem {
+                    path: "/a".into(),
+                    name: "a".into(),
+                    size: "25 MiB".into(),
+                },
+                DeletedItem {
+                    path: "/b".into(),
+                    name: "b".into(),
+                    size: "25 MiB".into(),
+                },
+            ],
+            skipped: vec![SkippedItem {
+                path: "/c".into(),
+                name: "c".into(),
+                reason: "unsafe".into(),
+            }],
+        };
+        assert_eq!(result.deleted_count, result.deleted.len());
+        assert_eq!(result.skipped_count, result.skipped.len());
+    }
+
+    // --- SearchReport count ---
+
+    #[test]
+    fn search_report_count_matches() {
+        let packages = vec![PackageEntry {
+            name: "torch".into(),
+            version: "2.0".into(),
+            ecosystem: "pip".into(),
+            path: "/a".into(),
+            size: "1 GiB".into(),
+            size_bytes: 1024 * 1024 * 1024,
+            safety_level: "Safe".into(),
+            safety_icon: "●".into(),
+        }];
+        let report = SearchReport {
+            total_results: packages.len(),
+            packages,
+        };
+        assert_eq!(report.total_results, 1);
+    }
+
+    // --- JSON serialization round-trip ---
+
+    #[test]
+    fn vuln_report_serializes_with_counts_at_top() {
+        let report = VulnScanReport {
+            vulnerable_packages: 1,
+            total_vulnerabilities: 2,
+            fixable: 1,
+            unfixable: 1,
+            packages: vec![],
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        // Counts should appear before packages array in JSON
+        let count_pos = json.find("vulnerable_packages").unwrap();
+        let packages_pos = json.find("\"packages\"").unwrap();
+        assert!(
+            count_pos < packages_pos,
+            "Counts should appear before packages array"
+        );
+    }
+
+    #[test]
+    fn delete_result_serializes_with_counts_at_top() {
+        let result = DeleteResult {
+            deleted_count: 0,
+            skipped_count: 0,
+            space_freed: "0 B".into(),
+            space_freed_bytes: 0,
+            deleted: vec![],
+            skipped: vec![],
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let count_pos = json.find("deleted_count").unwrap();
+        let array_pos = json.find("\"deleted\"").unwrap();
+        assert!(count_pos < array_pos, "Counts should appear before arrays");
+    }
+}
+
 pub fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
