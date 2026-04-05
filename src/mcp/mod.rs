@@ -32,6 +32,9 @@ pub struct CcmdMcp {
 /// Check if a provider label matches a user-supplied ecosystem filter.
 /// Handles aliases (e.g. "npx" matches "npm") and fuzzy matching.
 fn matches_ecosystem(label: &str, filter: &str) -> bool {
+    if label.is_empty() || filter.is_empty() {
+        return false;
+    }
     let label = label.to_lowercase();
     let filter = filter.to_lowercase();
     // Exact or substring match
