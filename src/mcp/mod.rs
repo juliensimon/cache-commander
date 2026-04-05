@@ -29,6 +29,27 @@ pub struct CcmdMcp {
     tool_router: ToolRouter<Self>,
 }
 
+/// Check if a provider label matches a user-supplied ecosystem filter.
+/// Handles aliases (e.g. "npx" matches "npm") and fuzzy matching.
+fn matches_ecosystem(label: &str, filter: &str) -> bool {
+    let label = label.to_lowercase();
+    let filter = filter.to_lowercase();
+    // Exact or substring match
+    if label.contains(&filter) || filter.contains(&label) {
+        return true;
+    }
+    // Known aliases
+    match filter.as_str() {
+        "npx" => label.contains("npm"),
+        "node" | "nodejs" => label.contains("npm"),
+        "python" | "pypi" => label.contains("pip") || label.contains("uv"),
+        "rust" | "crates" => label.contains("cargo"),
+        "brew" => label.contains("homebrew"),
+        "hf" => label.contains("huggingface"),
+        _ => false,
+    }
+}
+
 /// Check if a path is inside any of the configured cache roots (resolving symlinks).
 fn is_under_roots(path: &std::path::Path, roots: &[PathBuf]) -> bool {
     let Ok(canonical) = std::fs::canonicalize(path) else {
@@ -238,12 +259,9 @@ impl CcmdMcp {
                     let name_match = query
                         .as_ref()
                         .is_none_or(|q| node.name.to_lowercase().contains(q));
-                    let eco_match = ecosystem.as_ref().is_none_or(|eco| {
-                        node.kind
-                            .label()
-                            .to_lowercase()
-                            .contains(&eco.to_lowercase())
-                    });
+                    let eco_match = ecosystem
+                        .as_ref()
+                        .is_none_or(|eco| matches_ecosystem(node.kind.label(), eco));
                     name_match && eco_match
                 })
                 .map(|node| {
@@ -298,12 +316,9 @@ impl CcmdMcp {
                 let nodes = server.walk_roots();
                 nodes.into_iter().find(|node| {
                     let name_match = node.name.to_lowercase().contains(&name);
-                    let eco_match = ecosystem.as_ref().is_none_or(|eco| {
-                        node.kind
-                            .label()
-                            .to_lowercase()
-                            .contains(&eco.to_lowercase())
-                    });
+                    let eco_match = ecosystem
+                        .as_ref()
+                        .is_none_or(|eco| matches_ecosystem(node.kind.label(), eco));
                     name_match && eco_match
                 })
             })
@@ -389,7 +404,7 @@ impl CcmdMcp {
         let result = tokio::task::spawn_blocking(move || {
             let mut packages = scanner::discover_packages(&roots);
             if let Some(ref eco) = ecosystem_filter {
-                packages.retain(|(_, pkg)| pkg.ecosystem.eq_ignore_ascii_case(eco));
+                packages.retain(|(_, pkg)| matches_ecosystem(pkg.ecosystem, eco));
             }
             if packages.is_empty() {
                 return Vec::new();
@@ -470,7 +485,7 @@ impl CcmdMcp {
         let result = tokio::task::spawn_blocking(move || {
             let mut packages = scanner::discover_packages(&roots);
             if let Some(ref eco) = ecosystem_filter {
-                packages.retain(|(_, pkg)| pkg.ecosystem.eq_ignore_ascii_case(eco));
+                packages.retain(|(_, pkg)| matches_ecosystem(pkg.ecosystem, eco));
             }
             if packages.is_empty() {
                 return Vec::new();
