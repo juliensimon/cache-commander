@@ -111,12 +111,24 @@ impl CcmdMcp {
             return;
         }
 
-        // Known provider but not a package → container dir, recurse.
+        // Known provider, not a package → check if it's a container worth recursing.
+        // Recurse if: no semantic name (unnamed container like "hub/"), OR
+        // has children that are themselves packages (e.g. _npx/ contains [npx] items).
         if kind != CacheKind::Unknown && path.is_dir() {
-            for child in walker::list_children(path) {
-                Self::collect_nodes(&child, depth + 1, nodes);
+            let should_recurse = semantic_name.is_none() || {
+                // Peek at children: if any child has a typed semantic name, recurse
+                walker::list_children(path).iter().any(|child| {
+                    let ck = providers::detect(child);
+                    providers::semantic_name(ck, child).is_some_and(|n| n.starts_with('['))
+                        || providers::package_id(ck, child).is_some()
+                })
+            };
+            if should_recurse {
+                for child in walker::list_children(path) {
+                    Self::collect_nodes(&child, depth + 1, nodes);
+                }
+                return;
             }
-            return;
         }
 
         // Unknown kind → leaf node (e.g. ~/Library/Caches/com.apple.something)
