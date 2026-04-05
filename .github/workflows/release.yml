@@ -74,3 +74,35 @@ jobs:
           files: |
             ccmd-*.tar.gz
             checksums-sha256.txt
+
+  update-homebrew:
+    name: Update Homebrew Tap
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Compute checksums
+        id: shas
+        run: |
+          echo "aarch64_darwin=$(sha256sum ccmd-aarch64-apple-darwin.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "x86_64_darwin=$(sha256sum ccmd-x86_64-apple-darwin.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "aarch64_linux=$(sha256sum ccmd-aarch64-unknown-linux-gnu.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "x86_64_linux=$(sha256sum ccmd-x86_64-unknown-linux-gnu.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
+      - name: Update formula in tap
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          repository: juliensimon/homebrew-tap
+          event-type: update-formula
+          client-payload: |
+            {
+              "version": "${{ github.ref_name }}",
+              "sha256_aarch64_darwin": "${{ steps.shas.outputs.aarch64_darwin }}",
+              "sha256_x86_64_darwin": "${{ steps.shas.outputs.x86_64_darwin }}",
+              "sha256_aarch64_linux": "${{ steps.shas.outputs.aarch64_linux }}",
+              "sha256_x86_64_linux": "${{ steps.shas.outputs.x86_64_linux }}"
+            }
