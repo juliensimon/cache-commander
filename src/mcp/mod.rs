@@ -237,15 +237,49 @@ impl CcmdMcp {
         }
     }
 
-    #[tool(description = "Get detailed metadata for a specific cache entry by its absolute path")]
+    #[tool(
+        description = "Get detailed metadata for a cache entry. Provide either path (absolute) or name + ecosystem (e.g. name='lodash', ecosystem='npm')."
+    )]
     async fn get_package_details(
         &self,
-        input: Parameters<tools::PathInput>,
+        input: Parameters<tools::DetailsInput>,
     ) -> Result<String, String> {
         let input = input.0;
-        let path = PathBuf::from(&input.path);
+
+        // Resolve path: either provided directly or looked up by name+ecosystem
+        let path = if let Some(ref p) = input.path {
+            PathBuf::from(p)
+        } else if let Some(ref name) = input.name {
+            let server = self.clone();
+            let name = name.to_lowercase();
+            let ecosystem = input.ecosystem.clone();
+            let found = tokio::task::spawn_blocking(move || {
+                let nodes = server.walk_roots();
+                nodes.into_iter().find(|node| {
+                    let name_match = node.name.to_lowercase().contains(&name);
+                    let eco_match = ecosystem
+                        .as_ref()
+                        .is_none_or(|eco| node.kind.label().eq_ignore_ascii_case(eco));
+                    name_match && eco_match
+                })
+            })
+            .await
+            .map_err(|e| format!("spawn_blocking failed: {e}"))?;
+            match found {
+                Some(node) => node.path,
+                None => {
+                    return Ok(format!(
+                        "No package found matching name '{}'.",
+                        input.name.unwrap()
+                    ))
+                }
+            }
+        } else {
+            return Ok("Provide either 'path' or 'name' (with optional 'ecosystem').".to_string());
+        };
+
         if !path.exists() {
-            return Ok(format!("Path not found: {}", input.path));
+            return Ok(format!("Path not found: {}", path.display()));
         }
         if !is_under_roots(&path, &self.roots) {
             return Ok("Path is not inside any configured cache root.".to_string());

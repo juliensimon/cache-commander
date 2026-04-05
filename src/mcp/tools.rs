@@ -176,9 +176,13 @@ pub struct SearchInput {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct PathInput {
-    /// Absolute path to a cache entry
-    pub path: String,
+pub struct DetailsInput {
+    /// Absolute path to a cache entry. If omitted, use name + ecosystem instead.
+    pub path: Option<String>,
+    /// Package name to look up (used when path is omitted)
+    pub name: Option<String>,
+    /// Ecosystem to search in (used with name, e.g. npm, pip, huggingface)
+    pub ecosystem: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
