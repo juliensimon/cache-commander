@@ -6,7 +6,7 @@ use crate::providers;
 use crate::scanner;
 use crate::scanner::walker;
 use crate::security;
-use crate::tree::node::TreeNode;
+use crate::tree::node::{CacheKind, TreeNode};
 
 use humansize::{format_size, BINARY};
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -50,21 +50,44 @@ impl CcmdMcp {
         }
     }
 
-    /// Walk all roots and collect TreeNodes for immediate children
+    /// Walk all roots and collect TreeNodes, recursing into provider containers
+    /// to find individual packages (e.g. ~/.cache/huggingface/hub/models--org--name).
     fn walk_roots(&self) -> Vec<TreeNode> {
         let mut nodes = Vec::new();
         for root in &self.roots {
             for child_path in walker::list_children(root) {
-                let mut node = TreeNode::new(child_path.clone(), 1, None);
-                node.kind = providers::detect(&child_path);
-                node.size = walker::dir_size(&child_path);
-                if let Some(name) = providers::semantic_name(node.kind, &child_path) {
-                    node.name = name;
-                }
-                nodes.push(node);
+                Self::collect_nodes(&child_path, 1, &mut nodes);
             }
         }
         nodes
+    }
+
+    /// Collect package nodes from a path. If it's a known provider container
+    /// (detected kind but no semantic name), recurse into children to find
+    /// actual packages. Max depth 3 to avoid runaway recursion.
+    fn collect_nodes(path: &PathBuf, depth: u16, nodes: &mut Vec<TreeNode>) {
+        if depth > 3 {
+            return;
+        }
+        let kind = providers::detect(path);
+        let has_semantic_name = providers::semantic_name(kind, path).is_some();
+
+        // If it's a known provider but has no semantic name, it's a container
+        // directory (e.g. "huggingface", "hub") — recurse into children.
+        if kind != CacheKind::Unknown && !has_semantic_name && path.is_dir() {
+            for child in walker::list_children(path) {
+                Self::collect_nodes(&child, depth + 1, nodes);
+            }
+            return;
+        }
+
+        let mut node = TreeNode::new(path.clone(), depth, None);
+        node.kind = kind;
+        node.size = walker::dir_size(path);
+        if let Some(name) = providers::semantic_name(kind, path) {
+            node.name = name;
+        }
+        nodes.push(node);
     }
 
     fn provider_label(node: &TreeNode) -> String {
