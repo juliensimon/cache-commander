@@ -15,6 +15,10 @@ pub fn render(
     tree: &TreeState,
     vuln_results: &std::collections::HashMap<std::path::PathBuf, crate::security::SecurityInfo>,
     version_results: &std::collections::HashMap<std::path::PathBuf, crate::security::VersionInfo>,
+    brew_outdated_results: &std::collections::HashMap<
+        String,
+        crate::providers::homebrew::BrewOutdatedEntry,
+    >,
 ) {
     let node = match tree.selected_node() {
         Some(n) => n,
@@ -215,6 +219,49 @@ pub fn render(
             ) {
                 lines.push(Line::from(Span::styled(format!("  → {}", cmd), theme::DIM)));
             }
+        }
+    }
+
+    // Brew outdated info — try semantic name first, fall back to parsing raw filename
+    let brew_pkg_name = {
+        let from_semantic = extract_package_name(&node.name);
+        if brew_outdated_results.contains_key(&from_semantic) {
+            from_semantic
+        } else if let Some((name, _)) = crate::providers::homebrew::parse_bottle_name(
+            &node.path.file_name().unwrap_or_default().to_string_lossy(),
+        ) {
+            name
+        } else if let Some((name, _)) = crate::providers::homebrew::parse_manifest_name(
+            &node.path.file_name().unwrap_or_default().to_string_lossy(),
+        ) {
+            name
+        } else {
+            from_semantic
+        }
+    };
+    if let Some(entry) = brew_outdated_results.get(&brew_pkg_name) {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("BREW VERSION", theme::DIM)));
+        lines.push(Line::from(vec![
+            Span::styled("  Current  ", theme::DIM),
+            Span::styled(&entry.installed, theme::NORMAL),
+            Span::styled("  →  ", theme::DIM),
+            Span::styled(&entry.current, theme::CAUTION),
+        ]));
+        lines.push(Line::from(Span::styled(
+            "  ↓ Update available",
+            theme::CAUTION,
+        )));
+        if entry.pinned {
+            lines.push(Line::from(Span::styled(
+                "  Pinned — run `brew upgrade --force` to update",
+                theme::DIM,
+            )));
+        } else {
+            lines.push(Line::from(Span::styled(
+                format!("  → brew upgrade {brew_pkg_name}"),
+                theme::DIM,
+            )));
         }
     }
 

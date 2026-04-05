@@ -39,6 +39,9 @@ pub struct App {
     auto_versioncheck_pending: bool,
     vulnscan_in_progress: bool,
     versioncheck_in_progress: bool,
+    pub brew_outdated_results: HashMap<String, crate::providers::homebrew::BrewOutdatedEntry>,
+    brew_outdated_in_progress: bool,
+    auto_brew_outdated_pending: bool,
 }
 
 impl App {
@@ -68,6 +71,9 @@ impl App {
             auto_versioncheck_pending: auto_ver,
             vulnscan_in_progress: false,
             versioncheck_in_progress: false,
+            brew_outdated_results: HashMap::new(),
+            brew_outdated_in_progress: false,
+            auto_brew_outdated_pending: true,
         }
     }
 
@@ -90,6 +96,10 @@ impl App {
                         self.tree.nodes.iter().position(|n| n.path == parent_path)
                     {
                         self.tree.insert_children(parent_idx, children);
+                    }
+                    if !self.brew_outdated_results.is_empty() {
+                        self.recompute_node_status();
+                        self.tree.recompute_dimmed(&self.node_status);
                     }
                 }
                 ScanResult::SizeUpdated(path, size) => {
@@ -134,6 +144,20 @@ impl App {
                         format!("Checked {} packages — all up to date", checked)
                     });
                 }
+                ScanResult::BrewOutdatedCompleted(results) => {
+                    let outdated_count = results.len();
+                    self.brew_outdated_results = results;
+                    self.brew_outdated_in_progress = false;
+                    self.recompute_node_status();
+                    self.tree.recompute_dimmed(&self.node_status);
+                    if outdated_count > 0 {
+                        self.status_msg = Some(format!(
+                            "brew: {} outdated package{}",
+                            outdated_count,
+                            if outdated_count == 1 { "" } else { "s" }
+                        ));
+                    }
+                }
             }
         }
 
@@ -155,6 +179,20 @@ impl App {
                 let _ = self
                     .scan_tx
                     .send(crate::scanner::ScanRequest::CheckVersions(roots));
+            }
+        }
+
+        // Auto-trigger brew outdated when Homebrew caches are among configured roots
+        if self.auto_brew_outdated_pending && !self.tree.nodes.is_empty() {
+            self.auto_brew_outdated_pending = false;
+            let has_homebrew = self
+                .config
+                .roots
+                .iter()
+                .any(|r| r.join("Homebrew").is_dir() || r.ends_with("Homebrew"));
+            if has_homebrew {
+                self.brew_outdated_in_progress = true;
+                let _ = self.scan_tx.send(crate::scanner::ScanRequest::BrewOutdated);
             }
         }
     }
@@ -482,6 +520,27 @@ impl App {
             }
         }
 
+        // Brew outdated: match formula names to tree node paths
+        for node in &self.tree.nodes {
+            let pkg_name = extract_package_name(&node.name);
+            let from_path = node
+                .path
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .and_then(|f| {
+                    crate::providers::homebrew::parse_bottle_name(&f)
+                        .or_else(|| crate::providers::homebrew::parse_manifest_name(&f))
+                        .map(|(name, _)| name)
+                });
+            let name_to_check = from_path.unwrap_or(pkg_name);
+            if self.brew_outdated_results.contains_key(&name_to_check) {
+                self.node_status
+                    .entry(node.path.clone())
+                    .or_default()
+                    .has_outdated = true;
+            }
+        }
+
         // Propagate to all filesystem ancestors so parent folders
         // inherit status even if they're not expanded in the tree
         let affected: Vec<(PathBuf, bool, bool)> = self
@@ -687,6 +746,7 @@ impl App {
             &self.tree,
             &self.vuln_results,
             &self.version_results,
+            &self.brew_outdated_results,
         );
     }
 

@@ -12,6 +12,8 @@ pub enum ScanRequest {
     ScanVulns(Vec<PathBuf>),
     /// Walk given paths to discover packages, then query registries
     CheckVersions(Vec<PathBuf>),
+    /// Run `brew outdated --json=v2` in the background
+    BrewOutdated,
 }
 
 pub enum ScanResult {
@@ -27,6 +29,10 @@ pub enum ScanResult {
     VersionsChecked(
         usize,
         std::collections::HashMap<PathBuf, crate::security::VersionInfo>,
+    ),
+    /// formula name → outdated info
+    BrewOutdatedCompleted(
+        std::collections::HashMap<String, crate::providers::homebrew::BrewOutdatedEntry>,
     ),
 }
 
@@ -101,6 +107,13 @@ pub fn start(result_tx: mpsc::Sender<ScanResult>) -> mpsc::Sender<ScanRequest> {
                         let _ = tx.send(ScanResult::VersionsChecked(count, results));
                     });
                 }
+                ScanRequest::BrewOutdated => {
+                    let tx = result_tx.clone();
+                    std::thread::spawn(move || {
+                        let results = run_brew_outdated();
+                        let _ = tx.send(ScanResult::BrewOutdatedCompleted(results));
+                    });
+                }
                 ScanRequest::ExpandNode(path) => {
                     let children_paths = walker::list_children(&path);
                     let mut children: Vec<TreeNode> = children_paths
@@ -142,4 +155,18 @@ pub fn start(result_tx: mpsc::Sender<ScanResult>) -> mpsc::Sender<ScanRequest> {
     });
 
     request_tx
+}
+
+fn run_brew_outdated(
+) -> std::collections::HashMap<String, crate::providers::homebrew::BrewOutdatedEntry> {
+    let output = match std::process::Command::new("brew")
+        .args(["outdated", "--json=v2"])
+        .env("HOMEBREW_NO_AUTO_UPDATE", "1")
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return std::collections::HashMap::new(),
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    crate::providers::homebrew::parse_brew_outdated(&stdout)
 }
