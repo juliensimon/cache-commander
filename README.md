@@ -13,30 +13,7 @@ A terminal UI (TUI) for exploring, auditing, and cleaning developer cache direct
 
 Developer machines accumulate tens of gigabytes of invisible cache data — ML models, package archives, build artifacts, downloaded bottles. `ccmd` makes it all visible, scannable for vulnerabilities, and safely deletable.
 
-```
- ██████╗ █████╗  ██████╗██╗  ██╗███████╗  ██████╗ ██████╗ ███╗   ███╗███╗   ███╗ █████╗ ███╗   ██╗██████╗ ███████╗██████╗
-██╔════╝██╔══██╗██╔════╝██║  ██║██╔════╝ ██╔════╝██╔═══██╗████╗ ████║████╗ ████║██╔══██╗████╗  ██║██╔══██╗██╔════╝██╔══██╗
-██║     ███████║██║     ███████║█████╗   ██║     ██║   ██║██╔████╔██║██╔████╔██║███████║██╔██╗ ██║██║  ██║█████╗  ██████╔╝
-██║     ██╔══██║██║     ██╔══██║██╔══╝   ██║     ██║   ██║██║╚██╔╝██║██║╚██╔╝██║██╔══██║██║╚██╗██║██║  ██║██╔══╝  ██╔══██╗
-╚██████╗██║  ██║╚██████╗██║  ██║███████╗ ╚██████╗╚██████╔╝██║ ╚═╝ ██║██║ ╚═╝ ██║██║  ██║██║ ╚████║██████╔╝███████╗██║  ██║
- ╚═════╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝╚══════╝  ╚═════╝ ╚═════╝ ╚═╝     ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝╚═════╝ ╚══════╝╚═╝  ╚═╝
-48.2 GiB  │  4 roots  │  sort: size ↓  │  ⚠ 12 vulns  │  ↓ 8 outdated  │  ? help
-─────────────────────────────────────────────────────────────────────────────────────
-▾ ~/.cache                    38.1 GiB  │  VULNERABILITIES (2)
-  ▾ huggingface               29.0 GiB  │    ⚠ CVE-2023-32681 (7.5)
-    ▸ hub                     19.0 GiB  │      Unintended leak of Proxy-Auth header
-    ▸ xet                      9.3 GiB  │      Fix: ≥2.32.0
-  ▾ ⚠↓uv                      4.1 GiB  │      → pip install requests>=2.32.0
-    ▾ ⚠↓Built Wheels         162 KiB   │      osv.dev/vulnerability/CVE-2023-32681
-      ▾ ⚠↓pypi               162 KiB   │
-        ⚠ requests 2.31.0    1.2 MB    │  VERSION
-        ↓ flask 3.0.0        890 KB    │    Current  2.31.0  →  2.32.3
-▸ ~/Library/Caches             9.8 GiB  │
-▸ ~/.npm                     366 MiB    │  ACTION
-▸ ~/.cargo/registry           81 MiB    │    ○ Delete to force re-download of patched version
-─────────────────────────────────────────────────────────────────────────────────────
-↑↓ navigate  ←→ expand  Space mark  d delete  s sort  / search  f filter  m mark all
-```
+![Cache Commander screenshot](screenshot.png)
 
 ## Why
 
