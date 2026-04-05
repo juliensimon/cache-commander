@@ -64,29 +64,36 @@ impl CcmdMcp {
 
     /// Collect package nodes from a path. If it's a known provider container
     /// (detected kind but no semantic name), recurse into children to find
-    /// actual packages. Max depth 3 to avoid runaway recursion.
+    /// actual packages. Once a node has a semantic name, it's a package — stop.
     fn collect_nodes(path: &PathBuf, depth: u16, nodes: &mut Vec<TreeNode>) {
-        if depth > 3 {
+        if depth > 4 {
             return;
         }
         let kind = providers::detect(path);
-        let has_semantic_name = providers::semantic_name(kind, path).is_some();
+        let semantic_name = providers::semantic_name(kind, path);
 
-        // If it's a known provider but has no semantic name, it's a container
-        // directory (e.g. "huggingface", "hub") — recurse into children.
-        if kind != CacheKind::Unknown && !has_semantic_name && path.is_dir() {
+        // Has a semantic name → it's a package (model, dataset, crate, etc.). Collect it.
+        if semantic_name.is_some() {
+            let mut node = TreeNode::new(path.clone(), depth, None);
+            node.kind = kind;
+            node.size = walker::dir_size(path);
+            node.name = semantic_name.unwrap();
+            nodes.push(node);
+            return;
+        }
+
+        // Known provider but no semantic name → container dir, recurse.
+        if kind != CacheKind::Unknown && path.is_dir() {
             for child in walker::list_children(path) {
                 Self::collect_nodes(&child, depth + 1, nodes);
             }
             return;
         }
 
+        // Unknown kind → leaf node (e.g. ~/Library/Caches/com.apple.something)
         let mut node = TreeNode::new(path.clone(), depth, None);
         node.kind = kind;
         node.size = walker::dir_size(path);
-        if let Some(name) = providers::semantic_name(kind, path) {
-            node.name = name;
-        }
         nodes.push(node);
     }
 
