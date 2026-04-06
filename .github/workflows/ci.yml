@@ -20,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606 # v1.15.4
-      - run: cargo check
+      - run: cargo check --features mcp
 
   test:
     name: Test
@@ -31,7 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606 # v1.15.4
-      - run: cargo test
+      - run: cargo test --features mcp
 
   fmt:
     name: Format
@@ -51,7 +51,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606 # v1.15.4
         with:
           components: clippy
-      - run: cargo clippy -- -D warnings
+      - run: cargo clippy --features mcp -- -D warnings
 
   deny:
     name: Deny (advisories, licenses, bans, sources)

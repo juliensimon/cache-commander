@@ -8,3 +8,4 @@ docs/superpowers/
 .DS_Store
 .mcp.json
 demo.tape
+REVIEW-*.md
