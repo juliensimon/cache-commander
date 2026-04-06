@@ -1,4 +1,4 @@
-.TH CCMD 1 "April 2026" "ccmd 0.1.1" "User Commands"
+.TH CCMD 1 "April 2026" "ccmd 0.2.0" "User Commands"
 .SH NAME
 ccmd \- browse and manage cache directories
 .SH SYNOPSIS
@@ -10,6 +10,8 @@ ccmd \- browse and manage cache directories
 .RB [ \-\-no\-confirm ]
 .RB [ \-\-vulncheck ]
 .RB [ \-\-versioncheck ]
+.PP
+.B ccmd mcp
 .SH DESCRIPTION
 .B ccmd
 (Cache Commander) is a terminal user interface for exploring, analyzing, and
@@ -19,6 +21,14 @@ sorted by size, and lets you selectively delete entries to reclaim disk space.
 .PP
 Security features include vulnerability scanning via OSV.dev and version
 checking against upstream package registries.
+.PP
+The
+.B mcp
+subcommand starts an MCP (Model Context Protocol) server on stdio, allowing
+AI assistants like Claude to query and manage caches programmatically.
+Requires the binary to be built with the
+.B mcp
+feature flag.
 .SH OPTIONS
 .TP
 .BR \-r ", " \-\-root =\fIpath\fR
@@ -174,6 +184,41 @@ Entries for known providers include a safety indicator:
 \fB\[u25CF]\fR (safe to delete),
 \fB\[u25D0]\fR (caution), or
 \fB\[u25CB]\fR (unsafe).
+.SH MCP SERVER
+When invoked as
+.B ccmd mcp
+(requires the
+.B mcp
+feature flag), the binary starts an MCP server using stdio transport.
+The server exposes these tools:
+.TP
+.B list_caches
+List all cache directories with size and item count per provider.
+.TP
+.B get_summary
+High-level dashboard of total cache usage.
+.TP
+.B search_packages
+Find packages by name with optional ecosystem filter.
+.TP
+.B get_package_details
+Full metadata for a specific cache entry.
+.TP
+.B scan_vulnerabilities
+Check for known CVEs via OSV.dev.
+.TP
+.B check_outdated
+Check for available version updates from package registries.
+.TP
+.B preview_delete
+Dry-run showing what would be deleted.
+.TP
+.B delete_packages
+Delete cache entries with safety enforcement.
+.PP
+Deletions through MCP enforce a safety system: Safe entries are deleted
+directly, Caution entries require explicit confirmation, and Unsafe entries
+are rejected.
 .SH EXIT STATUS
 .TP
 .B 0

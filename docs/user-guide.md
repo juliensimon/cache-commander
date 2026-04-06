@@ -286,3 +286,23 @@ Run `ccmd --vulncheck` periodically to check for new CVEs in your cached package
 ### Speed Up Scanning
 
 The first vulnerability scan takes 10-30 seconds depending on how many packages you have and network latency to OSV.dev. Subsequent scans in the same session are faster because the tree is already built.
+
+---
+
+## MCP Server (AI Integration)
+
+`ccmd` can also run as an MCP server, letting AI assistants like Claude manage your caches conversationally. Start it with:
+
+```bash
+ccmd mcp
+```
+
+This requires the binary to be built with the `mcp` feature flag:
+
+```bash
+cargo install ccmd --features mcp
+```
+
+Once configured in Claude Code or Claude Desktop, you can ask things like "list my caches", "find vulnerable npm packages", or "clean up outdated pip caches" — and Claude will call the appropriate ccmd tools.
+
+See [docs/mcp.md](mcp.md) for setup instructions and the full tool reference.

@@ -203,11 +203,60 @@ The intended workflow for cleaning vulnerable packages:
 4. **Mark**: Press `m` to mark all vulnerable items for deletion
 5. **Delete**: Press `d` to delete — frees space and forces fresh downloads
 
+## MCP Server (AI Integration)
+
+`ccmd` includes an [MCP](https://modelcontextprotocol.io) server that lets AI assistants like Claude query and manage your caches conversationally. Build with the `mcp` feature and run `ccmd mcp` to start the stdio transport.
+
+```bash
+# Install with MCP support
+cargo install ccmd --features mcp
+
+# Or build from source
+cargo build --release --features mcp
+```
+
+Configure in Claude Code (`.mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "ccmd": {
+      "command": "ccmd",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Then ask Claude things like:
+
+> "list my caches"
+
+```
+┌──────────────────┬────────────┬───────┐
+│     Provider     │    Size    │ Items │
+├──────────────────┼────────────┼───────┤
+│ HuggingFace Hub  │ 28.93 GiB  │ 447   │
+│ ~/Library/Caches │ 11.18 GiB  │ 234   │
+│ uv               │ 3.16 GiB   │ 149   │
+│ Homebrew         │ 1.55 GiB   │ 170   │
+│ Cargo            │ 719.77 MiB │ 614   │
+│ ...              │            │       │
+└──────────────────┴────────────┴───────┘
+Total: ~53.6 GiB across 2,167 items
+```
+
+> "find the top 10 most vulnerable npm packages"
+
+> "search for outdated pip packages"
+
+Available tools: `list_caches`, `get_summary`, `search_packages`, `get_package_details`, `scan_vulnerabilities`, `check_outdated`, `preview_delete`, `delete_packages`. See [docs/mcp.md](docs/mcp.md) for full details.
+
 ## Architecture
 
 ```
 src/
-├── main.rs              # CLI bootstrap, terminal setup
+├── main.rs              # CLI bootstrap, terminal setup, subcommand routing
 ├── config.rs            # TOML config + CLI flag merging
 ├── app.rs               # Event loop, key handling, rendering
 ├── tree/
@@ -227,6 +276,10 @@ src/
 │   ├── mod.rs           # Scan orchestration, vulnerability filtering
 │   ├── osv.rs           # OSV.dev API, version comparison, fix extraction
 │   └── registry.rs      # PyPI, crates.io, npm registry lookups
+├── mcp/                 # MCP server (optional, behind `mcp` feature flag)
+│   ├── mod.rs           # ServerHandler, tool routing, cache scanning
+│   ├── tools.rs         # Tool parameter and response types
+│   └── safety.rs        # Delete safety enforcement
 └── ui/
     ├── tree_panel.rs    # Left pane — tree with status icons
     ├── detail_panel.rs  # Right pane — metadata, vulns, guidance
@@ -234,7 +287,8 @@ src/
     └── theme.rs         # Color and style constants
 ```
 
-- **No async runtime** — pure `std::thread` + `mpsc::channel`
+- **No async runtime for TUI** — pure `std::thread` + `mpsc::channel`
+- **MCP server uses tokio** — optional feature flag, only compiled when needed
 - **Flat arena tree** — avoids recursive structs and borrow checker issues
 - **Background scanning** — UI stays responsive during API calls and directory walks
 
