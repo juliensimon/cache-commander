@@ -16,6 +16,9 @@
 
 ### Changed
 - Release pipeline accepts pre-release tags (`v0.2.0-rc1`), marks them as pre-release on GitHub, and skips Homebrew tap updates for RCs
+- CI and release pipelines hardened with `cargo-deny`, SHA-pinned GitHub Actions, and build provenance attestation
+- `.deb` packages now built for both Linux targets (x86_64, aarch64) with man page included
+- All release binaries now include MCP server support (no longer requires `--features mcp`)
 
 ## [0.1.1] — 2026-04-05
 

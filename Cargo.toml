@@ -9,7 +9,7 @@ repository = "https://github.com/juliensimon/cache-commander"
 homepage = "https://github.com/juliensimon/cache-commander"
 keywords = ["cache", "tui", "disk-space", "cleanup", "security"]
 categories = ["command-line-utilities"]
-exclude = ["REVIEW-*.md", "demo.tape", "docs/superpowers/", ".DS_Store"]
+exclude = ["REVIEW-*.md", "demo.tape", "docs/superpowers/", ".DS_Store", "screenshot.png", "scripts/"]
 
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }.tar.gz"
