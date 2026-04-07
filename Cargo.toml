@@ -22,6 +22,7 @@ section = "utils"
 priority = "optional"
 extended-description = "Scan cached packages for known CVEs, find outdated dependencies, and reclaim disk space — all from one TUI. Supports HuggingFace, pip, uv, npm, Cargo, Homebrew, and more.\n\nHomepage: https://github.com/juliensimon/cache-commander"
 assets = [
+    ["target/release/ccmd", "usr/bin/ccmd", "755"],
     ["doc/ccmd.1", "usr/share/man/man1/ccmd.1", "644"],
 ]
 
