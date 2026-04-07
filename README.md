@@ -27,7 +27,7 @@ Developer machines accumulate tens of gigabytes of invisible cache data — ML m
 
 ## Install
 
-### Homebrew (macOS and Linux)
+### Homebrew (macOS and Linux, includes MCP)
 
 ```bash
 brew tap juliensimon/tap
@@ -37,10 +37,11 @@ brew install ccmd
 ### From crates.io
 
 ```bash
-cargo install ccmd
+cargo install ccmd                  # TUI only
+cargo install ccmd --features mcp   # TUI + MCP server for AI integration
 ```
 
-### With cargo-binstall (prebuilt, no compile)
+### With cargo-binstall (prebuilt, includes MCP)
 
 ```bash
 cargo binstall ccmd
@@ -55,7 +56,7 @@ cargo build --release
 ./target/release/ccmd
 ```
 
-### Prebuilt binaries
+### Prebuilt binaries (includes MCP)
 
 Download from [GitHub Releases](https://github.com/juliensimon/cache-commander/releases) — available for macOS (x86_64, Apple Silicon) and Linux (x86_64, aarch64).
 
