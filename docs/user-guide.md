@@ -30,6 +30,29 @@ cargo build --release
 ./target/release/ccmd
 ```
 
+#### Installing pre-release versions
+
+Pre-release versions (`rc`, `beta`) are available for early testing but not served by default install methods.
+
+```bash
+# From crates.io — explicit version required
+cargo install ccmd@0.2.0-rc1
+
+# From GitHub Releases — download the tagged prerelease
+curl -LO https://github.com/juliensimon/cache-commander/releases/download/v0.2.0-rc1/ccmd-aarch64-apple-darwin.tar.gz
+tar xzf ccmd-aarch64-apple-darwin.tar.gz
+sudo mv ccmd /usr/local/bin/
+
+# Linux .deb
+curl -LO https://github.com/juliensimon/cache-commander/releases/download/v0.2.0-rc1/ccmd-x86_64-unknown-linux-gnu.deb
+sudo dpkg -i ccmd-x86_64-unknown-linux-gnu.deb
+
+# From source
+cargo install --path .
+```
+
+Pre-releases are not available via Homebrew. `cargo install ccmd` (without `@version`) always installs the latest stable release.
+
 ### First Run
 
 Launch `ccmd` with no arguments to scan your default cache locations:
