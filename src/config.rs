@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 #[command(
     name = "ccmd",
     version,
-    about = "Cache Commander — browse and manage cache directories"
+    about = "Cache Commander — browse and manage cache directories",
+    after_help = "Julien Simon — https://github.com/juliensimon/cache-commander"
 )]
 pub struct Cli {
     /// Cache root directories to scan (can be specified multiple times)
