@@ -239,9 +239,13 @@ Then ask Claude things like:
 Total: ~53.6 GiB across 2,167 items
 ```
 
-> "find the top 10 most vulnerable npm packages"
+> "find the most vulnerable npm packages"
 
-> "search for outdated pip packages"
+![Vulnerable npm packages](ccmd-mcp-vuln-npm.png)
+
+> "find outdated packages in my cache"
+
+![Outdated packages](ccmd-mcp-outdated-uv.png)
 
 Available tools: `list_caches`, `get_summary`, `search_packages`, `get_package_details`, `scan_vulnerabilities`, `check_outdated`, `preview_delete`, `delete_packages`. See [docs/mcp.md](docs/mcp.md) for full details.
 

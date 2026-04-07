@@ -85,35 +85,15 @@ Total: ~53.6 GiB across 2,167 items and 12 providers
 
 ### Find outdated packages
 
-> "search for outdated npm packages"
+> "find outdated packages in my cache"
 
-Claude calls `check_outdated` with `ecosystem: "npm"` and summarizes:
-
-```
-409 outdated packages:
-  227 major updates (breaking changes likely)
-  110 minor updates (backward-compatible)
-   70 patch updates (bug fixes only)
-
-Notable: glob 7.2.3 → 13.0.6, ini 1.3.8 → 6.0.0, execa 5.1.1 → 9.6.1
-```
+![Outdated uv packages](../ccmd-mcp-outdated-uv.png)
 
 ### Scan for vulnerabilities
 
-> "find the top 10 most vulnerable npm packages"
+> "find the top 5 most vulnerable npm packages in my cache"
 
-Claude calls `scan_vulnerabilities` with `ecosystem: "npm"` and ranks the results:
-
-```
-61 vulnerable packages with 96 total CVEs
-32 fixable (patch available), 64 unfixable in current major version
-
-Top hits:
-  hono 4.11.9 — 6 CVEs
-  minimatch (5 versions) — 3 CVEs each
-  @modelcontextprotocol/sdk 1.17.5 — 3 CVEs
-  lodash-es 4.17.21 — 3 CVEs
-```
+![Vulnerable npm packages](../ccmd-mcp-vuln-npm.png)
 
 ### Clean up caches
 
