@@ -87,13 +87,13 @@ Total: ~53.6 GiB across 2,167 items and 12 providers
 
 > "find outdated packages in my cache"
 
-![Outdated uv packages](../ccmd-mcp-outdated-uv.png)
+![Outdated uv packages](ccmd-mcp-outdated-uv.png)
 
 ### Scan for vulnerabilities
 
 > "find the top 5 most vulnerable npm packages in my cache"
 
-![Vulnerable npm packages](../ccmd-mcp-vuln-npm.png)
+![Vulnerable npm packages](ccmd-mcp-vuln-npm.png)
 
 ### Clean up caches
 
