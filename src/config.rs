@@ -281,7 +281,10 @@ fn probe_pnpm_paths() -> Vec<PathBuf> {
             if path.exists() {
                 // `pnpm store path` returns e.g. .../store/v10; go up to `store`
                 // so the tree shows the full store hierarchy.
-                let root = path.parent().unwrap_or(&path);
+                let root = path
+                    .parent()
+                    .filter(|p| p.parent().is_some()) // reject "/" or ""
+                    .unwrap_or(&path);
                 paths.push(root.to_path_buf());
             }
         }
@@ -295,7 +298,7 @@ fn probe_pnpm_paths() -> Vec<PathBuf> {
     ];
 
     for path in &fallbacks {
-        if path.exists() && !paths.contains(path) {
+        if path.exists() && !paths.contains(path) && !is_ancestor_or_descendant(path, &paths) {
             paths.push(path.clone());
         }
     }
@@ -503,6 +506,47 @@ mod tests {
     fn probe_pnpm_cache_handles_missing_tool() {
         let paths = probe_pnpm_paths();
         let _ = paths;
+    }
+
+    #[test]
+    fn ancestor_or_descendant_child_detected() {
+        let existing = vec![PathBuf::from("/home/user/Library/Caches/Yarn")];
+        assert!(is_ancestor_or_descendant(
+            Path::new("/home/user/Library/Caches/Yarn/v6"),
+            &existing
+        ));
+    }
+
+    #[test]
+    fn ancestor_or_descendant_parent_detected() {
+        let existing = vec![PathBuf::from("/home/user/Library/Caches/Yarn/v6")];
+        assert!(is_ancestor_or_descendant(
+            Path::new("/home/user/Library/Caches/Yarn"),
+            &existing
+        ));
+    }
+
+    #[test]
+    fn ancestor_or_descendant_sibling_not_detected() {
+        let existing = vec![PathBuf::from("/home/user/.npm")];
+        assert!(!is_ancestor_or_descendant(
+            Path::new("/home/user/.yarn"),
+            &existing
+        ));
+    }
+
+    #[test]
+    fn ancestor_or_descendant_empty_list() {
+        assert!(!is_ancestor_or_descendant(Path::new("/any/path"), &[]));
+    }
+
+    #[test]
+    fn ancestor_or_descendant_exact_match() {
+        let existing = vec![PathBuf::from("/home/user/.npm")];
+        assert!(is_ancestor_or_descendant(
+            Path::new("/home/user/.npm"),
+            &existing
+        ));
     }
 
     #[cfg(feature = "mcp")]

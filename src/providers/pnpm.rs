@@ -186,7 +186,16 @@ fn parse_index_filename(filename: &str) -> Option<super::PackageId> {
         return None;
     }
 
-    let name = raw_name.replace('+', "/");
+    // Only replace '+' with '/' for scoped packages (@scope+name → @scope/name)
+    let name = if raw_name.starts_with('@') {
+        if let Some(pos) = raw_name.find('+') {
+            format!("{}/{}", &raw_name[..pos], &raw_name[pos + 1..])
+        } else {
+            raw_name.to_string()
+        }
+    } else {
+        raw_name.to_string()
+    };
 
     Some(super::PackageId {
         ecosystem: "npm",
@@ -420,6 +429,78 @@ mod tests {
             "/Users/julien/Library/pnpm/store/v10/files/61/9a372bcd920fb462ca2d04d4440fa2",
         );
         assert_eq!(package_id(&path), None);
+    }
+
+    // --- parse_index_filename rejection cases ---
+
+    #[test]
+    fn parse_index_short_hash_returns_none() {
+        assert_eq!(parse_index_filename("abcd-lodash@1.0.0.json"), None);
+    }
+
+    #[test]
+    fn parse_index_non_hex_hash_returns_none() {
+        let bad = format!(
+            "{}z-lodash@1.0.0.json",
+            "g".repeat(61) // 'g' is not a hex digit
+        );
+        assert_eq!(parse_index_filename(&bad), None);
+    }
+
+    #[test]
+    fn parse_index_missing_separator_returns_none() {
+        // 62 hex chars followed by 'X' instead of '-'
+        let bad = format!("{}Xlodash@1.0.0.json", "a".repeat(62));
+        assert_eq!(parse_index_filename(&bad), None);
+    }
+
+    #[test]
+    fn parse_index_non_numeric_version_returns_none() {
+        let bad = format!("{}-lodash@latest.json", "a".repeat(62));
+        assert_eq!(parse_index_filename(&bad), None);
+    }
+
+    #[test]
+    fn parse_index_empty_name_returns_none() {
+        let bad = format!("{}-@1.0.0.json", "a".repeat(62));
+        assert_eq!(parse_index_filename(&bad), None);
+    }
+
+    #[test]
+    fn parse_index_no_json_suffix_returns_none() {
+        let bad = format!("{}-lodash@1.0.0", "a".repeat(62));
+        assert_eq!(parse_index_filename(&bad), None);
+    }
+
+    #[test]
+    fn parse_index_unscoped_plus_preserved() {
+        // A hypothetical unscoped name with '+' should NOT have it replaced
+        let filename = format!("{}-c++parser@1.0.0.json", "a".repeat(62));
+        let id = parse_index_filename(&filename).unwrap();
+        assert_eq!(id.name, "c++parser");
+    }
+
+    // --- semantic_name for index ---
+
+    #[test]
+    fn semantic_name_package_index_dir() {
+        let path = PathBuf::from("/Users/julien/Library/pnpm/store/v10/index");
+        assert_eq!(semantic_name(&path), Some("Package Index".into()));
+    }
+
+    #[test]
+    fn semantic_name_index_file() {
+        let path = PathBuf::from(format!(
+            "/Users/julien/Library/pnpm/store/v10/index/3e/{}-lodash@4.17.20.json",
+            "a".repeat(62)
+        ));
+        assert_eq!(semantic_name(&path), Some("lodash 4.17.20".into()));
+    }
+
+    #[test]
+    fn semantic_name_store_version_non_numeric_returns_none() {
+        let path = PathBuf::from("/home/user/.pnpm-store/vfoo");
+        assert_eq!(semantic_name(&path), None);
     }
 
     // --- Metadata ---
