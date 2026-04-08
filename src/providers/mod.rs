@@ -11,6 +11,7 @@ pub mod prisma;
 pub mod torch;
 pub mod uv;
 pub mod whisper;
+pub mod yarn;
 
 use crate::tree::node::CacheKind;
 use std::path::Path;
