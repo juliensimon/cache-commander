@@ -88,6 +88,11 @@ pub fn detect(path: &Path) -> CacheKind {
                     return CacheKind::Pnpm;
                 }
             }
+            "pnpm" => {
+                if path.to_string_lossy().contains("store") {
+                    return CacheKind::Pnpm;
+                }
+            }
             ".yarn-cache" | "Yarn" => return CacheKind::Yarn,
             ".yarn" => {
                 if path.to_string_lossy().contains(".yarn/cache")
@@ -386,6 +391,16 @@ mod tests {
     fn detect_pnpm_virtual_store() {
         assert_eq!(
             detect(&PathBuf::from("/project/node_modules/.pnpm/lodash@4.17.21")),
+            CacheKind::Pnpm
+        );
+    }
+
+    #[test]
+    fn detect_pnpm_xdg_store() {
+        assert_eq!(
+            detect(&PathBuf::from(
+                "/home/user/.local/share/pnpm/store/v3/files/ab"
+            )),
             CacheKind::Pnpm
         );
     }
