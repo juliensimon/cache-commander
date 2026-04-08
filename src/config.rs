@@ -119,6 +119,20 @@ impl Default for Config {
             roots.push(cargo_registry);
         }
 
+        // Yarn cache paths
+        for path in probe_yarn_paths() {
+            if !roots.contains(&path) {
+                roots.push(path);
+            }
+        }
+
+        // pnpm store paths
+        for path in probe_pnpm_paths() {
+            if !roots.contains(&path) {
+                roots.push(path);
+            }
+        }
+
         Self {
             roots,
             sort_by: SortField::Size,
@@ -171,6 +185,77 @@ impl Config {
         let content = std::fs::read_to_string(config_path).ok()?;
         toml::from_str(&content).ok()
     }
+}
+
+fn probe_yarn_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    // Try CLI detection
+    if let Ok(output) = std::process::Command::new("yarn")
+        .args(["cache", "dir"])
+        .output()
+    {
+        if output.status.success() {
+            let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let path = PathBuf::from(&path_str);
+            if path.exists() {
+                paths.push(path);
+            }
+        }
+    }
+
+    // Fallback locations
+    let home = dirs_home();
+    let fallbacks = [
+        home.join(".yarn-cache"),
+        home.join(".cache/yarn"),
+        home.join(".yarn/berry/cache"),
+    ];
+    #[cfg(target_os = "macos")]
+    let macos_fallbacks = [home.join("Library/Caches/Yarn")];
+    #[cfg(not(target_os = "macos"))]
+    let macos_fallbacks: [PathBuf; 0] = [];
+
+    for path in fallbacks.iter().chain(macos_fallbacks.iter()) {
+        if path.exists() && !paths.contains(path) {
+            paths.push(path.clone());
+        }
+    }
+
+    paths
+}
+
+fn probe_pnpm_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    // Try CLI detection
+    if let Ok(output) = std::process::Command::new("pnpm")
+        .args(["store", "path"])
+        .output()
+    {
+        if output.status.success() {
+            let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let path = PathBuf::from(&path_str);
+            if path.exists() {
+                paths.push(path);
+            }
+        }
+    }
+
+    // Fallback locations
+    let home = dirs_home();
+    let fallbacks = [
+        home.join(".pnpm-store"),
+        home.join(".local/share/pnpm/store"),
+    ];
+
+    for path in &fallbacks {
+        if path.exists() && !paths.contains(path) {
+            paths.push(path.clone());
+        }
+    }
+
+    paths
 }
 
 fn dirs_home() -> PathBuf {
@@ -350,6 +435,19 @@ mod tests {
         let config = Config::default();
         assert!(!config.vulncheck.enabled);
         assert!(!config.versioncheck.enabled);
+    }
+
+    #[test]
+    fn probe_yarn_cache_handles_missing_tool() {
+        // yarn may not be installed — just verify no panic
+        let paths = probe_yarn_paths();
+        let _ = paths;
+    }
+
+    #[test]
+    fn probe_pnpm_cache_handles_missing_tool() {
+        let paths = probe_pnpm_paths();
+        let _ = paths;
     }
 
     #[cfg(feature = "mcp")]
