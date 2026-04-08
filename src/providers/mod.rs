@@ -208,8 +208,8 @@ pub fn upgrade_command(kind: CacheKind, name: &str, version: &str) -> Option<Str
         return None;
     }
     match kind {
-        CacheKind::Pip => Some(format!("pip install {name}>={version}")),
-        CacheKind::Uv => Some(format!("uv pip install {name}>={version}")),
+        CacheKind::Pip => Some(format!("pip install '{name}>={version}'")),
+        CacheKind::Uv => Some(format!("uv pip install '{name}>={version}'")),
         CacheKind::Npm => Some(format!("npm install {name}@{version}")),
         CacheKind::Cargo => Some(format!("cargo update -p {name}")),
         CacheKind::Yarn => Some(format!("yarn add {name}@{version}")),
@@ -223,6 +223,14 @@ pub fn safety(kind: CacheKind, path: &Path) -> SafetyLevel {
     match kind {
         CacheKind::Pnpm => {
             if path.to_string_lossy().contains("node_modules/.pnpm") {
+                SafetyLevel::Caution
+            } else {
+                SafetyLevel::Safe
+            }
+        }
+        CacheKind::Yarn => {
+            // Berry project-local caches (.yarn/cache/) may be committed to git (zero-install)
+            if path.to_string_lossy().contains(".yarn/cache") {
                 SafetyLevel::Caution
             } else {
                 SafetyLevel::Safe
@@ -483,6 +491,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn safety_yarn_berry_project_local_is_caution() {
+        assert_eq!(
+            safety(
+                CacheKind::Yarn,
+                &PathBuf::from("/project/.yarn/cache/lodash-npm-4.17.21-abc.zip")
+            ),
+            SafetyLevel::Caution
+        );
+    }
+
+    #[test]
+    fn safety_yarn_classic_global_is_safe() {
+        assert_eq!(
+            safety(
+                CacheKind::Yarn,
+                &PathBuf::from("/home/user/.cache/yarn/v6/npm-lodash-4.17.21-abc-integrity")
+            ),
+            SafetyLevel::Safe
+        );
+    }
+
     // --- SafetyLevel ---
 
     #[test]
@@ -508,7 +538,7 @@ mod tests {
     fn upgrade_command_pip() {
         assert_eq!(
             upgrade_command(CacheKind::Pip, "requests", "2.32.0"),
-            Some("pip install requests>=2.32.0".to_string())
+            Some("pip install 'requests>=2.32.0'".to_string())
         );
     }
 
@@ -516,7 +546,7 @@ mod tests {
     fn upgrade_command_uv() {
         assert_eq!(
             upgrade_command(CacheKind::Uv, "flask", "3.1.0"),
-            Some("uv pip install flask>=3.1.0".to_string())
+            Some("uv pip install 'flask>=3.1.0'".to_string())
         );
     }
 
@@ -632,7 +662,7 @@ mod tests {
     fn upgrade_command_allows_dotted_names() {
         assert_eq!(
             upgrade_command(CacheKind::Pip, "python-dateutil", "2.9.0"),
-            Some("pip install python-dateutil>=2.9.0".to_string())
+            Some("pip install 'python-dateutil>=2.9.0'".to_string())
         );
     }
 
@@ -640,7 +670,7 @@ mod tests {
     fn upgrade_command_allows_underscored_names() {
         assert_eq!(
             upgrade_command(CacheKind::Pip, "typing_extensions", "4.12.0"),
-            Some("pip install typing_extensions>=4.12.0".to_string())
+            Some("pip install 'typing_extensions>=4.12.0'".to_string())
         );
     }
 

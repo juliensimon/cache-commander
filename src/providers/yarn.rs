@@ -159,15 +159,22 @@ pub fn parse_classic_filename(filename: &str) -> Option<(String, String)> {
     // segment that starts with a digit — that is the start of the version
     let without_hash = &parts[..parts.len() - 1];
 
-    // Find the rightmost index where a digit-starting segment exists
-    // that, together with subsequent segments (before hash), forms a valid version
+    // Find the leftmost digit-starting segment that contains at least one dot.
+    // This is the real semver version start (e.g., "1.0.0", "0.10.62").
+    // Everything after it (until the hash) is the full version string, including
+    // pre-release suffixes like "2024.1" or "3rc1".
+    // Pre-release-only tags like "2024" or "3beta" don't contain dots, so walking
+    // forward we find the first dotted digit segment as the true version start.
     let mut version_start = None;
-    for i in (0..without_hash.len()).rev() {
-        if without_hash[i]
+    for (i, seg) in without_hash.iter().enumerate() {
+        // Version segments contain dots (e.g., "1.0.0", "0.10.62")
+        // Pre-release tags like "2024" or "3beta" don't contain dots
+        if seg
             .chars()
             .next()
             .map(|c| c.is_ascii_digit())
             .unwrap_or(false)
+            && seg.contains('.')
         {
             version_start = Some(i);
             break;
@@ -784,6 +791,32 @@ mod tests {
         let id = package_id(&entry).unwrap();
         assert_eq!(id.name, "@babel/core"); // Heuristic (happens to be correct for @babel)
         assert_eq!(id.version, "7.24.0");
+    }
+
+    // --- Issue 2: pre-release digit-starting segments ---
+
+    #[test]
+    fn parse_classic_prerelease_digit_start() {
+        // Pre-release segment starting with digit but containing a dot should be
+        // included in the version, not treated as the version start
+        let result = parse_classic_filename(
+            "npm-some-pkg-1.0.0-2024.1-abcdef012345abcdef012345abcdef012345abcd-integrity",
+        );
+        assert_eq!(
+            result,
+            Some(("some-pkg".to_string(), "1.0.0-2024.1".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_classic_prerelease_3rc1() {
+        let result = parse_classic_filename(
+            "npm-typescript-5.0.0-3rc1-abcdef012345abcdef012345abcdef012345abcd-integrity",
+        );
+        assert_eq!(
+            result,
+            Some(("typescript".to_string(), "5.0.0-3rc1".to_string()))
+        );
     }
 
     #[test]

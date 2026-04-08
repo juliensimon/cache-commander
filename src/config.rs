@@ -173,8 +173,18 @@ impl Config {
             .roots
             .into_iter()
             .map(|p| expand_tilde(&p))
-            .filter(|p| p.exists())
-            .collect();
+            .collect::<Vec<_>>();
+
+        // Warn about non-existent roots specified via CLI
+        if !cli.roots.is_empty() {
+            for root in &config.roots {
+                if !root.exists() {
+                    eprintln!("warning: root path does not exist: {}", root.display());
+                }
+            }
+        }
+
+        config.roots.retain(|p| p.exists());
 
         (config, cli)
     }
@@ -182,8 +192,21 @@ impl Config {
     fn load_from_file() -> Option<Self> {
         let proj = ProjectDirs::from("", "", "ccmd")?;
         let config_path = proj.config_dir().join("config.toml");
-        let content = std::fs::read_to_string(config_path).ok()?;
-        toml::from_str(&content).ok()
+        let content = match std::fs::read_to_string(&config_path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(e) => {
+                eprintln!("warning: could not read {}: {}", config_path.display(), e);
+                return None;
+            }
+        };
+        match toml::from_str(&content) {
+            Ok(config) => Some(config),
+            Err(e) => {
+                eprintln!("warning: invalid config {}: {}", config_path.display(), e);
+                None
+            }
+        }
     }
 }
 
@@ -193,6 +216,7 @@ fn probe_yarn_paths() -> Vec<PathBuf> {
     // Try CLI detection
     if let Ok(output) = std::process::Command::new("yarn")
         .args(["cache", "dir"])
+        .stdin(std::process::Stdio::null())
         .output()
     {
         if output.status.success() {
@@ -207,6 +231,7 @@ fn probe_yarn_paths() -> Vec<PathBuf> {
     // Yarn 2+ (Berry) cache folder
     if let Ok(output) = std::process::Command::new("yarn")
         .args(["config", "get", "cacheFolder"])
+        .stdin(std::process::Stdio::null())
         .output()
     {
         if output.status.success() {
@@ -247,6 +272,7 @@ fn probe_pnpm_paths() -> Vec<PathBuf> {
     // Try CLI detection
     if let Ok(output) = std::process::Command::new("pnpm")
         .args(["store", "path"])
+        .stdin(std::process::Stdio::null())
         .output()
     {
         if output.status.success() {
@@ -277,7 +303,10 @@ fn probe_pnpm_paths() -> Vec<PathBuf> {
 fn dirs_home() -> PathBuf {
     directories::BaseDirs::new()
         .map(|d| d.home_dir().to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("/"))
+        .unwrap_or_else(|| {
+            eprintln!("warning: could not determine home directory, using /");
+            PathBuf::from("/")
+        })
 }
 
 fn expand_tilde(path: &Path) -> PathBuf {
