@@ -94,6 +94,10 @@ ccmd --root ~/.cache/huggingface  # scan a specific directory
 - **Bulk mark** — `m` marks all visible (non-dimmed) items after filtering
 - **Workflow**: scan (`V`) → filter (`f`) → mark all (`m`) → delete (`d`)
 
+## Platform Support
+
+**macOS and Linux only.** Windows is not supported. Path detection, cache directory resolution, and provider logic all assume Unix-style paths.
+
 ## Supported Caches
 
 | Provider | Location | Semantic names |

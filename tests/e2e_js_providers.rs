@@ -25,11 +25,21 @@ fn is_available(cmd: &str) -> bool {
 
 /// Run a command in a directory and assert success.
 fn run_in(dir: &Path, cmd: &str, args: &[&str]) {
-    let output = Command::new(cmd)
+    run_in_with_env(dir, cmd, args, &[]);
+}
+
+/// Run a command in a directory with extra env vars and assert success.
+fn run_in_with_env(dir: &Path, cmd: &str, args: &[&str], env: &[(&str, &str)]) {
+    let mut command = Command::new(cmd);
+    command
         .args(args)
         .current_dir(dir)
         .env("npm_config_fund", "false")
-        .env("npm_config_audit", "false")
+        .env("npm_config_audit", "false");
+    for (k, v) in env {
+        command.env(k, v);
+    }
+    let output = command
         .output()
         .unwrap_or_else(|e| panic!("Failed to run {cmd} {args:?}: {e}"));
     assert!(
@@ -108,14 +118,19 @@ fn e2e_yarn_classic_realistic_packages() {
 
     let tmp = tempfile::tempdir().unwrap();
     let project = tmp.path().join("classic");
+    let cache = tmp.path().join("yarn-cache");
+    std::fs::create_dir_all(&cache).unwrap();
     init_npm_project(&project);
+
+    let cache_str = cache.to_string_lossy().to_string();
+    let env = [("YARN_CACHE_FOLDER", cache_str.as_str())];
 
     // Install a mix of package types that stress the parser:
     // - simple name: lodash
     // - scoped package: @babel/core
     // - hyphenated name: is-even
     // - name containing digits: base64-js
-    run_in(
+    run_in_with_env(
         &project,
         "yarn",
         &[
@@ -125,12 +140,14 @@ fn e2e_yarn_classic_realistic_packages() {
             "is-even@1.0.0",
             "base64-js@1.5.1",
         ],
+        &env,
     );
 
-    // Find the actual cache directory
-    let cache_dir = run_stdout("yarn", &["cache", "dir"]).expect("yarn cache dir failed");
-    let cache_path = PathBuf::from(&cache_dir);
-    assert!(cache_path.exists(), "Yarn cache dir missing: {cache_dir}");
+    let cache_path = cache.join("v6");
+    assert!(
+        cache_path.exists(),
+        "Yarn cache dir missing: {cache_path:?}"
+    );
 
     // Verify the actual filenames on disk are what we expect
     let files = list_dir(&cache_path);
@@ -184,8 +201,7 @@ fn e2e_yarn_classic_realistic_packages() {
     let base64 = packages.iter().find(|(n, _, _)| n == "base64-js").unwrap();
     assert_eq!(base64.1, "1.5.1");
 
-    // Clean up global cache
-    let _ = Command::new("yarn").args(["cache", "clean"]).output();
+    // tempdir cleanup handles the isolated cache — no global cache was touched
 }
 
 // ============================================================
