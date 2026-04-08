@@ -20,6 +20,12 @@ pub fn is_berry(path: &Path) -> bool {
 
 /// Normalize a scoped package name: "@babel-core" → "@babel/core".
 /// Only the first hyphen after '@' becomes a '/'.
+///
+/// NOTE: This is a best-effort heuristic for Yarn filenames where `/` is replaced
+/// with `-`. It is WRONG for scopes that contain hyphens (e.g., `@eslint-community`
+/// becomes `@eslint/community-eslint-utils` instead of `@eslint-community/eslint-utils`).
+/// For Yarn Classic directories, we resolve this by reading node_modules/ inside the entry.
+/// For Yarn Berry zips, this limitation is accepted — the version and ecosystem are correct.
 pub fn normalize_scoped_name(name: &str) -> String {
     if let Some(rest) = name.strip_prefix('@') {
         if let Some(hyphen_pos) = rest.find('-') {
@@ -69,20 +75,28 @@ pub fn parse_berry_filename(filename: &str) -> Option<(String, String)> {
     let raw_name = &stem[..npm_pos];
     let after_npm = &stem[npm_pos + npm_marker.len()..];
 
-    // after_npm = "<version>-<hash>"
+    // after_npm = "<version>-<hash>" or "<version>-<hash1>-<hash2>" (two hash segments)
     let parts: Vec<&str> = after_npm.split('-').collect();
     if parts.len() < 2 {
         return None;
     }
 
-    // Last part should be the hash
-    let hash = parts.last()?;
-    if !is_hex_hash(hash) {
-        return None;
+    // Berry uses two hash segments (e.g., "c076fd2279-3d1ce6ebc6").
+    // Strip ALL trailing hex hash segments from right.
+    let mut hash_start = parts.len();
+    for i in (0..parts.len()).rev() {
+        if is_hex_hash(parts[i]) {
+            hash_start = i;
+        } else {
+            break;
+        }
     }
 
-    // Everything before the hash is the version
-    let version_parts = &parts[..parts.len() - 1];
+    if hash_start >= parts.len() {
+        return None; // No hash found
+    }
+
+    let version_parts = &parts[..hash_start];
     let version = version_parts.join("-");
 
     if version.is_empty() {
@@ -176,6 +190,32 @@ pub fn parse_classic_filename(filename: &str) -> Option<(String, String)> {
     Some((name, version))
 }
 
+/// For Classic cache entries that are directories, resolve the real scoped package
+/// name by reading the node_modules/ structure inside the entry.
+/// Returns the real scoped name (e.g., "@eslint-community/eslint-utils") if found.
+fn resolve_classic_scope(entry_path: &Path) -> Option<String> {
+    let nm = entry_path.join("node_modules");
+    if !nm.is_dir() {
+        return None;
+    }
+    // Look for a directory starting with @
+    let entries = std::fs::read_dir(&nm).ok()?;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('@') && entry.path().is_dir() {
+            // Found the scope dir — read the first package inside it
+            if let Some(sub) = std::fs::read_dir(entry.path())
+                .ok()
+                .and_then(|mut entries| entries.find_map(|e| e.ok()))
+            {
+                let pkg_name = sub.file_name().to_string_lossy().to_string();
+                return Some(format!("{name}/{pkg_name}"));
+            }
+        }
+    }
+    None
+}
+
 /// Returns true if the string looks like a hex hash (8+ lowercase hex chars).
 fn is_hex_hash(s: &str) -> bool {
     s.len() >= 8
@@ -209,7 +249,13 @@ pub fn semantic_name(path: &Path) -> Option<String> {
 
     // Classic entries: directories ending in -integrity or legacy .tgz files
     if name.ends_with("-integrity") || name.ends_with(".tgz") {
-        if let Some((pkg, ver)) = parse_classic_filename(&name) {
+        if let Some((mut pkg, ver)) = parse_classic_filename(&name) {
+            // For Classic directories, resolve scoped names from node_modules/
+            if pkg.starts_with('@') && path.is_dir() {
+                if let Some(real_name) = resolve_classic_scope(path) {
+                    pkg = real_name;
+                }
+            }
             return Some(format!("{} {}", pkg, ver));
         }
     }
@@ -231,7 +277,13 @@ pub fn package_id(path: &Path) -> Option<super::PackageId> {
 
     // Classic: directories ending in -integrity or legacy .tgz files
     if name.ends_with("-integrity") || name.ends_with(".tgz") {
-        let (pkg, ver) = parse_classic_filename(&name)?;
+        let (mut pkg, ver) = parse_classic_filename(&name)?;
+        // For Classic directories, resolve scoped names from node_modules/
+        if pkg.starts_with('@') && path.is_dir() {
+            if let Some(real_name) = resolve_classic_scope(path) {
+                pkg = real_name;
+            }
+        }
         return Some(super::PackageId {
             ecosystem: "npm",
             name: pkg,
@@ -649,6 +701,89 @@ mod tests {
                 .iter()
                 .any(|f| f.label == "Format" && f.value.contains("Classic"))
         );
+    }
+
+    // --- Real-world filenames from disk ---
+
+    #[test]
+    fn parse_berry_two_segment_hash() {
+        // Real Berry filename with two 10-char hash segments
+        let result =
+            parse_berry_filename("@jridgewell-trace-mapping-npm-0.3.25-c076fd2279-3d1ce6ebc6.zip");
+        assert_eq!(
+            result,
+            Some((
+                "@jridgewell/trace-mapping".to_string(),
+                "0.3.25".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_berry_eslint_community_two_hashes() {
+        let result = parse_berry_filename(
+            "@eslint-community-eslint-utils-npm-4.4.0-d1791bd5a3-7e559c4ce5.zip",
+        );
+        // NOTE: scope is wrong (@eslint instead of @eslint-community) — known limitation
+        let (name, ver) = result.unwrap();
+        assert_eq!(ver, "4.4.0"); // Version must be correct
+        assert!(name.starts_with('@')); // Must be scoped
+        assert!(name.contains("eslint")); // Contains the right words
+    }
+
+    #[test]
+    fn parse_classic_integrity_resolved_scope() {
+        // Create a real Classic entry with node_modules inside
+        let tmp = tempfile::tempdir().unwrap();
+        let entry = tmp.path().join(
+            "npm-@eslint-community-eslint-utils-4.4.0-a23514e8fb9af1269d5f7788aa556798d61c6b59-integrity",
+        );
+        std::fs::create_dir_all(entry.join("node_modules/@eslint-community/eslint-utils")).unwrap();
+
+        let id = package_id(&entry).unwrap();
+        assert_eq!(id.name, "@eslint-community/eslint-utils"); // Must be correct!
+        assert_eq!(id.version, "4.4.0");
+        assert_eq!(id.ecosystem, "npm");
+    }
+
+    #[test]
+    fn semantic_name_classic_integrity_resolved_scope() {
+        let tmp = tempfile::tempdir().unwrap();
+        let entry = tmp.path().join(
+            "npm-@eslint-community-eslint-utils-4.4.0-a23514e8fb9af1269d5f7788aa556798d61c6b59-integrity",
+        );
+        std::fs::create_dir_all(entry.join("node_modules/@eslint-community/eslint-utils")).unwrap();
+
+        assert_eq!(
+            semantic_name(&entry),
+            Some("@eslint-community/eslint-utils 4.4.0".into())
+        );
+    }
+
+    #[test]
+    fn parse_berry_ampproject() {
+        let result =
+            parse_berry_filename("@ampproject-remapping-npm-2.3.0-ed441b6fa6-7e559c4ce5.zip");
+        assert_eq!(
+            result,
+            Some(("@ampproject/remapping".to_string(), "2.3.0".to_string()))
+        );
+    }
+
+    #[test]
+    fn resolve_classic_scope_no_node_modules() {
+        // Entry without node_modules — fallback to heuristic
+        let tmp = tempfile::tempdir().unwrap();
+        let entry = tmp
+            .path()
+            .join("npm-@babel-core-7.24.0-abc123def456abcdef0123456789abcdef01234567-integrity");
+        std::fs::create_dir_all(&entry).unwrap();
+        // No node_modules inside
+
+        // package_id should still work, falling back to heuristic
+        let id = package_id(&entry).unwrap();
+        assert_eq!(id.name, "@babel/core"); // Heuristic (happens to be correct for @babel)
+        assert_eq!(id.version, "7.24.0");
     }
 
     #[test]
