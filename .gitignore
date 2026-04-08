@@ -9,3 +9,4 @@ docs/superpowers/
 .mcp.json
 demo.tape
 REVIEW-*.md
+.worktrees/
