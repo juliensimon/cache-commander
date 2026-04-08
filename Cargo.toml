@@ -28,6 +28,7 @@ assets = [
 
 [features]
 default = []
+e2e = []
 mcp = ["dep:rmcp", "dep:tokio", "dep:schemars", "dep:tracing-subscriber"]
 
 [dependencies]
