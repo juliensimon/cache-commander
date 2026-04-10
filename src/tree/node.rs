@@ -17,6 +17,7 @@ pub enum CacheKind {
     Prisma,
     Yarn,
     Pnpm,
+    Bun,
     #[default]
     Unknown,
 }
@@ -38,6 +39,7 @@ impl CacheKind {
             Self::Prisma => "Prisma",
             Self::Yarn => "Yarn",
             Self::Pnpm => "pnpm",
+            Self::Bun => "Bun",
             Self::Unknown => "",
         }
     }
@@ -58,6 +60,7 @@ impl CacheKind {
             Self::Prisma => "Prisma ORM — cached database engine binaries",
             Self::Yarn => "Yarn package manager — cached packages and metadata",
             Self::Pnpm => "pnpm package manager — content-addressed package store",
+            Self::Bun => "Bun runtime — cached npm packages from global install cache",
             Self::Unknown => "",
         }
     }
@@ -78,6 +81,7 @@ impl CacheKind {
             Self::Prisma => "https://www.prisma.io",
             Self::Yarn => "https://yarnpkg.com",
             Self::Pnpm => "https://pnpm.io",
+            Self::Bun => "https://bun.sh",
             Self::Unknown => "",
         }
     }

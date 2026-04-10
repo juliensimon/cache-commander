@@ -133,6 +133,13 @@ impl Default for Config {
             }
         }
 
+        // Bun cache paths
+        for path in probe_bun_paths() {
+            if !roots.contains(&path) {
+                roots.push(path);
+            }
+        }
+
         Self {
             roots,
             sort_by: SortField::Size,
@@ -301,6 +308,40 @@ fn probe_pnpm_paths() -> Vec<PathBuf> {
         if path.exists() && !paths.contains(path) && !is_ancestor_or_descendant(path, &paths) {
             paths.push(path.clone());
         }
+    }
+
+    paths
+}
+
+fn probe_bun_paths() -> Vec<PathBuf> {
+    // Note: Bun does not provide a CLI command to query cache location (unlike
+    // `yarn cache dir` or `pnpm store path`). We rely on env vars and the
+    // default path. If Bun adds such a command, a CLI probe should be added here.
+    let mut paths = Vec::new();
+
+    // Check BUN_INSTALL_CACHE_DIR env var first
+    if let Ok(cache_dir) = std::env::var("BUN_INSTALL_CACHE_DIR") {
+        let path = PathBuf::from(&cache_dir);
+        if path.exists() {
+            paths.push(path);
+            return paths;
+        }
+    }
+
+    // Check BUN_INSTALL env var (cache is at $BUN_INSTALL/install/cache)
+    if let Ok(bun_install) = std::env::var("BUN_INSTALL") {
+        let cache_path = PathBuf::from(&bun_install).join("install/cache");
+        if cache_path.exists() {
+            paths.push(cache_path);
+            return paths;
+        }
+    }
+
+    // Default location
+    let home = dirs_home();
+    let default_cache = home.join(".bun/install/cache");
+    if default_cache.exists() && !paths.contains(&default_cache) {
+        paths.push(default_cache);
     }
 
     paths
@@ -505,6 +546,13 @@ mod tests {
     #[test]
     fn probe_pnpm_cache_handles_missing_tool() {
         let paths = probe_pnpm_paths();
+        let _ = paths;
+    }
+
+    #[test]
+    fn probe_bun_cache_handles_missing_install() {
+        // Bun may not be installed — just verify no panic
+        let paths = probe_bun_paths();
         let _ = paths;
     }
 

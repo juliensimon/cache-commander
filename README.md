@@ -19,7 +19,7 @@ Developer machines accumulate tens of gigabytes of invisible cache data — ML m
 ## Why
 
 - **ML models** (HuggingFace, PyTorch, Whisper) — tens of GB you forgot about
-- **Package caches** (pip, uv, npm, Cargo, Homebrew) — old versions with known CVEs
+- **Package caches** (pip, uv, npm, Yarn, pnpm, Bun, Cargo, Homebrew) — old versions with known CVEs
 - **npm supply chain risk** — transitive deps with install scripts hiding in npx cache
 - **Build artifacts** (pre-commit hooks, Prisma engines) — stale and re-downloadable
 
@@ -74,7 +74,7 @@ ccmd --root ~/.cache/huggingface  # scan a specific directory
 ### Browse and Understand
 
 - **Two-pane TUI** — navigable tree on the left, details on the right
-- **12 cache providers** — semantic names instead of hash directories
+- **15 cache providers** — semantic names instead of hash directories
 - **Safety levels** — green (safe to delete), yellow (may cause rebuilds), red (contains state)
 - **Sort** by size, name, or last modified
 - **Search** with `/` — case-insensitive filter across the tree
@@ -114,6 +114,9 @@ ccmd --root ~/.cache/huggingface  # scan a specific directory
 | PyTorch | `~/.cache/torch` | Model checkpoints |
 | Chroma | `~/.cache/chroma` | Embedding models |
 | Prisma | `~/.cache/prisma` | Engine versions |
+| Yarn | `~/.yarn-cache`, `.yarn/cache` | Package names and versions |
+| pnpm | `~/.pnpm-store` | Package names and versions |
+| Bun | `~/.bun/install/cache` | Package names and versions |
 
 ## Key Bindings
 
@@ -273,7 +276,7 @@ src/
 │   ├── pip.rs, uv.rs    # Python package providers
 │   ├── npm.rs           # npm + npx + node_modules scanning
 │   ├── cargo.rs         # Rust crate provider
-│   └── ...              # 7 more providers
+│   └── ...              # 10 more providers
 ├── security/
 │   ├── mod.rs           # Scan orchestration, vulnerability filtering
 │   ├── osv.rs           # OSV.dev API, version comparison, fix extraction

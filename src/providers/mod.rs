@@ -1,3 +1,4 @@
+pub mod bun;
 pub mod cargo;
 pub mod chroma;
 pub mod generic;
@@ -68,6 +69,7 @@ pub fn detect(path: &Path) -> CacheKind {
         "torch" => return CacheKind::Torch,
         "chroma" => return CacheKind::Chroma,
         "prisma" => return CacheKind::Prisma,
+        ".bun" => return CacheKind::Bun,
         ".npm" | "npm" => return CacheKind::Npm,
         ".yarn-cache" => return CacheKind::Yarn,
         ".pnpm-store" => return CacheKind::Pnpm,
@@ -111,6 +113,7 @@ pub fn detect(path: &Path) -> CacheKind {
                     return CacheKind::Yarn;
                 }
             }
+            ".bun" => return CacheKind::Bun,
             "huggingface" => return CacheKind::HuggingFace,
             "pip" => return CacheKind::Pip,
             "uv" => return CacheKind::Uv,
@@ -151,6 +154,7 @@ pub fn semantic_name(kind: CacheKind, path: &Path) -> Option<String> {
         CacheKind::Prisma => prisma::semantic_name(path),
         CacheKind::Yarn => yarn::semantic_name(path),
         CacheKind::Pnpm => pnpm::semantic_name(path),
+        CacheKind::Bun => bun::semantic_name(path),
         CacheKind::Unknown => None,
     }
 }
@@ -172,6 +176,7 @@ pub fn metadata(kind: CacheKind, path: &Path) -> Vec<MetadataField> {
         CacheKind::Prisma => prisma::metadata(path),
         CacheKind::Yarn => yarn::metadata(path),
         CacheKind::Pnpm => pnpm::metadata(path),
+        CacheKind::Bun => bun::metadata(path),
         CacheKind::Unknown => generic::metadata(path),
     }
 }
@@ -191,6 +196,7 @@ pub fn package_id(kind: CacheKind, path: &Path) -> Option<PackageId> {
         CacheKind::Cargo => cargo::package_id(path),
         CacheKind::Yarn => yarn::package_id(path),
         CacheKind::Pnpm => pnpm::package_id(path),
+        CacheKind::Bun => bun::package_id(path),
         _ => None,
     }
 }
@@ -214,6 +220,7 @@ pub fn upgrade_command(kind: CacheKind, name: &str, version: &str) -> Option<Str
         CacheKind::Cargo => Some(format!("cargo update -p {name}")),
         CacheKind::Yarn => Some(format!("yarn add {name}@{version}")),
         CacheKind::Pnpm => Some(format!("pnpm add {name}@{version}")),
+        CacheKind::Bun => Some(format!("bun add {name}@{version}")),
         _ => None,
     }
 }
@@ -235,6 +242,16 @@ pub fn safety(kind: CacheKind, path: &Path) -> SafetyLevel {
                 SafetyLevel::Caution
             } else {
                 SafetyLevel::Safe
+            }
+        }
+        CacheKind::Bun => {
+            // ~/.bun contains the runtime binary, global installs, etc.
+            // Only the install/cache subtree (package cache) is safe to delete.
+            let path_str = path.to_string_lossy();
+            if path_str.contains("install/cache") || path_str.contains("install\\cache") {
+                SafetyLevel::Safe
+            } else {
+                SafetyLevel::Caution
             }
         }
         CacheKind::Unknown => SafetyLevel::Caution,
@@ -469,6 +486,13 @@ mod tests {
         assert_eq!(safety(CacheKind::Yarn, &path), SafetyLevel::Safe);
         assert_eq!(
             safety(CacheKind::Pnpm, &PathBuf::from("/home/.pnpm-store/v3")),
+            SafetyLevel::Safe
+        );
+        assert_eq!(
+            safety(
+                CacheKind::Bun,
+                &PathBuf::from("/home/user/.bun/install/cache")
+            ),
             SafetyLevel::Safe
         );
     }
@@ -857,5 +881,133 @@ mod tests {
     #[test]
     fn upgrade_command_pnpm_rejects_injection() {
         assert_eq!(upgrade_command(CacheKind::Pnpm, "$(whoami)", "1.0.0"), None);
+    }
+
+    // --- Bun detection ---
+
+    #[test]
+    fn detect_bun_root() {
+        assert_eq!(detect(&PathBuf::from("/home/user/.bun")), CacheKind::Bun);
+    }
+
+    #[test]
+    fn detect_bun_install_cache() {
+        assert_eq!(
+            detect(&PathBuf::from("/home/user/.bun/install/cache")),
+            CacheKind::Bun
+        );
+    }
+
+    #[test]
+    fn detect_bun_package_subdir() {
+        assert_eq!(
+            detect(&PathBuf::from(
+                "/home/user/.bun/install/cache/lodash@4.17.21"
+            )),
+            CacheKind::Bun
+        );
+    }
+
+    #[test]
+    fn detect_bun_scoped_package() {
+        assert_eq!(
+            detect(&PathBuf::from(
+                "/home/user/.bun/install/cache/@babel/core@7.24.0"
+            )),
+            CacheKind::Bun
+        );
+    }
+
+    // --- Bun safety ---
+
+    #[test]
+    fn safety_bun_cache_is_safe() {
+        assert_eq!(
+            safety(
+                CacheKind::Bun,
+                &PathBuf::from("/home/user/.bun/install/cache")
+            ),
+            SafetyLevel::Safe
+        );
+    }
+
+    #[test]
+    fn safety_bun_package_is_safe() {
+        assert_eq!(
+            safety(
+                CacheKind::Bun,
+                &PathBuf::from("/home/user/.bun/install/cache/lodash@4.17.21")
+            ),
+            SafetyLevel::Safe
+        );
+    }
+
+    #[test]
+    fn safety_bun_root_is_caution() {
+        assert_eq!(
+            safety(CacheKind::Bun, &PathBuf::from("/home/user/.bun")),
+            SafetyLevel::Caution
+        );
+    }
+
+    #[test]
+    fn safety_bun_install_dir_is_caution() {
+        assert_eq!(
+            safety(CacheKind::Bun, &PathBuf::from("/home/user/.bun/install")),
+            SafetyLevel::Caution
+        );
+    }
+
+    #[test]
+    fn safety_bun_bin_is_caution() {
+        assert_eq!(
+            safety(CacheKind::Bun, &PathBuf::from("/home/user/.bun/bin")),
+            SafetyLevel::Caution
+        );
+    }
+
+    #[test]
+    fn safety_bun_bin_binary_is_caution() {
+        assert_eq!(
+            safety(CacheKind::Bun, &PathBuf::from("/home/user/.bun/bin/bun")),
+            SafetyLevel::Caution
+        );
+    }
+
+    // --- Bun upgrade commands ---
+
+    #[test]
+    fn upgrade_command_bun() {
+        assert_eq!(
+            upgrade_command(CacheKind::Bun, "express", "4.18.2"),
+            Some("bun add express@4.18.2".to_string())
+        );
+    }
+
+    #[test]
+    fn upgrade_command_bun_scoped() {
+        assert_eq!(
+            upgrade_command(CacheKind::Bun, "@types/node", "22.0.0"),
+            Some("bun add @types/node@22.0.0".to_string())
+        );
+    }
+
+    // --- Bun detection collisions ---
+
+    #[test]
+    fn detect_npm_inside_bun_cache_is_bun() {
+        // An npm-named package inside the Bun cache — .bun ancestor wins
+        assert_eq!(
+            detect(&PathBuf::from("/home/user/.bun/install/cache/npm@10.0.0")),
+            CacheKind::Bun
+        );
+    }
+
+    #[test]
+    fn upgrade_command_bun_rejects_injection() {
+        assert_eq!(
+            upgrade_command(CacheKind::Bun, "lodash; rm -rf /", "4.17.21"),
+            None
+        );
     }
 }
