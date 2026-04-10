@@ -19,6 +19,11 @@ fn parse_package_from_path(path: &Path) -> Option<(String, String)> {
         return None;
     }
 
+    // Strip Bun's dedup suffix "@@@N" (e.g. "lodash@4.17.21@@@1" → "lodash@4.17.21")
+    let filename = filename
+        .find("@@@")
+        .map_or(filename, |pos| &filename[..pos]);
+
     // The filename must contain '@' to separate name from version
     let at_pos = filename.rfind('@')?;
     let raw_name = &filename[..at_pos];
@@ -356,5 +361,49 @@ mod tests {
         let fields = metadata(&path);
         assert!(!fields.is_empty());
         assert_eq!(fields[0].value, "npm scope");
+    }
+
+    // =================================================================
+    // Dedup suffix (@@@N) tests
+    // =================================================================
+
+    #[test]
+    fn parse_dedup_suffix_stripped() {
+        let path = PathBuf::from("/home/user/.bun/install/cache/lodash@4.17.21@@@1");
+        let (name, version) = parse_package_from_path(&path).unwrap();
+        assert_eq!(name, "lodash");
+        assert_eq!(version, "4.17.21");
+    }
+
+    #[test]
+    fn parse_dedup_suffix_higher_number() {
+        let path = PathBuf::from("/home/user/.bun/install/cache/express@5.2.1@@@42");
+        let (name, version) = parse_package_from_path(&path).unwrap();
+        assert_eq!(name, "express");
+        assert_eq!(version, "5.2.1");
+    }
+
+    #[test]
+    fn semantic_name_dedup_suffix() {
+        let path = PathBuf::from("/home/user/.bun/install/cache/tar@6.1.11@@@1");
+        assert_eq!(semantic_name(&path), Some("tar 6.1.11".into()));
+    }
+
+    #[test]
+    fn package_id_dedup_suffix() {
+        let path = PathBuf::from("/home/user/.bun/install/cache/jsonwebtoken@8.5.1@@@1");
+        let id = package_id(&path).unwrap();
+        assert_eq!(id.ecosystem, "npm");
+        assert_eq!(id.name, "jsonwebtoken");
+        assert_eq!(id.version, "8.5.1");
+    }
+
+    #[test]
+    fn package_id_scoped_with_dedup_suffix() {
+        let path = PathBuf::from("/home/user/.bun/install/cache/@types/node@22.0.0@@@1");
+        let id = package_id(&path).unwrap();
+        assert_eq!(id.ecosystem, "npm");
+        assert_eq!(id.name, "@types/node");
+        assert_eq!(id.version, "22.0.0");
     }
 }
