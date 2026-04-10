@@ -217,15 +217,41 @@ impl Config {
     }
 }
 
+/// Run a command with a 5-second timeout. Returns `None` if the tool is missing
+/// or the process doesn't finish in time (e.g. corepack prompting for install).
+fn run_with_timeout(program: &str, args: &[&str]) -> Option<std::process::Output> {
+    use std::time::{Duration, Instant};
+
+    let mut child = std::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => return child.wait_with_output().ok(),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
 fn probe_yarn_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
-    // Try CLI detection
-    if let Ok(output) = std::process::Command::new("yarn")
-        .args(["cache", "dir"])
-        .stdin(std::process::Stdio::null())
-        .output()
-    {
+    // Try CLI detection (with timeout to avoid blocking if yarn hangs)
+    if let Some(output) = run_with_timeout("yarn", &["cache", "dir"]) {
         if output.status.success() {
             let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
             let path = PathBuf::from(&path_str);
@@ -236,11 +262,7 @@ fn probe_yarn_paths() -> Vec<PathBuf> {
     }
 
     // Yarn 2+ (Berry) cache folder
-    if let Ok(output) = std::process::Command::new("yarn")
-        .args(["config", "get", "cacheFolder"])
-        .stdin(std::process::Stdio::null())
-        .output()
-    {
+    if let Some(output) = run_with_timeout("yarn", &["config", "get", "cacheFolder"]) {
         if output.status.success() {
             let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !path_str.is_empty() && path_str != "undefined" {
@@ -276,12 +298,8 @@ fn probe_yarn_paths() -> Vec<PathBuf> {
 fn probe_pnpm_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
-    // Try CLI detection
-    if let Ok(output) = std::process::Command::new("pnpm")
-        .args(["store", "path"])
-        .stdin(std::process::Stdio::null())
-        .output()
-    {
+    // Try CLI detection (with timeout to avoid blocking if pnpm hangs)
+    if let Some(output) = run_with_timeout("pnpm", &["store", "path"]) {
         if output.status.success() {
             let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
             let path = PathBuf::from(&path_str);

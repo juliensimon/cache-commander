@@ -1,6 +1,6 @@
 [package]
 name = "ccmd"
-version = "0.2.0"
+version = "0.3.0-rc1"
 edition = "2024"
 rust-version = "1.85"
 description = "Cache Commander — a TUI for browsing and managing cache directories"
@@ -9,7 +9,7 @@ repository = "https://github.com/juliensimon/cache-commander"
 homepage = "https://github.com/juliensimon/cache-commander"
 keywords = ["cache", "tui", "disk-space", "cleanup", "security"]
 categories = ["command-line-utilities"]
-exclude = ["REVIEW-*.md", "demo.tape", "docs/superpowers/", ".DS_Store", "screenshot.png", "scripts/"]
+exclude = ["REVIEW-*.md", "demo.tape", "docs/superpowers/", ".DS_Store", "screenshot.png", "scripts/", "TODO.md"]
 
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }.tar.gz"

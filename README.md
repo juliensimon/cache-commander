@@ -276,7 +276,7 @@ src/
 │   ├── pip.rs, uv.rs    # Python package providers
 │   ├── npm.rs           # npm + npx + node_modules scanning
 │   ├── cargo.rs         # Rust crate provider
-│   └── ...              # 10 more providers
+│   └── ...              # 12 more providers
 ├── security/
 │   ├── mod.rs           # Scan orchestration, vulnerability filtering
 │   ├── osv.rs           # OSV.dev API, version comparison, fix extraction

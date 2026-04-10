@@ -1,4 +1,4 @@
-.TH CCMD 1 "April 2026" "ccmd 0.2.0" "User Commands"
+.TH CCMD 1 "April 2026" "ccmd 0.3.0-rc1" "User Commands"
 .SH NAME
 ccmd \- browse and manage cache directories
 .SH SYNOPSIS
@@ -165,6 +165,7 @@ recognizes and provides rich metadata for the following cache ecosystems:
 l l.
 Provider	Typical location
 _
+Bun	~/.bun/install/cache
 Cargo	~/.cargo/registry
 Chroma	~/.cache/chroma
 GitHub CLI	~/.cache/gh
@@ -172,11 +173,13 @@ Homebrew	~/Library/Caches/Homebrew
 HuggingFace Hub	~/.cache/huggingface
 npm	~/.npm
 pip	~/.cache/pip
+pnpm	~/.local/share/pnpm/store
 pre-commit	~/.cache/pre-commit
 Prisma	~/.cache/prisma
 PyTorch	~/.cache/torch
 uv	~/.cache/uv
 Whisper	~/.cache/whisper
+Yarn	~/.yarn-cache, ~/.yarn/berry/cache
 .TE
 .PP
 Unrecognized directories are displayed with generic metadata.

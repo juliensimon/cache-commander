@@ -80,14 +80,17 @@ pub fn render(
             + status_icon.chars().count();
         let size_len = size_str.len() + 1; // +1 for padding
         let available = width.saturating_sub(prefix_len + size_len + 1);
-        let truncated_name = if name.len() > available {
-            format!("{}…", &name[..available.saturating_sub(1)])
+        let name_char_count = name.chars().count();
+        let truncated_name = if name_char_count > available {
+            let truncated: String = name.chars().take(available.saturating_sub(1)).collect();
+            format!("{truncated}…")
         } else {
             name.to_string()
         };
 
         // Padding between name and size
-        let padding_len = width.saturating_sub(prefix_len + truncated_name.len() + size_len);
+        let padding_len =
+            width.saturating_sub(prefix_len + truncated_name.chars().count() + size_len);
         let padding = " ".repeat(padding_len);
 
         let style = if is_dimmed {
