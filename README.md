@@ -8,6 +8,8 @@
 [![macOS](https://img.shields.io/badge/macOS-x86__64%20%7C%20ARM-black?logo=apple)](https://github.com/juliensimon/cache-commander/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64%20%7C%20ARM-black?logo=linux&logoColor=white)](https://github.com/juliensimon/cache-commander/releases)
 [![crates.io](https://img.shields.io/crates/v/ccmd)](https://crates.io/crates/ccmd)
+[![crates.io downloads](https://img.shields.io/crates/d/ccmd?label=crates.io%20downloads)](https://crates.io/crates/ccmd)
+[![GitHub downloads](https://img.shields.io/github/downloads/juliensimon/cache-commander/total?label=GitHub%20downloads)](https://github.com/juliensimon/cache-commander/releases)
 [![Homebrew](https://img.shields.io/badge/Homebrew-tap-brown?logo=homebrew)](https://github.com/juliensimon/homebrew-tap)
 
 A terminal UI (TUI) for exploring, auditing, and cleaning developer cache directories on macOS and Linux. Scan cached packages for known CVEs, find outdated dependencies, and reclaim disk space — all from one tool.
