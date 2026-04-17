@@ -94,11 +94,30 @@ pub fn start(config: &crate::config::Config) -> mpsc::Receiver<UpdateMsg> {
             None => return,
         };
         let http = http::UreqClient::for_ccmd();
-        if let Some(info) = check(env!("CARGO_PKG_VERSION"), &cache_path, &http, Utc::now()) {
-            let _ = tx.send(UpdateMsg::Available(info));
-        }
+        run_check_and_send(
+            &tx,
+            env!("CARGO_PKG_VERSION"),
+            &cache_path,
+            &http,
+            Utc::now(),
+        );
     });
     rx
+}
+
+/// Runs `check` and, if an update is available, forwards it on the channel.
+/// Extracted from the closure in `start` so tests can drive it with a fake
+/// `HttpClient` without spawning a thread or hitting the real clock.
+fn run_check_and_send(
+    tx: &mpsc::Sender<UpdateMsg>,
+    current: &str,
+    cache_path: &Path,
+    http: &dyn HttpClient,
+    now: DateTime<Utc>,
+) {
+    if let Some(info) = check(current, cache_path, http, now) {
+        let _ = tx.send(UpdateMsg::Available(info));
+    }
 }
 
 fn cache_file_path() -> Option<std::path::PathBuf> {
@@ -238,5 +257,69 @@ mod tests {
         let entry = cache::read_cache(&path).expect("cache written");
         assert_eq!(entry.latest_seen, "0.3.1");
         assert_eq!(entry.last_checked, now().to_rfc3339());
+    }
+
+    #[test]
+    fn fresh_cache_hit_with_equal_version_returns_none() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("c.json");
+        cache::write_cache(
+            &path,
+            &CacheEntry {
+                last_checked: now().to_rfc3339(),
+                latest_seen: "0.3.0".into(),
+                html_url: "https://example.com/0.3.0".into(),
+            },
+        );
+        let http = FakeClient::ok("v9.9.9");
+        assert_eq!(check("0.3.0", &path, &http, now()), None);
+        assert_eq!(http.calls.get(), 0, "cache hit must skip HTTP");
+    }
+
+    #[test]
+    fn run_check_and_send_forwards_available_update() {
+        let (tx, rx) = mpsc::channel();
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("c.json");
+        let http = FakeClient::ok("v0.3.1");
+        run_check_and_send(&tx, "0.3.0", &path, &http, now());
+        match rx.try_recv() {
+            Ok(UpdateMsg::Available(info)) => assert_eq!(info.latest, "0.3.1"),
+            other => panic!("expected Available, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_check_and_send_sends_nothing_when_up_to_date() {
+        let (tx, rx) = mpsc::channel();
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("c.json");
+        let http = FakeClient::ok("v0.3.0");
+        run_check_and_send(&tx, "0.3.0", &path, &http, now());
+        assert!(rx.try_recv().is_err(), "no message should be sent");
+    }
+
+    #[test]
+    fn start_returns_empty_receiver_when_disabled() {
+        let mut config = crate::config::Config::default_for_test();
+        config.updater.enabled = false;
+        let rx = start(&config);
+        assert!(
+            rx.try_recv().is_err(),
+            "disabled updater must not produce messages"
+        );
+    }
+
+    #[test]
+    fn cache_file_path_is_under_ccmd_dir() {
+        let path = cache_file_path().expect("ProjectDirs should resolve on test hosts");
+        assert!(path.ends_with("update-check.json"));
+        // Sanity: the parent directory should mention "ccmd" somewhere in its
+        // path (e.g. ~/Library/Caches/ccmd on macOS or ~/.cache/ccmd on Linux).
+        let parent_str = path.parent().unwrap().to_string_lossy().to_lowercase();
+        assert!(
+            parent_str.contains("ccmd"),
+            "unexpected cache dir: {parent_str}"
+        );
     }
 }

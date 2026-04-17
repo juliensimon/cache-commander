@@ -69,6 +69,12 @@ mod tests {
     }
 
     #[test]
+    fn parse_rejects_too_many_components() {
+        assert_eq!(parse_semver("1.2.3.4"), None);
+        assert_eq!(parse_semver("v1.2.3.4"), None);
+    }
+
+    #[test]
     fn is_prerelease_detects_dash() {
         assert!(is_prerelease("0.3.0-dev"));
         assert!(is_prerelease("v0.3.0-rc.1"));
