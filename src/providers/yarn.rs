@@ -27,12 +27,12 @@ pub fn is_berry(path: &Path) -> bool {
 /// For Yarn Classic directories, we resolve this by reading node_modules/ inside the entry.
 /// For Yarn Berry zips, this limitation is accepted — the version and ecosystem are correct.
 pub fn normalize_scoped_name(name: &str) -> String {
-    if let Some(rest) = name.strip_prefix('@') {
-        if let Some(hyphen_pos) = rest.find('-') {
-            let scope = &rest[..hyphen_pos];
-            let pkg = &rest[hyphen_pos + 1..];
-            return format!("@{}/{}", scope, pkg);
-        }
+    if let Some(rest) = name.strip_prefix('@')
+        && let Some(hyphen_pos) = rest.find('-')
+    {
+        let scope = &rest[..hyphen_pos];
+        let pkg = &rest[hyphen_pos + 1..];
+        return format!("@{}/{}", scope, pkg);
     }
     name.to_string()
 }
@@ -246,23 +246,24 @@ pub fn semantic_name(path: &Path) -> Option<String> {
     }
 
     // Berry zip files
-    if name.ends_with(".zip") {
-        if let Some((pkg, ver)) = parse_berry_filename(&name) {
-            return Some(format!("{} {}", pkg, ver));
-        }
+    if name.ends_with(".zip")
+        && let Some((pkg, ver)) = parse_berry_filename(&name)
+    {
+        return Some(format!("{} {}", pkg, ver));
     }
 
     // Classic entries: directories ending in -integrity or legacy .tgz files
-    if name.ends_with("-integrity") || name.ends_with(".tgz") {
-        if let Some((mut pkg, ver)) = parse_classic_filename(&name) {
-            // For Classic directories, resolve scoped names from node_modules/
-            if pkg.starts_with('@') && path.is_dir() {
-                if let Some(real_name) = resolve_classic_scope(path) {
-                    pkg = real_name;
-                }
-            }
-            return Some(format!("{} {}", pkg, ver));
+    if (name.ends_with("-integrity") || name.ends_with(".tgz"))
+        && let Some((mut pkg, ver)) = parse_classic_filename(&name)
+    {
+        // For Classic directories, resolve scoped names from node_modules/
+        if pkg.starts_with('@')
+            && path.is_dir()
+            && let Some(real_name) = resolve_classic_scope(path)
+        {
+            pkg = real_name;
         }
+        return Some(format!("{} {}", pkg, ver));
     }
 
     None
@@ -284,10 +285,11 @@ pub fn package_id(path: &Path) -> Option<super::PackageId> {
     if name.ends_with("-integrity") || name.ends_with(".tgz") {
         let (mut pkg, ver) = parse_classic_filename(&name)?;
         // For Classic directories, resolve scoped names from node_modules/
-        if pkg.starts_with('@') && path.is_dir() {
-            if let Some(real_name) = resolve_classic_scope(path) {
-                pkg = real_name;
-            }
+        if pkg.starts_with('@')
+            && path.is_dir()
+            && let Some(real_name) = resolve_classic_scope(path)
+        {
+            pkg = real_name;
         }
         return Some(super::PackageId {
             ecosystem: "npm",
@@ -323,21 +325,21 @@ pub fn metadata(path: &Path) -> Vec<MetadataField> {
     }
 
     // Cache root directories: count Berry .zip files and Classic -integrity dirs
-    if path.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(path) {
-            let count = entries
-                .filter_map(|e| e.ok())
-                .filter(|e| {
-                    let n = e.file_name().to_string_lossy().to_string();
-                    n.ends_with(".zip") || n.ends_with("-integrity") || n.ends_with(".tgz")
-                })
-                .count();
-            if count > 0 {
-                fields.push(MetadataField {
-                    label: "Packages".to_string(),
-                    value: count.to_string(),
-                });
-            }
+    if path.is_dir()
+        && let Ok(entries) = std::fs::read_dir(path)
+    {
+        let count = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let n = e.file_name().to_string_lossy().to_string();
+                n.ends_with(".zip") || n.ends_with("-integrity") || n.ends_with(".tgz")
+            })
+            .count();
+        if count > 0 {
+            fields.push(MetadataField {
+                label: "Packages".to_string(),
+                value: count.to_string(),
+            });
         }
     }
 

@@ -84,14 +84,21 @@ fn matches_ecosystem(label: &str, filter: &str) -> bool {
 
 /// Check if a path is inside any of the configured cache roots (resolving symlinks).
 fn is_under_roots(path: &std::path::Path, roots: &[PathBuf]) -> bool {
-    let Ok(canonical) = std::fs::canonicalize(path) else {
-        return false;
-    };
-    roots.iter().any(|root| {
+    canonical_under_roots(path, roots).is_some()
+}
+
+/// Canonicalize `path` and confirm it resides under a canonicalized root.
+/// Returns the canonical path if so — callers performing a mutation should
+/// use this canonical path, not the input, to close the TOCTOU window
+/// between check and delete (H6).
+fn canonical_under_roots(path: &std::path::Path, roots: &[PathBuf]) -> Option<PathBuf> {
+    let canonical = std::fs::canonicalize(path).ok()?;
+    let under_root = roots.iter().any(|root| {
         std::fs::canonicalize(root)
             .map(|cr| canonical.starts_with(cr))
             .unwrap_or(false)
-    })
+    });
+    if under_root { Some(canonical) } else { None }
 }
 
 impl CcmdMcp {
@@ -176,10 +183,10 @@ impl CcmdMcp {
             return label.to_string();
         }
         // Unknown provider — use parent directory to give context
-        if let Some(parent) = node.path.parent() {
-            if parent.ends_with("Library/Caches") {
-                return "~/Library/Caches".to_string();
-            }
+        if let Some(parent) = node.path.parent()
+            && parent.ends_with("Library/Caches")
+        {
+            return "~/Library/Caches".to_string();
         }
         "Other".to_string()
     }
@@ -207,7 +214,7 @@ impl CcmdMcp {
                 item_count: count,
             })
             .collect();
-        roots.sort_by(|a, b| b.total_size_bytes.cmp(&a.total_size_bytes));
+        roots.sort_by_key(|r| std::cmp::Reverse(r.total_size_bytes));
         roots
     }
 
@@ -242,7 +249,7 @@ impl CcmdMcp {
                 item_count: count,
             })
             .collect();
-        provider_summaries.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+        provider_summaries.sort_by_key(|p| std::cmp::Reverse(p.size_bytes));
 
         Summary {
             total_size: format_size(total_size, BINARY),
@@ -453,6 +460,7 @@ impl CcmdMcp {
             }
             let vulns = security::scan_vulns(&packages);
             vulns
+                .results
                 .into_iter()
                 .map(|(path, info)| {
                     let kind = providers::detect(&path);
@@ -532,6 +540,7 @@ impl CcmdMcp {
             }
             let versions = security::check_versions(&packages);
             versions
+                .results
                 .into_iter()
                 .filter(|(_, info)| info.is_outdated)
                 .map(|(path, info)| {
@@ -709,7 +718,11 @@ impl CcmdMcp {
                     });
                     continue;
                 }
-                if !is_under_roots(path, &roots) {
+                // H6: resolve the canonical path once, and use it for the
+                // actual deletion. This closes the TOCTOU window where a
+                // racing symlink swap could escape the root between the
+                // `is_under_roots` check and the `remove_dir_all` call.
+                let Some(canonical) = canonical_under_roots(path, &roots) else {
                     skipped.push(SkippedItem {
                         path: path.to_string_lossy().to_string(),
                         name: path
@@ -720,33 +733,34 @@ impl CcmdMcp {
                         reason: "Path is not inside any configured cache root".to_string(),
                     });
                     continue;
-                }
-                let kind = providers::detect(path);
-                let safety = providers::safety(kind, path);
-                let name = providers::semantic_name(kind, path).unwrap_or_else(|| {
-                    path.file_name()
+                };
+                let kind = providers::detect(&canonical);
+                let safety = providers::safety(kind, &canonical);
+                let name = providers::semantic_name(kind, &canonical).unwrap_or_else(|| {
+                    canonical
+                        .file_name()
                         .unwrap_or_default()
                         .to_string_lossy()
                         .to_string()
                 });
                 match safety::evaluate_delete(&safety, confirm_caution) {
                     safety::DeleteDecision::Allow => {
-                        let size = walker::dir_size(path);
-                        let ok = if path.is_dir() {
-                            std::fs::remove_dir_all(path).is_ok()
+                        let size = walker::dir_size(&canonical);
+                        let ok = if canonical.is_dir() {
+                            std::fs::remove_dir_all(&canonical).is_ok()
                         } else {
-                            std::fs::remove_file(path).is_ok()
+                            std::fs::remove_file(&canonical).is_ok()
                         };
                         if ok {
                             space_freed += size;
                             deleted.push(DeletedItem {
-                                path: path.to_string_lossy().to_string(),
+                                path: canonical.to_string_lossy().to_string(),
                                 name,
                                 size: format_size(size, BINARY),
                             });
                         } else {
                             skipped.push(SkippedItem {
-                                path: path.to_string_lossy().to_string(),
+                                path: canonical.to_string_lossy().to_string(),
                                 name,
                                 reason: "Permission denied or file in use".to_string(),
                             });
@@ -814,6 +828,26 @@ impl ServerHandler for CcmdMcp {
     }
 }
 
+pub fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive("ccmd=info".parse().unwrap()),
+            )
+            .try_init()
+            .ok();
+
+        let server = CcmdMcp::new(&config);
+        let transport = rmcp::transport::io::stdio();
+        let handle = server.serve(transport).await?;
+        handle.waiting().await?;
+        Ok(())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -874,6 +908,38 @@ mod tests {
             &child,
             &[root1.path().to_path_buf(), root2.path().to_path_buf()]
         ));
+    }
+
+    // --- H6: canonical_under_roots returns the canonical path for use in
+    // the actual mutation, so a later delete uses the resolved path rather
+    // than a racing-swap-able input. ------------------------------------
+    #[test]
+    fn canonical_under_roots_returns_resolved_path_for_valid_input() {
+        let dir = TempDir::new().unwrap();
+        let child = dir.path().join("subdir");
+        std::fs::create_dir(&child).unwrap();
+        let canonical = canonical_under_roots(&child, &[dir.path().to_path_buf()]);
+        assert!(canonical.is_some());
+        assert_eq!(
+            canonical.unwrap(),
+            std::fs::canonicalize(&child).unwrap(),
+            "should return the fully-resolved canonical path"
+        );
+    }
+
+    #[test]
+    fn canonical_under_roots_rejects_symlink_pointing_outside() {
+        let root = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let secret = outside.path().join("secret");
+        std::fs::write(&secret, "data").unwrap();
+        let link = root.path().join("link");
+        symlink(&secret, &link).unwrap();
+        assert_eq!(
+            canonical_under_roots(&link, &[root.path().to_path_buf()]),
+            None,
+            "symlink escaping the root must NOT produce a canonical-under-roots"
+        );
     }
 
     // --- provider_label ---
@@ -1175,24 +1241,4 @@ mod tests {
         let array_pos = json.find("\"deleted\"").unwrap();
         assert!(count_pos < array_pos, "Counts should appear before arrays");
     }
-}
-
-pub fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
-    let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async {
-        tracing_subscriber::fmt()
-            .with_writer(std::io::stderr)
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::from_default_env()
-                    .add_directive("ccmd=info".parse().unwrap()),
-            )
-            .try_init()
-            .ok();
-
-        let server = CcmdMcp::new(&config);
-        let transport = rmcp::transport::io::stdio();
-        let handle = server.serve(transport).await?;
-        handle.waiting().await?;
-        Ok(())
-    })
 }

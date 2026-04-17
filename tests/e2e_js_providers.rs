@@ -28,6 +28,16 @@ fn run_in(dir: &Path, cmd: &str, args: &[&str]) {
     run_in_with_env(dir, cmd, args, &[]);
 }
 
+/// Run pnpm with an isolated content-addressed store so tests never pollute the
+/// host's global pnpm store (`~/Library/pnpm`, `~/.local/share/pnpm`, etc.).
+/// The `--store-dir` flag is inserted after `pnpm` and before the subcommand.
+fn run_pnpm(dir: &Path, store_dir: &Path, args: &[&str]) {
+    let store_str = store_dir.to_string_lossy().to_string();
+    let mut full_args: Vec<&str> = vec!["--store-dir", &store_str];
+    full_args.extend_from_slice(args);
+    run_in(dir, "pnpm", &full_args);
+}
+
 /// Run a command in a directory with extra env vars and assert success.
 fn run_in_with_env(dir: &Path, cmd: &str, args: &[&str], env: &[(&str, &str)]) {
     let mut command = Command::new(cmd);
@@ -58,14 +68,6 @@ fn run_stdout(cmd: &str, args: &[&str]) -> Option<String> {
     } else {
         None
     }
-}
-
-/// Collect discovered package names from a set of roots.
-fn discovered_names(roots: &[PathBuf]) -> Vec<String> {
-    ccmd::scanner::discover_packages(roots)
-        .into_iter()
-        .map(|(_, id)| id.name)
-        .collect()
 }
 
 /// Collect discovered packages as (name, version, ecosystem) tuples.
@@ -170,7 +172,7 @@ fn e2e_yarn_classic_realistic_packages() {
     }
 
     // Now verify the scanner discovers all packages correctly
-    let packages = discovered_packages(&[cache_path.clone()]);
+    let packages = discovered_packages(std::slice::from_ref(&cache_path));
     let names: Vec<&str> = packages.iter().map(|(n, _, _)| n.as_str()).collect();
 
     assert!(names.contains(&"lodash"), "Should find lodash: {names:?}");
@@ -354,11 +356,12 @@ fn e2e_pnpm_realistic_packages() {
 
     let tmp = tempfile::tempdir().unwrap();
     let project = tmp.path().join("pnpm-basic");
+    let store = tmp.path().join(".pnpm-store");
     init_npm_project(&project);
 
-    run_in(
+    run_pnpm(
         &project,
-        "pnpm",
+        &store,
         &[
             "add",
             "lodash@4.17.21",
@@ -399,7 +402,7 @@ fn e2e_pnpm_realistic_packages() {
     }
 
     // Verify scanner finds all packages
-    let packages = discovered_packages(&[pnpm_dir.clone()]);
+    let packages = discovered_packages(std::slice::from_ref(&pnpm_dir));
     let names: Vec<&str> = packages.iter().map(|(n, _, _)| n.as_str()).collect();
 
     assert!(names.contains(&"lodash"), "Should find lodash: {names:?}");
@@ -436,12 +439,13 @@ fn e2e_pnpm_peer_dependencies() {
 
     let tmp = tempfile::tempdir().unwrap();
     let project = tmp.path().join("pnpm-peers");
+    let store = tmp.path().join(".pnpm-store");
     init_npm_project(&project);
 
     // react-dom has a peer dep on react — pnpm encodes this in the directory name
-    run_in(
+    run_pnpm(
         &project,
-        "pnpm",
+        &store,
         &["add", "react@18.2.0", "react-dom@18.2.0"],
     );
 
@@ -495,12 +499,13 @@ fn e2e_pnpm_scoped_with_peers() {
 
     let tmp = tempfile::tempdir().unwrap();
     let project = tmp.path().join("pnpm-scoped-peers");
+    let store = tmp.path().join(".pnpm-store");
     init_npm_project(&project);
 
     // @testing-library/react has peer deps on react and react-dom
-    run_in(
+    run_pnpm(
         &project,
-        "pnpm",
+        &store,
         &[
             "add",
             "react@18.2.0",
@@ -541,21 +546,6 @@ fn e2e_pnpm_scoped_with_peers() {
     assert_eq!(pkg.2, "npm");
 }
 
-/// pnpm: store path auto-detection
-#[test]
-fn e2e_pnpm_store_path_detection() {
-    if !is_available("pnpm") {
-        eprintln!("SKIP: pnpm not installed");
-        return;
-    }
-
-    let store_path = run_stdout("pnpm", &["store", "path"]);
-    if let Some(path_str) = store_path {
-        let path = PathBuf::from(&path_str);
-        assert!(path.exists(), "pnpm store path should exist: {path_str}");
-    }
-}
-
 // ============================================================
 // Cross-provider deduplication with real tools
 // ============================================================
@@ -574,23 +564,24 @@ fn e2e_dedup_across_npm_and_yarn() {
     }
 
     let tmp = tempfile::tempdir().unwrap();
+    let yarn_cache = tmp.path().join(".yarn-cache");
+    std::fs::create_dir_all(&yarn_cache).unwrap();
+    let yarn_cache_str = yarn_cache.to_string_lossy().to_string();
+    let yarn_env = [("YARN_CACHE_FOLDER", yarn_cache_str.as_str())];
 
-    // Install lodash via Yarn Classic (goes to global yarn cache)
+    // Install lodash via Yarn Classic into an isolated cache dir
     let yarn_project = tmp.path().join("yarn-dedup");
     init_npm_project(&yarn_project);
-    run_in(&yarn_project, "yarn", &["add", "lodash@4.17.21"]);
+    run_in_with_env(&yarn_project, "yarn", &["add", "lodash@4.17.21"], &yarn_env);
 
-    // Install lodash via npm/npx (goes to .npm cache)
+    // Install lodash via npm — into the project's local node_modules (already under tempdir)
     let npm_project = tmp.path().join("npm-dedup");
     init_npm_project(&npm_project);
     run_in(&npm_project, "npm", &["install", "lodash@4.17.21"]);
 
-    let yarn_cache = run_stdout("yarn", &["cache", "dir"])
-        .map(PathBuf::from)
-        .expect("yarn cache dir");
     let npm_modules = npm_project.join("node_modules");
 
-    // Scan both caches together
+    // Scan both caches together — yarn cache is the isolated tempdir cache
     let packages = ccmd::scanner::discover_packages(&[yarn_cache, npm_modules]);
 
     let lodash_count = packages
@@ -602,6 +593,5 @@ fn e2e_dedup_across_npm_and_yarn() {
         lodash_count, 1,
         "lodash@4.17.21 should be deduplicated across npm and yarn, got {lodash_count}"
     );
-
-    let _ = Command::new("yarn").args(["cache", "clean"]).output();
+    // No `yarn cache clean` — tempdir drop cleans up our isolated cache.
 }

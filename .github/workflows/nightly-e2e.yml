@@ -1,0 +1,39 @@
+name: Nightly E2E
+
+# M8: Live-network e2e tests are gated behind `--features e2e` so they don't
+# run on every PR (flaky, slow, quota-consuming). This workflow runs them on
+# a schedule so OSV / registry / JS-provider regressions surface within a day.
+
+on:
+  schedule:
+    # Daily at 06:17 UTC — chosen off-hour to avoid peak OSV traffic.
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  e2e-all:
+    name: All E2E tests (live network + real package managers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606 # v1.15.4
+
+      - name: Install pnpm
+        run: npm install -g pnpm
+
+      - name: Install Yarn Classic
+        run: npm install -g yarn@1
+
+      - name: Enable Corepack (for Yarn Berry)
+        run: corepack enable
+
+      - name: Run all e2e-gated tests
+        # --test-threads=1 because js provider tests spin real CLIs that
+        # share a PATH and tempdirs; parallel runs flake on lockfile contention.
+        run: cargo test --features e2e -- --test-threads=1

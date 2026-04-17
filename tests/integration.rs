@@ -433,10 +433,10 @@ fn scanner_expand_and_size_update_full_cycle() {
         // Small dirs get instant sizes via quick_size, large ones come via SizeUpdated
         // Drain any remaining size updates
         while let Ok(result) = result_rx.recv_timeout(Duration::from_secs(2)) {
-            if let ccmd::scanner::ScanResult::SizeUpdated(path, size) = result {
-                if let Some(node) = tree.nodes.iter_mut().find(|n| n.path == path) {
-                    node.size = size;
-                }
+            if let ccmd::scanner::ScanResult::SizeUpdated(path, size) = result
+                && let Some(node) = tree.nodes.iter_mut().find(|n| n.path == path)
+            {
+                node.size = size;
             }
         }
 

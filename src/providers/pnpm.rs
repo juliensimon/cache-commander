@@ -94,10 +94,10 @@ pub fn semantic_name(path: &Path) -> Option<String> {
 
     // Subdirectories inside the content store
     if path_str.contains(".pnpm-store") || path_str.contains("pnpm/store") {
-        if let Some(version) = name.strip_prefix('v') {
-            if version.chars().all(|c| c.is_ascii_digit()) {
-                return Some(format!("Store v{version}"));
-            }
+        if let Some(version) = name.strip_prefix('v')
+            && version.chars().all(|c| c.is_ascii_digit())
+        {
+            return Some(format!("Store v{version}"));
         }
         if name == "files" {
             return Some("Content Files".to_string());
@@ -108,17 +108,19 @@ pub fn semantic_name(path: &Path) -> Option<String> {
     }
 
     // Index files: {hash}-name@version.json → "name version"
-    if name.ends_with(".json") && path_str.contains("/index/") {
-        if let Some(id) = parse_index_filename(&name) {
-            return Some(format!("{} {}", id.name, id.version));
-        }
+    if name.ends_with(".json")
+        && path_str.contains("/index/")
+        && let Some(id) = parse_index_filename(&name)
+    {
+        return Some(format!("{} {}", id.name, id.version));
     }
 
     // Virtual store entries: name@version directories
-    if name.contains('@') && is_pnpm_virtual_store(path) {
-        if let Some((pkg, ver)) = parse_virtual_store_name(&name) {
-            return Some(format!("{} {}", pkg, ver));
-        }
+    if name.contains('@')
+        && is_pnpm_virtual_store(path)
+        && let Some((pkg, ver)) = parse_virtual_store_name(&name)
+    {
+        return Some(format!("{} {}", pkg, ver));
     }
 
     None
@@ -161,9 +163,11 @@ fn parse_index_filename(filename: &str) -> Option<super::PackageId> {
     let base = filename.strip_suffix(".json")?;
 
     // The hash is 62 hex chars, followed by '-', then the package spec.
-    // Validate and skip the hash prefix.
-    if base.len() < 64 {
-        return None; // too short: need 62 hash + '-' + at least 1 char
+    // Validate and skip the hash prefix. The byte-indexed slicing below is
+    // safe only if the first 63 bytes are ASCII — guard against multi-byte
+    // chars landing on byte 62 (would otherwise panic at the slice).
+    if base.len() < 64 || !base.is_char_boundary(62) || !base.is_char_boundary(63) {
+        return None;
     }
     let hash_part = &base[..62];
     if !hash_part.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -784,5 +788,52 @@ mod tests {
         let fields = metadata(&store_dir);
         let entries_field = fields.iter().find(|f| f.label == "Entries").unwrap();
         assert_eq!(entries_field.value, "3"); // v3 + tmp + some-file
+    }
+
+    // =================================================================
+    // M1: byte-boundary safety on non-ASCII input
+    // These inputs must not panic. They can legitimately return None.
+    // =================================================================
+
+    #[test]
+    fn parse_index_filename_rejects_non_ascii_hash_without_panic() {
+        // A 🔥 emoji is 4 bytes. Putting it near byte 62 means
+        // `&base[..62]` lands inside the emoji — must not panic.
+        let mut s = "a".repeat(60);
+        s.push('🔥');
+        s.push_str("xx-name@1.0.0.json");
+        assert!(parse_index_filename(&s).is_none());
+    }
+
+    #[test]
+    fn parse_index_filename_rejects_short_multibyte_without_panic() {
+        // A filename that starts with a multi-byte char and is shorter than
+        // the hash prefix: guards the byte-index at `base.as_bytes()[62]`.
+        let s = "🦀-name@1.0.0.json";
+        assert!(parse_index_filename(s).is_none());
+    }
+
+    #[test]
+    fn parse_index_filename_rejects_multibyte_at_separator_without_panic() {
+        // Exactly 62 hex chars of hash, then a multi-byte char where the
+        // '-' separator is expected: must not panic on byte 62.
+        let mut s = "a".repeat(62);
+        s.push('🦀');
+        s.push_str("name@1.0.0.json");
+        assert!(parse_index_filename(&s).is_none());
+    }
+
+    #[test]
+    fn strip_peer_deps_non_ascii_does_not_panic() {
+        // Construct a scoped-style name with a multi-byte char in the scope
+        // position; stripping peer deps must not panic even if offsets shift.
+        let input = "@🦀+pkg@1.0.0_🔥-peer";
+        let _ = strip_peer_deps(input);
+    }
+
+    #[test]
+    fn strip_peer_deps_unscoped_non_ascii_does_not_panic() {
+        let input = "🔥pkg@1.0.0_react@18";
+        let _ = strip_peer_deps(input);
     }
 }

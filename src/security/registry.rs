@@ -76,9 +76,13 @@ pub fn check_latest(pkg: &crate::providers::PackageId) -> Result<Option<String>,
         Some(u) => u,
         None => return Ok(None),
     };
+    check_latest_at(&url, pkg.ecosystem)
+}
 
+/// Issue a registry request to a specific URL (mockable for M2 tests).
+pub fn check_latest_at(url: &str, ecosystem: &str) -> Result<Option<String>, String> {
     let resp = ureq::agent()
-        .get(&url)
+        .get(url)
         .timeout(std::time::Duration::from_secs(10))
         .set(
             "User-Agent",
@@ -93,7 +97,7 @@ pub fn check_latest(pkg: &crate::providers::PackageId) -> Result<Option<String>,
         .into_string()
         .map_err(|e| format!("Registry read failed: {e}"))?;
 
-    Ok(parse_registry_response(pkg.ecosystem, &text))
+    Ok(parse_registry_response(ecosystem, &text))
 }
 
 #[cfg(test)]

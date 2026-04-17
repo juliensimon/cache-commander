@@ -51,19 +51,51 @@ pub fn render_delete_confirm(f: &mut Frame, items: &[&TreeNode]) {
     )));
     lines.push(Line::from(""));
 
-    // Safety summary
-    let all_safe = items
-        .iter()
-        .all(|n| n.kind != crate::tree::node::CacheKind::Unknown);
-    if all_safe {
+    // Per-item safety classification (H3): resolve the real SafetyLevel for
+    // each item instead of the coarse "Unknown vs. anything else" check, and
+    // surface the worst tier in the summary.
+    let mut caution_count = 0usize;
+    let mut unsafe_count = 0usize;
+    for item in items {
+        match crate::providers::safety(item.kind, &item.path) {
+            crate::providers::SafetyLevel::Safe => {}
+            crate::providers::SafetyLevel::Caution => caution_count += 1,
+            crate::providers::SafetyLevel::Unsafe => unsafe_count += 1,
+        }
+    }
+
+    if unsafe_count > 0 {
         lines.push(Line::from(Span::styled(
-            "  ● All items are safe to delete (re-downloadable)",
-            theme::SAFE,
+            format!(
+                "  ○ {} Unsafe item{} — will be refused on confirm",
+                unsafe_count,
+                if unsafe_count == 1 { "" } else { "s" }
+            ),
+            theme::DANGER,
+        )));
+        if caution_count > 0 {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "  ◐ {} Caution item{} — may cause rebuilds",
+                    caution_count,
+                    if caution_count == 1 { "" } else { "s" }
+                ),
+                theme::CAUTION,
+            )));
+        }
+    } else if caution_count > 0 {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "  ◐ {} Caution item{} — may cause rebuilds (re-verify before deleting)",
+                caution_count,
+                if caution_count == 1 { "" } else { "s" }
+            ),
+            theme::CAUTION,
         )));
     } else {
         lines.push(Line::from(Span::styled(
-            "  ◐ Some items have unknown safety — inspect before deleting",
-            theme::CAUTION,
+            "  ● All items are safe to delete (re-downloadable)",
+            theme::SAFE,
         )));
     }
 
@@ -236,15 +268,81 @@ mod tests {
 
     #[test]
     fn delete_confirm_unknown_kind_shows_caution_summary() {
+        // Unknown kind resolves to Caution via providers::safety().
         let node = make_node("mystery", CacheKind::Unknown, 1024);
         let out = render_dialog(|f| render_delete_confirm(f, &[&node]));
         assert!(
-            out.contains("unknown safety"),
+            out.contains("Caution") || out.contains("caution"),
             "expected caution banner:\n{out}"
         );
         assert!(
             !out.contains("All items are safe"),
             "should not claim safety:\n{out}"
+        );
+    }
+
+    fn make_node_with_path(name: &str, kind: CacheKind, size: u64, path: &str) -> TreeNode {
+        let mut n = make_node(name, kind, size);
+        n.path = PathBuf::from(path);
+        n
+    }
+
+    #[test]
+    fn delete_confirm_caution_item_shows_caution_banner() {
+        // Yarn Berry `.yarn/cache` is Caution, not Safe.
+        let node = make_node_with_path(
+            "pkg",
+            CacheKind::Yarn,
+            4096,
+            "/project/.yarn/cache/pkg-1.0.0",
+        );
+        let out = render_dialog(|f| render_delete_confirm(f, &[&node]));
+        assert!(
+            out.contains("caution") || out.contains("Caution"),
+            "expected caution banner:\n{out}"
+        );
+        assert!(
+            !out.contains("All items are safe"),
+            "caution item should not render the 'all safe' line:\n{out}"
+        );
+    }
+
+    #[test]
+    fn delete_confirm_unsafe_item_shows_refuse_banner() {
+        // `.bun/bin/bun` is now Unsafe — dialog must surface that and
+        // indicate that Unsafe items will be skipped on confirm.
+        let node = make_node_with_path(
+            "bun binary",
+            CacheKind::Bun,
+            1024 * 1024,
+            "/home/user/.bun/bin/bun",
+        );
+        let out = render_dialog(|f| render_delete_confirm(f, &[&node]));
+        assert!(
+            out.contains("unsafe") || out.contains("Unsafe") || out.contains("refuse"),
+            "expected Unsafe/refuse banner:\n{out}"
+        );
+    }
+
+    #[test]
+    fn delete_confirm_mixed_safety_surfaces_worst_level() {
+        let safe = make_node_with_path(
+            "lodash 4.17.21",
+            CacheKind::Bun,
+            1024,
+            "/home/user/.bun/install/cache/lodash@4.17.21",
+        );
+        let unsafe_item =
+            make_node_with_path("bun", CacheKind::Bun, 1024, "/home/user/.bun/bin/bun");
+        let out = render_dialog(|f| render_delete_confirm(f, &[&safe, &unsafe_item]));
+        // Even though one item is Safe, the Unsafe item must be flagged.
+        assert!(
+            out.contains("unsafe") || out.contains("Unsafe") || out.contains("refuse"),
+            "mixed batch must surface Unsafe:\n{out}"
+        );
+        assert!(
+            !out.contains("All items are safe"),
+            "mixed batch must not claim 'all items are safe':\n{out}"
         );
     }
 

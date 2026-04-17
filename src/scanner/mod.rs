@@ -20,16 +20,11 @@ pub enum ScanResult {
     RootsScanned(Vec<TreeNode>),
     ChildrenScanned(PathBuf, Vec<TreeNode>),
     SizeUpdated(PathBuf, u64),
-    /// (packages_scanned, results)
-    VulnsScanned(
-        usize,
-        std::collections::HashMap<PathBuf, crate::security::SecurityInfo>,
-    ),
-    /// (packages_checked, results)
-    VersionsChecked(
-        usize,
-        std::collections::HashMap<PathBuf, crate::security::VersionInfo>,
-    ),
+    /// (packages_attempted, outcome) — outcome includes unscanned count so
+    /// transient OSV errors aren't masked as "clean" (H5).
+    VulnsScanned(usize, crate::security::VulnScanOutcome),
+    /// (packages_attempted, outcome) — outcome includes unchecked count.
+    VersionsChecked(usize, crate::security::VersionCheckOutcome),
     /// formula name → outdated info
     BrewOutdatedCompleted(
         std::collections::HashMap<String, crate::providers::homebrew::BrewOutdatedEntry>,
@@ -97,8 +92,8 @@ pub fn start(result_tx: mpsc::Sender<ScanResult>) -> mpsc::Sender<ScanRequest> {
                     std::thread::spawn(move || {
                         let packages = discover_packages(&roots);
                         let count = packages.len();
-                        let results = crate::security::scan_vulns(&packages);
-                        let _ = tx.send(ScanResult::VulnsScanned(count, results));
+                        let outcome = crate::security::scan_vulns(&packages);
+                        let _ = tx.send(ScanResult::VulnsScanned(count, outcome));
                     });
                 }
                 ScanRequest::CheckVersions(roots) => {
@@ -106,8 +101,8 @@ pub fn start(result_tx: mpsc::Sender<ScanResult>) -> mpsc::Sender<ScanRequest> {
                     std::thread::spawn(move || {
                         let packages = discover_packages(&roots);
                         let count = packages.len();
-                        let results = crate::security::check_versions(&packages);
-                        let _ = tx.send(ScanResult::VersionsChecked(count, results));
+                        let outcome = crate::security::check_versions(&packages);
+                        let _ = tx.send(ScanResult::VersionsChecked(count, outcome));
                     });
                 }
                 ScanRequest::BrewOutdated => {
@@ -173,6 +168,12 @@ fn run_brew_outdated()
     if !output.status.success() {
         return std::collections::HashMap::new();
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    crate::providers::homebrew::parse_brew_outdated(&stdout)
+    // L1: brew's JSON output is always UTF-8; if it isn't, we have a locale
+    // or brew-version problem and should return empty rather than
+    // silently replacing bytes with U+FFFD (which then fails JSON parse
+    // and masquerades as "no outdated packages").
+    let Ok(stdout) = std::str::from_utf8(&output.stdout) else {
+        return std::collections::HashMap::new();
+    };
+    crate::providers::homebrew::parse_brew_outdated(stdout)
 }

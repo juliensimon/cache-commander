@@ -474,7 +474,10 @@ impl TreeState {
     }
 
     fn sort_roots(&mut self) {
-        let mut root_indices: Vec<usize> = self
+        // Collect (root_start, root_end) ranges covering each root subtree.
+        // Roots are nodes with parent == None; a subtree ends where the next
+        // root starts (or at nodes.len()).
+        let root_indices: Vec<usize> = self
             .nodes
             .iter()
             .enumerate()
@@ -486,34 +489,71 @@ impl TreeState {
             return;
         }
 
+        let mut subtrees: Vec<Vec<TreeNode>> = Vec::with_capacity(root_indices.len());
+        for (i, &start) in root_indices.iter().enumerate() {
+            let end = root_indices.get(i + 1).copied().unwrap_or(self.nodes.len());
+            subtrees.push(self.nodes[start..end].to_vec());
+        }
+
         let sort_by = self.sort_by;
         let sort_desc = self.sort_desc;
-        root_indices.sort_by(|&a, &b| {
+        subtrees.sort_by(|a, b| {
             let ord = match sort_by {
-                SortField::Size => self.nodes[a].size.cmp(&self.nodes[b].size),
-                SortField::Name => self.nodes[a]
-                    .name
-                    .to_lowercase()
-                    .cmp(&self.nodes[b].name.to_lowercase()),
-                SortField::Modified => self.nodes[a]
-                    .last_modified
-                    .cmp(&self.nodes[b].last_modified),
+                SortField::Size => a[0].size.cmp(&b[0].size),
+                SortField::Name => a[0].name.to_lowercase().cmp(&b[0].name.to_lowercase()),
+                SortField::Modified => a[0].last_modified.cmp(&b[0].last_modified),
             };
             if sort_desc { ord.reverse() } else { ord }
         });
 
-        let already_sorted = root_indices.windows(2).all(|w| w[0] < w[1]);
-        if already_sorted {
-            return;
+        // Rebuild nodes from sorted subtrees, fixing up parent/expanded/marked
+        // indices via an old→new index map (roots never move across subtrees;
+        // within a subtree, offsets are preserved).
+        let mut new_nodes: Vec<TreeNode> = Vec::with_capacity(self.nodes.len());
+        let mut index_map: Vec<Option<usize>> = vec![None; self.nodes.len()];
+        for (subtree_pos, subtree) in subtrees.iter().enumerate() {
+            // original start index for this subtree is the one whose first node
+            // equals subtree[0] (by path — roots are unique by path)
+            let orig_start = root_indices
+                .iter()
+                .find(|&&idx| self.nodes[idx].path == subtree[0].path)
+                .copied()
+                .expect("subtree root must exist in original roots");
+            // Locate end in the old indexing to map every original index
+            let orig_root_pos = root_indices.iter().position(|&i| i == orig_start).unwrap();
+            let orig_end = root_indices
+                .get(orig_root_pos + 1)
+                .copied()
+                .unwrap_or(self.nodes.len());
+
+            let new_start = new_nodes.len();
+            for (offset, node) in subtree.iter().enumerate() {
+                index_map[orig_start + offset] = Some(new_start + offset);
+                new_nodes.push(node.clone());
+            }
+            // Guard: offset count should match subtree length
+            debug_assert_eq!(new_start + (orig_end - orig_start), new_nodes.len());
+            let _ = subtree_pos; // silences unused warning when debug_assertions off
         }
 
-        let cloned: Vec<TreeNode> = root_indices
-            .iter()
-            .map(|&i| self.nodes[i].clone())
-            .collect();
-        for (pos, &orig_idx) in root_indices.iter().enumerate() {
-            self.nodes[orig_idx] = cloned[pos].clone();
+        // Remap parent indices
+        for node in &mut new_nodes {
+            if let Some(ref mut p) = node.parent
+                && let Some(new_p) = index_map[*p]
+            {
+                *p = new_p;
+            }
         }
+
+        // Remap tracked index sets
+        self.expanded = self.expanded.iter().filter_map(|i| index_map[*i]).collect();
+        self.marked = self.marked.iter().filter_map(|i| index_map[*i]).collect();
+        self.dimmed = self.dimmed.iter().filter_map(|i| index_map[*i]).collect();
+        if let Some(new_sel) = index_map[self.selected] {
+            self.selected = new_sel;
+        }
+
+        self.nodes = new_nodes;
     }
 
     pub fn remove_nodes(&mut self, indices: &[usize]) {
@@ -1018,6 +1058,70 @@ mod tests {
         assert_eq!(tree.sort_by, SortField::Modified);
         tree.cycle_sort();
         assert_eq!(tree.sort_by, SortField::Size);
+    }
+
+    #[test]
+    fn sort_roots_reorders_by_size_desc() {
+        let mut tree = TreeState::new(SortField::Size, true);
+        tree.set_roots(vec![
+            make_node("small", 100, 0, None),
+            make_node("big", 9000, 0, None),
+            make_node("medium", 500, 0, None),
+        ]);
+        tree.sort_roots();
+
+        let names: Vec<&str> = tree.nodes.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(names, vec!["big", "medium", "small"]);
+    }
+
+    #[test]
+    fn sort_roots_reorders_by_name_asc() {
+        let mut tree = TreeState::new(SortField::Name, false);
+        tree.set_roots(vec![
+            make_node("cherry", 100, 0, None),
+            make_node("apple", 200, 0, None),
+            make_node("banana", 300, 0, None),
+        ]);
+        tree.sort_roots();
+
+        let names: Vec<&str> = tree.nodes.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(names, vec!["apple", "banana", "cherry"]);
+    }
+
+    #[test]
+    fn sort_roots_preserves_expanded_subtrees() {
+        // When roots have already-loaded children, a root's children must travel
+        // with the root on reorder, and parent indices must stay consistent.
+        let mut tree = TreeState::new(SortField::Size, true);
+        tree.set_roots(vec![
+            make_node("small", 100, 0, None),
+            make_node("big", 9000, 0, None),
+        ]);
+        tree.expanded.insert(0);
+        tree.insert_children(0, vec![make_leaf("s-child", 50, 1, Some(0))]);
+        // Layout before sort: [small(0), s-child(1), big(2)]
+        tree.expanded.insert(2);
+        tree.insert_children(2, vec![make_leaf("b-child", 8000, 1, Some(2))]);
+        // Layout before sort: [small(0), s-child(1), big(2), b-child(3)]
+        assert_eq!(tree.nodes[0].name, "small");
+        assert_eq!(tree.nodes[2].name, "big");
+
+        tree.sort_roots();
+
+        // After sort by size desc: big must come first with its child, then small with its child.
+        let names: Vec<&str> = tree.nodes.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(names, vec!["big", "b-child", "small", "s-child"]);
+        // Parent indices must point at the new positions of their roots.
+        assert_eq!(
+            tree.nodes[1].parent,
+            Some(0),
+            "b-child should point at big at new index 0"
+        );
+        assert_eq!(
+            tree.nodes[3].parent,
+            Some(2),
+            "s-child should point at small at new index 2"
+        );
     }
 
     #[test]

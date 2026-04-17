@@ -233,6 +233,17 @@ pub fn upgrade_command(kind: CacheKind, name: &str, version: &str) -> Option<Str
     }
 }
 
+/// Returns true if `path` contains two adjacent path components equal to `first`
+/// then `second` (e.g. `install` followed by `cache`). This is stricter than a
+/// substring match because it rejects `install/cache-backup` — the literal
+/// component after `install` must be exactly `cache`, not merely start with it.
+fn has_adjacent_components(path: &Path, first: &str, second: &str) -> bool {
+    let components: Vec<&std::ffi::OsStr> = path.components().map(|c| c.as_os_str()).collect();
+    components
+        .windows(2)
+        .any(|w| w[0] == first && w[1] == second)
+}
+
 /// Get safety level for deletion.
 pub fn safety(kind: CacheKind, path: &Path) -> SafetyLevel {
     match kind {
@@ -253,10 +264,22 @@ pub fn safety(kind: CacheKind, path: &Path) -> SafetyLevel {
             }
         }
         CacheKind::Bun => {
-            // ~/.bun contains the runtime binary, global installs, etc.
-            // Only the install/cache subtree (package cache) is safe to delete.
-            let path_str = path.to_string_lossy();
-            if path_str.contains("install/cache") || path_str.contains("install\\cache") {
+            // `.bun/bin/*` is the Bun runtime binary itself — deleting it
+            // breaks bun entirely, so treat as Unsafe.
+            if has_adjacent_components(path, ".bun", "bin")
+                || path.components().any(|c| c.as_os_str() == "bin")
+                    && path
+                        .ancestors()
+                        .any(|a| a.file_name().is_some_and(|n| n == ".bun"))
+                    && path
+                        .file_name()
+                        .is_some_and(|n| n == "bin" || n == "bun" || n == "bunx")
+            {
+                SafetyLevel::Unsafe
+            } else if has_adjacent_components(path, "install", "cache") {
+                // Only the install/cache subtree (package cache) is safe to delete.
+                // Literal path components — substring matching leaks to siblings
+                // like `install/cache-backup` (H7).
                 SafetyLevel::Safe
             } else {
                 SafetyLevel::Caution
@@ -1016,17 +1039,69 @@ mod tests {
     }
 
     #[test]
-    fn safety_bun_bin_is_caution() {
+    fn safety_bun_bin_is_unsafe() {
+        // Deleting ~/.bun/bin removes the Bun runtime itself.
         assert_eq!(
             safety(CacheKind::Bun, &PathBuf::from("/home/user/.bun/bin")),
+            SafetyLevel::Unsafe
+        );
+    }
+
+    #[test]
+    fn safety_bun_bin_binary_is_unsafe() {
+        // Deleting ~/.bun/bin/bun (the binary) breaks bun entirely.
+        assert_eq!(
+            safety(CacheKind::Bun, &PathBuf::from("/home/user/.bun/bin/bun")),
+            SafetyLevel::Unsafe
+        );
+    }
+
+    #[test]
+    fn safety_bun_install_cache_is_safe() {
+        assert_eq!(
+            safety(
+                CacheKind::Bun,
+                &PathBuf::from("/home/user/.bun/install/cache"),
+            ),
+            SafetyLevel::Safe
+        );
+    }
+
+    #[test]
+    fn safety_bun_install_cache_package_is_safe() {
+        assert_eq!(
+            safety(
+                CacheKind::Bun,
+                &PathBuf::from("/home/user/.bun/install/cache/lodash@4.17.21"),
+            ),
+            SafetyLevel::Safe
+        );
+    }
+
+    #[test]
+    fn safety_bun_install_cache_backup_not_safe() {
+        // A sibling dir like "install/cache-backup" must NOT be treated as
+        // the Bun package cache (H7): substring match leaks auto-delete to
+        // adjacent user directories.
+        assert_eq!(
+            safety(
+                CacheKind::Bun,
+                &PathBuf::from("/home/user/.bun/install/cache-backup/important"),
+            ),
             SafetyLevel::Caution
         );
     }
 
     #[test]
-    fn safety_bun_bin_binary_is_caution() {
+    fn safety_bun_random_install_path_not_safe() {
+        // An "install/cache" path outside .bun that somehow got detected as Bun
+        // (e.g. user-created path confusingly named) must remain Caution —
+        // defence in depth.
         assert_eq!(
-            safety(CacheKind::Bun, &PathBuf::from("/home/user/.bun/bin/bun")),
+            safety(
+                CacheKind::Bun,
+                &PathBuf::from("/home/user/unrelated/install/cache-tmp/x"),
+            ),
             SafetyLevel::Caution
         );
     }

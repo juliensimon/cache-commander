@@ -2,6 +2,47 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::time::Duration;
+
+/// Maximum wait for a single server response. If the MCP server hangs (for
+/// any reason — deadlock, protocol regression) the tests must fail quickly
+/// rather than hang CI indefinitely (M4).
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Spawn a helper thread that reads stdout line-by-line and forwards each
+/// line over an mpsc channel. Returns the receiver. Reads on the caller
+/// side become bounded by `recv_timeout`, so a stuck server is detected
+/// within `RESPONSE_TIMEOUT` instead of hanging the test forever.
+fn spawn_line_reader<R: Read + Send + 'static>(reader: R) -> mpsc::Receiver<String> {
+    let (tx, rx) = mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let buf = BufReader::new(reader);
+        for line in buf.lines() {
+            match line {
+                Ok(l) => {
+                    if tx.send(l).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    rx
+}
+
+/// Read one JSON-RPC response line from the reader channel with a timeout.
+fn recv_response(rx: &mpsc::Receiver<String>) -> serde_json::Value {
+    let line = rx.recv_timeout(RESPONSE_TIMEOUT).unwrap_or_else(|_| {
+        panic!(
+            "MCP server did not respond within {:?} — likely hung",
+            RESPONSE_TIMEOUT
+        )
+    });
+    serde_json::from_str(&line)
+        .unwrap_or_else(|e| panic!("MCP response was not valid JSON: {e}\nline: {line}"))
+}
 
 /// Send a JSON-RPC request (bare JSON line, no Content-Length framing).
 fn send_jsonrpc(stdin: &mut impl Write, id: u64, method: &str, params: serde_json::Value) {
@@ -29,7 +70,9 @@ fn send_notification(stdin: &mut impl Write, method: &str) {
     stdin.flush().unwrap();
 }
 
-/// Read one JSON-RPC response line from stdout.
+/// Compat shim for tests that still use a `BufReader<Read>`. New call sites
+/// should use `recv_response(&rx)` directly to take advantage of the timeout.
+#[allow(dead_code)]
 fn read_response(stdout: &mut BufReader<impl Read>) -> serde_json::Value {
     let mut line = String::new();
     stdout.read_line(&mut line).unwrap();
@@ -56,7 +99,7 @@ fn mcp_server_responds_to_initialize() {
         .expect("failed to start mcp server");
 
     let mut stdin = child.stdin.take().unwrap();
-    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let rx = spawn_line_reader(child.stdout.take().unwrap());
 
     // 1. Initialize
     send_jsonrpc(
@@ -70,7 +113,7 @@ fn mcp_server_responds_to_initialize() {
         }),
     );
 
-    let response = read_response(&mut stdout);
+    let response = recv_response(&rx);
     assert_eq!(response["id"], 1);
     let server_name = response["result"]["serverInfo"]["name"]
         .as_str()
@@ -86,7 +129,7 @@ fn mcp_server_responds_to_initialize() {
     // 3. List tools
     send_jsonrpc(&mut stdin, 2, "tools/list", serde_json::json!({}));
 
-    let response = read_response(&mut stdout);
+    let response = recv_response(&rx);
     assert_eq!(response["id"], 2);
     let tools = response["result"]["tools"]
         .as_array()
@@ -184,8 +227,16 @@ fn setup_test_env() -> TempDir {
 }
 
 /// Start the MCP server with `--root`, complete the handshake, and return
-/// (child, stdin, buffered stdout) ready for tool calls.
-fn start_server(root: &Path) -> (std::process::Child, impl Write, BufReader<impl Read>) {
+/// (child, stdin, stdout line-receiver) ready for tool calls. The line
+/// receiver is fed by a background thread so every read is bounded by
+/// `RESPONSE_TIMEOUT` (M4).
+fn start_server(
+    root: &Path,
+) -> (
+    std::process::Child,
+    std::process::ChildStdin,
+    mpsc::Receiver<String>,
+) {
     let binary = ccmd_binary();
     let mut child = Command::new(binary)
         .arg("--root")
@@ -198,7 +249,8 @@ fn start_server(root: &Path) -> (std::process::Child, impl Write, BufReader<impl
         .expect("failed to start mcp server");
 
     let mut stdin = child.stdin.take().unwrap();
-    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let stdout = child.stdout.take().unwrap();
+    let rx = spawn_line_reader(stdout);
 
     // Initialize
     send_jsonrpc(
@@ -211,20 +263,20 @@ fn start_server(root: &Path) -> (std::process::Child, impl Write, BufReader<impl
             "clientInfo": { "name": "test", "version": "0.1" }
         }),
     );
-    let resp = read_response(&mut stdout);
+    let resp = recv_response(&rx);
     assert_eq!(resp["id"], 1);
 
     // Initialized notification
     send_notification(&mut stdin, "notifications/initialized");
 
-    (child, stdin, stdout)
+    (child, stdin, rx)
 }
 
 /// Send a tools/call request and return the parsed JSON content from the
 /// response's `result.content[0].text`.
 fn call_tool(
     stdin: &mut impl Write,
-    stdout: &mut BufReader<impl Read>,
+    rx: &mpsc::Receiver<String>,
     id: u64,
     tool_name: &str,
     args: serde_json::Value,
@@ -238,7 +290,7 @@ fn call_tool(
             "arguments": args,
         }),
     );
-    let resp = read_response(stdout);
+    let resp = recv_response(rx);
     assert_eq!(resp["id"], id, "Response id mismatch: {resp}");
     let text = resp["result"]["content"][0]["text"]
         .as_str()
@@ -254,15 +306,9 @@ fn call_tool(
 #[test]
 fn mcp_test_list_caches() {
     let tmp = setup_test_env();
-    let (mut child, mut stdin, mut stdout) = start_server(tmp.path());
+    let (mut child, mut stdin, rx) = start_server(tmp.path());
 
-    let result = call_tool(
-        &mut stdin,
-        &mut stdout,
-        10,
-        "list_caches",
-        serde_json::json!({}),
-    );
+    let result = call_tool(&mut stdin, &rx, 10, "list_caches", serde_json::json!({}));
 
     let arr = result
         .as_array()
@@ -307,15 +353,9 @@ fn mcp_test_list_caches() {
 #[test]
 fn mcp_test_get_summary() {
     let tmp = setup_test_env();
-    let (mut child, mut stdin, mut stdout) = start_server(tmp.path());
+    let (mut child, mut stdin, rx) = start_server(tmp.path());
 
-    let result = call_tool(
-        &mut stdin,
-        &mut stdout,
-        10,
-        "get_summary",
-        serde_json::json!({}),
-    );
+    let result = call_tool(&mut stdin, &rx, 10, "get_summary", serde_json::json!({}));
 
     assert!(
         result["total_size_bytes"].as_u64().unwrap_or(0) > 0,
@@ -342,11 +382,11 @@ fn mcp_test_get_summary() {
 #[test]
 fn mcp_test_search_packages_no_filter() {
     let tmp = setup_test_env();
-    let (mut child, mut stdin, mut stdout) = start_server(tmp.path());
+    let (mut child, mut stdin, rx) = start_server(tmp.path());
 
     let result = call_tool(
         &mut stdin,
-        &mut stdout,
+        &rx,
         10,
         "search_packages",
         serde_json::json!({}),
@@ -370,11 +410,11 @@ fn mcp_test_search_packages_no_filter() {
 #[test]
 fn mcp_test_search_packages_ecosystem_filter() {
     let tmp = setup_test_env();
-    let (mut child, mut stdin, mut stdout) = start_server(tmp.path());
+    let (mut child, mut stdin, rx) = start_server(tmp.path());
 
     let result = call_tool(
         &mut stdin,
-        &mut stdout,
+        &rx,
         10,
         "search_packages",
         serde_json::json!({"ecosystem": "huggingface"}),
@@ -404,11 +444,11 @@ fn mcp_test_search_packages_ecosystem_filter() {
 #[test]
 fn mcp_test_search_packages_query_filter() {
     let tmp = setup_test_env();
-    let (mut child, mut stdin, mut stdout) = start_server(tmp.path());
+    let (mut child, mut stdin, rx) = start_server(tmp.path());
 
     let result = call_tool(
         &mut stdin,
-        &mut stdout,
+        &rx,
         10,
         "search_packages",
         serde_json::json!({"query": "requests"}),
@@ -439,11 +479,11 @@ fn mcp_test_get_package_details_by_path() {
     let model_path = tmp
         .path()
         .join("huggingface/hub/models--testorg--testmodel");
-    let (mut child, mut stdin, mut stdout) = start_server(tmp.path());
+    let (mut child, mut stdin, rx) = start_server(tmp.path());
 
     let result = call_tool(
         &mut stdin,
-        &mut stdout,
+        &rx,
         10,
         "get_package_details",
         serde_json::json!({"path": model_path.to_string_lossy()}),
@@ -474,11 +514,11 @@ fn mcp_test_get_package_details_by_path() {
 #[test]
 fn mcp_test_get_package_details_by_name() {
     let tmp = setup_test_env();
-    let (mut child, mut stdin, mut stdout) = start_server(tmp.path());
+    let (mut child, mut stdin, rx) = start_server(tmp.path());
 
     let result = call_tool(
         &mut stdin,
-        &mut stdout,
+        &rx,
         10,
         "get_package_details",
         serde_json::json!({"name": "testmodel", "ecosystem": "huggingface"}),
@@ -508,11 +548,11 @@ fn mcp_test_preview_delete() {
     let wheel_path = tmp
         .path()
         .join("pip/wheels/requests-2.31.0-py3-none-any.whl");
-    let (mut child, mut stdin, mut stdout) = start_server(tmp.path());
+    let (mut child, mut stdin, rx) = start_server(tmp.path());
 
     let result = call_tool(
         &mut stdin,
-        &mut stdout,
+        &rx,
         10,
         "preview_delete",
         serde_json::json!({"paths": [wheel_path.to_string_lossy()]}),
@@ -545,11 +585,11 @@ fn mcp_test_delete_packages() {
         .join("pip/wheels/requests-2.31.0-py3-none-any.whl");
     assert!(wheel_path.exists(), "Wheel file should exist before delete");
 
-    let (mut child, mut stdin, mut stdout) = start_server(tmp.path());
+    let (mut child, mut stdin, rx) = start_server(tmp.path());
 
     let result = call_tool(
         &mut stdin,
-        &mut stdout,
+        &rx,
         10,
         "delete_packages",
         serde_json::json!({"paths": [wheel_path.to_string_lossy()]}),
@@ -580,11 +620,11 @@ fn mcp_test_delete_packages_outside_root_rejected() {
     let outside_file = outside.path().join("rogue.txt");
     std::fs::write(&outside_file, "should not be deleted").unwrap();
 
-    let (mut child, mut stdin, mut stdout) = start_server(tmp.path());
+    let (mut child, mut stdin, rx) = start_server(tmp.path());
 
     let result = call_tool(
         &mut stdin,
-        &mut stdout,
+        &rx,
         10,
         "delete_packages",
         serde_json::json!({"paths": [outside_file.to_string_lossy()]}),
@@ -624,11 +664,11 @@ fn mcp_test_delete_packages_outside_root_rejected() {
 #[test]
 fn mcp_test_empty_search_returns_json() {
     let tmp = setup_test_env();
-    let (mut child, mut stdin, mut stdout) = start_server(tmp.path());
+    let (mut child, mut stdin, rx) = start_server(tmp.path());
 
     let result = call_tool(
         &mut stdin,
-        &mut stdout,
+        &rx,
         10,
         "search_packages",
         serde_json::json!({"query": "nonexistent_xyz_zzz_nothing"}),

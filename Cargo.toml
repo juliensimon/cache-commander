@@ -2,7 +2,7 @@
 name = "ccmd"
 version = "0.3.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Cache Commander — a TUI for browsing and managing cache directories"
 license = "MIT"
 repository = "https://github.com/juliensimon/cache-commander"

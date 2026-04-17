@@ -42,6 +42,10 @@ pub struct App {
     pub brew_outdated_results: HashMap<String, crate::providers::homebrew::BrewOutdatedEntry>,
     brew_outdated_in_progress: bool,
     auto_brew_outdated_pending: bool,
+    /// M6: set once the scanner thread is gone (receiver dropped). Future
+    /// scan requests short-circuit and clear in-progress flags so the UI
+    /// doesn't spin on a dead background worker.
+    pub scanner_dead: bool,
 }
 
 impl App {
@@ -74,18 +78,48 @@ impl App {
             brew_outdated_results: HashMap::new(),
             brew_outdated_in_progress: false,
             auto_brew_outdated_pending: true,
+            scanner_dead: false,
         }
     }
 
-    pub fn init(&self) {
+    pub fn init(&mut self) {
         let roots = self.config.roots.clone();
-        let _ = self
-            .scan_tx
-            .send(crate::scanner::ScanRequest::ScanRoots(roots));
+        self.send_scan_request(crate::scanner::ScanRequest::ScanRoots(roots));
+    }
+
+    /// Send a request to the scanner thread. On failure (receiver dropped),
+    /// set `scanner_dead=true` and surface a status message so the user
+    /// sees something is wrong instead of a UI that accepts keys but does
+    /// nothing (M6 — replaces 11 silent `let _ = scan_tx.send(...)` sites).
+    fn send_scan_request(&mut self, req: crate::scanner::ScanRequest) {
+        if self.scanner_dead {
+            return;
+        }
+        if self.scan_tx.send(req).is_err() {
+            self.scanner_dead = true;
+            // Any in-progress spinner must clear — the background worker
+            // will never respond.
+            self.vulnscan_in_progress = false;
+            self.versioncheck_in_progress = false;
+            self.brew_outdated_in_progress = false;
+            self.status_msg =
+                Some("Scanner thread unavailable — background scans disabled".to_string());
+        }
     }
 
     pub fn tick(&mut self) {
-        // Process scan results
+        // H4: accumulate every status-producing result in this tick, then set
+        // `status_msg` once at the end. Previously each arm overwrote the
+        // prior message, so a tick draining multiple results only showed the
+        // last one (e.g. brew silently hid a vuln summary).
+        //
+        // Informative findings (>0) suppress "no findings" noise from the
+        // same tick — otherwise a concurrent "all up to date" could bury a
+        // real vuln count.
+        let mut tick_parts: Vec<String> = Vec::new();
+        let mut had_informative_vuln = false;
+        let mut had_informative_version = false;
+
         while let Ok(result) = self.scan_rx.try_recv() {
             match result {
                 ScanResult::RootsScanned(nodes) => {
@@ -97,7 +131,14 @@ impl App {
                     {
                         self.tree.insert_children(parent_idx, children);
                     }
-                    if !self.brew_outdated_results.is_empty() {
+                    // L4: insert_children clears dimmed unconditionally, so
+                    // always recompute status + dim flags if ANY filter data
+                    // exists — otherwise newly inserted children appear
+                    // un-dimmed under an active vuln/outdated/brew filter.
+                    if !self.vuln_results.is_empty()
+                        || !self.version_results.is_empty()
+                        || !self.brew_outdated_results.is_empty()
+                    {
                         self.recompute_node_status();
                         self.tree.recompute_dimmed(&self.node_status);
                     }
@@ -107,8 +148,9 @@ impl App {
                         node.size = size;
                     }
                 }
-                ScanResult::VulnsScanned(scanned, results) => {
-                    self.vuln_results.extend(results);
+                ScanResult::VulnsScanned(scanned, outcome) => {
+                    let unscanned = outcome.unscanned_packages;
+                    self.vuln_results.extend(outcome.results);
                     self.vulnscan_in_progress = false;
                     self.recompute_node_status();
                     self.tree.recompute_dimmed(&self.node_status);
@@ -117,19 +159,38 @@ impl App {
                         .values()
                         .map(|s| s.vulns.len())
                         .sum::<usize>();
-                    self.status_msg = Some(if vuln_count > 0 {
-                        format!(
-                            "Scanned {} packages — {} vulnerabilit{} found",
+                    // H5: surface scan incompleteness — a transient OSV
+                    // error must never be reported as "no vulnerabilities".
+                    let incomplete_suffix = if unscanned > 0 {
+                        format!(" ({} unscanned — retry later)", unscanned)
+                    } else {
+                        String::new()
+                    };
+                    if vuln_count > 0 {
+                        had_informative_vuln = true;
+                        tick_parts.push(format!(
+                            "Scanned {} packages — {} vulnerabilit{} found{}",
                             scanned,
                             vuln_count,
-                            if vuln_count == 1 { "y" } else { "ies" }
-                        )
-                    } else {
-                        format!("Scanned {} packages — no vulnerabilities found", scanned)
-                    });
+                            if vuln_count == 1 { "y" } else { "ies" },
+                            incomplete_suffix
+                        ));
+                    } else if !had_informative_vuln {
+                        let tail = if unscanned > 0 {
+                            format!(
+                                "scan incomplete — {} package{} unscanned (network error?)",
+                                unscanned,
+                                if unscanned == 1 { "" } else { "s" }
+                            )
+                        } else {
+                            format!("Scanned {} packages — no vulnerabilities found", scanned)
+                        };
+                        tick_parts.push(tail);
+                    }
                 }
-                ScanResult::VersionsChecked(checked, results) => {
-                    self.version_results.extend(results);
+                ScanResult::VersionsChecked(checked, outcome) => {
+                    let unchecked = outcome.unchecked_packages;
+                    self.version_results.extend(outcome.results);
                     self.versioncheck_in_progress = false;
                     self.recompute_node_status();
                     self.tree.recompute_dimmed(&self.node_status);
@@ -138,11 +199,29 @@ impl App {
                         .values()
                         .filter(|v| v.is_outdated)
                         .count();
-                    self.status_msg = Some(if outdated > 0 {
-                        format!("Checked {} packages — {} outdated", checked, outdated)
+                    let incomplete_suffix = if unchecked > 0 {
+                        format!(" ({} unchecked)", unchecked)
                     } else {
-                        format!("Checked {} packages — all up to date", checked)
-                    });
+                        String::new()
+                    };
+                    if outdated > 0 {
+                        had_informative_version = true;
+                        tick_parts.push(format!(
+                            "Checked {} packages — {} outdated{}",
+                            checked, outdated, incomplete_suffix
+                        ));
+                    } else if !had_informative_version {
+                        let tail = if unchecked > 0 {
+                            format!(
+                                "version check incomplete — {} package{} unchecked (network error?)",
+                                unchecked,
+                                if unchecked == 1 { "" } else { "s" }
+                            )
+                        } else {
+                            format!("Checked {} packages — all up to date", checked)
+                        };
+                        tick_parts.push(tail);
+                    }
                 }
                 ScanResult::BrewOutdatedCompleted(results) => {
                     let outdated_count = results.len();
@@ -151,7 +230,7 @@ impl App {
                     self.recompute_node_status();
                     self.tree.recompute_dimmed(&self.node_status);
                     if outdated_count > 0 {
-                        self.status_msg = Some(format!(
+                        tick_parts.push(format!(
                             "brew: {} outdated package{}",
                             outdated_count,
                             if outdated_count == 1 { "" } else { "s" }
@@ -159,6 +238,19 @@ impl App {
                     }
                 }
             }
+        }
+
+        // Retention rule: if an informative finding was recorded, drop the
+        // paired "all clean" line that may have also arrived in the same tick.
+        if had_informative_vuln {
+            tick_parts.retain(|s| !s.contains("no vulnerabilities found"));
+        }
+        if had_informative_version {
+            tick_parts.retain(|s| !s.contains("all up to date"));
+        }
+
+        if !tick_parts.is_empty() {
+            self.status_msg = Some(tick_parts.join(" • "));
         }
 
         // Auto-scan on startup when CLI flags are set
@@ -169,16 +261,12 @@ impl App {
             if self.auto_vulnscan_pending {
                 self.auto_vulnscan_pending = false;
                 self.vulnscan_in_progress = true;
-                let _ = self
-                    .scan_tx
-                    .send(crate::scanner::ScanRequest::ScanVulns(roots.clone()));
+                self.send_scan_request(crate::scanner::ScanRequest::ScanVulns(roots.clone()));
             }
             if self.auto_versioncheck_pending {
                 self.auto_versioncheck_pending = false;
                 self.versioncheck_in_progress = true;
-                let _ = self
-                    .scan_tx
-                    .send(crate::scanner::ScanRequest::CheckVersions(roots));
+                self.send_scan_request(crate::scanner::ScanRequest::CheckVersions(roots));
             }
         }
 
@@ -192,7 +280,7 @@ impl App {
                 .any(|r| r.join("Homebrew").is_dir() || r.ends_with("Homebrew"));
             if has_homebrew {
                 self.brew_outdated_in_progress = true;
-                let _ = self.scan_tx.send(crate::scanner::ScanRequest::BrewOutdated);
+                self.send_scan_request(crate::scanner::ScanRequest::BrewOutdated);
             }
         }
     }
@@ -228,18 +316,14 @@ impl App {
             KeyCode::Right | KeyCode::Char('l') => {
                 if let Some(idx) = self.tree.expand() {
                     let path = self.tree.nodes[idx].path.clone();
-                    let _ = self
-                        .scan_tx
-                        .send(crate::scanner::ScanRequest::ExpandNode(path));
+                    self.send_scan_request(crate::scanner::ScanRequest::ExpandNode(path));
                 }
             }
             KeyCode::Left | KeyCode::Char('h') => self.tree.collapse(),
             KeyCode::Enter => {
                 if let Some(idx) = self.tree.toggle_expand() {
                     let path = self.tree.nodes[idx].path.clone();
-                    let _ = self
-                        .scan_tx
-                        .send(crate::scanner::ScanRequest::ExpandNode(path));
+                    self.send_scan_request(crate::scanner::ScanRequest::ExpandNode(path));
                 }
             }
             KeyCode::Char('g') => self.tree.go_top(),
@@ -256,33 +340,25 @@ impl App {
                 if let Some(idx) = self.tree.selected_node_index() {
                     self.vulnscan_in_progress = true;
                     let path = self.tree.nodes[idx].path.clone();
-                    let _ = self
-                        .scan_tx
-                        .send(crate::scanner::ScanRequest::ScanVulns(vec![path]));
+                    self.send_scan_request(crate::scanner::ScanRequest::ScanVulns(vec![path]));
                 }
             }
             KeyCode::Char('V') => {
                 self.vulnscan_in_progress = true;
-                let _ = self.scan_tx.send(crate::scanner::ScanRequest::ScanVulns(
-                    self.config.roots.clone(),
-                ));
+                let roots = self.config.roots.clone();
+                self.send_scan_request(crate::scanner::ScanRequest::ScanVulns(roots));
             }
             KeyCode::Char('o') => {
                 if let Some(idx) = self.tree.selected_node_index() {
                     self.versioncheck_in_progress = true;
                     let path = self.tree.nodes[idx].path.clone();
-                    let _ = self
-                        .scan_tx
-                        .send(crate::scanner::ScanRequest::CheckVersions(vec![path]));
+                    self.send_scan_request(crate::scanner::ScanRequest::CheckVersions(vec![path]));
                 }
             }
             KeyCode::Char('O') => {
                 self.versioncheck_in_progress = true;
-                let _ = self
-                    .scan_tx
-                    .send(crate::scanner::ScanRequest::CheckVersions(
-                        self.config.roots.clone(),
-                    ));
+                let roots = self.config.roots.clone();
+                self.send_scan_request(crate::scanner::ScanRequest::CheckVersions(roots));
             }
             KeyCode::Char('d') | KeyCode::Char('D') if !self.tree.marked.is_empty() => {
                 self.delete_candidates = self
@@ -353,9 +429,7 @@ impl App {
                         self.tree.remove_nodes(&to_remove);
                     }
                     self.tree.expanded.insert(idx);
-                    let _ = self
-                        .scan_tx
-                        .send(crate::scanner::ScanRequest::ExpandNode(path));
+                    self.send_scan_request(crate::scanner::ScanRequest::ExpandNode(path));
                 }
             }
             KeyCode::Char('R') => {
@@ -437,21 +511,36 @@ impl App {
 
     fn perform_delete(&mut self) {
         let mut deleted_count = 0usize;
+        let mut refused_unsafe = 0usize;
+        let mut errored = 0usize;
         let mut freed = 0u64;
         let mut deleted_paths = Vec::new();
 
         for path in &self.delete_candidates {
+            // H3: refuse Unsafe items outright — these typically contain
+            // runtime binaries or state that deletion would irreversibly break.
+            let kind = crate::providers::detect(path);
+            if crate::providers::safety(kind, path) == crate::providers::SafetyLevel::Unsafe {
+                refused_unsafe += 1;
+                continue;
+            }
+
             // Measure size before deleting
             let size = crate::scanner::walker::dir_size(path);
-            let ok = if path.is_dir() {
-                std::fs::remove_dir_all(path).is_ok()
+            let outcome = if path.is_dir() {
+                std::fs::remove_dir_all(path)
             } else {
-                std::fs::remove_file(path).is_ok()
+                std::fs::remove_file(path)
             };
-            if ok {
-                deleted_count += 1;
-                freed += size;
-                deleted_paths.push(path.clone());
+            match outcome {
+                Ok(()) => {
+                    deleted_count += 1;
+                    freed += size;
+                    deleted_paths.push(path.clone());
+                }
+                Err(_) => {
+                    errored += 1;
+                }
             }
         }
 
@@ -462,13 +551,36 @@ impl App {
                 .filter_map(|p| self.tree.nodes.iter().position(|n| &n.path == p))
                 .collect();
             self.tree.remove_nodes(&indices);
+        }
 
-            self.status_msg = Some(format!(
+        // Compose status: every branch (deleted, skipped-unsafe, errored) is
+        // surfaced so the user doesn't see a false "Deleted N" that hid a
+        // partial failure (M3).
+        let mut parts: Vec<String> = Vec::new();
+        if deleted_count > 0 {
+            parts.push(format!(
                 "Deleted {} item{}, freed {}",
                 deleted_count,
                 if deleted_count == 1 { "" } else { "s" },
                 humansize::format_size(freed, humansize::BINARY)
             ));
+        }
+        if refused_unsafe > 0 {
+            parts.push(format!(
+                "refused {} Unsafe item{}",
+                refused_unsafe,
+                if refused_unsafe == 1 { "" } else { "s" }
+            ));
+        }
+        if errored > 0 {
+            parts.push(format!(
+                "failed to delete {} item{} (skipped)",
+                errored,
+                if errored == 1 { "" } else { "s" }
+            ));
+        }
+        if !parts.is_empty() {
+            self.status_msg = Some(parts.join(" • "));
         }
 
         self.tree.marked.clear();
@@ -712,9 +824,12 @@ impl App {
 
         banner_lines.push(Line::from(Span::raw("")));
 
-        // Center the stats line too
-        let stats_pad = if term_width > stats.len() {
-            (term_width - stats.len()) / 2
+        // L5: center the stats line using char count, not byte length. The
+        // stats line contains multi-byte glyphs (│, ⚠, ↓) so `String::len()`
+        // — which returns bytes — under-pads by ~10 columns.
+        let stats_width = stats.chars().count();
+        let stats_pad = if term_width > stats_width {
+            (term_width - stats_width) / 2
         } else {
             0
         };
@@ -1142,7 +1257,14 @@ mod tests {
                 }],
             },
         );
-        tx.send(ScanResult::VulnsScanned(1, results)).unwrap();
+        tx.send(ScanResult::VulnsScanned(
+            1,
+            crate::security::VulnScanOutcome {
+                results,
+                unscanned_packages: 0,
+            },
+        ))
+        .unwrap();
         app.tick();
         assert!(app.vuln_results.contains_key(&path));
         assert!(!app.vulnscan_in_progress);
@@ -1155,11 +1277,39 @@ mod tests {
     fn tick_vulns_scanned_zero_uses_clean_message() {
         let (mut app, tx, _rx) = build_app(bare_config());
         app.tree.set_roots(vec![mk_node("ok", 1, CacheKind::Cargo)]);
-        tx.send(ScanResult::VulnsScanned(5, HashMap::new()))
-            .unwrap();
+        tx.send(ScanResult::VulnsScanned(
+            5,
+            crate::security::VulnScanOutcome::default(),
+        ))
+        .unwrap();
         app.tick();
         let msg = app.status_msg.as_deref().unwrap_or("");
         assert!(msg.contains("no vulnerabilities"), "clean msg: {msg}");
+    }
+
+    // --- H5: unscanned packages surface in status ---
+    #[test]
+    fn tick_vulns_scanned_incomplete_surfaces_unscanned_count() {
+        let (mut app, tx, _rx) = build_app(bare_config());
+        app.tree.set_roots(vec![mk_node("ok", 1, CacheKind::Cargo)]);
+        tx.send(ScanResult::VulnsScanned(
+            10,
+            crate::security::VulnScanOutcome {
+                results: HashMap::new(),
+                unscanned_packages: 3,
+            },
+        ))
+        .unwrap();
+        app.tick();
+        let msg = app.status_msg.as_deref().unwrap_or("");
+        assert!(
+            !msg.contains("no vulnerabilities found"),
+            "must not show 'no vulnerabilities found' when scan was incomplete: {msg}"
+        );
+        assert!(
+            msg.contains("unscanned") || msg.contains("incomplete"),
+            "must surface unscanned count: {msg}"
+        );
     }
 
     #[test]
@@ -1177,7 +1327,14 @@ mod tests {
                 is_outdated: true,
             },
         );
-        tx.send(ScanResult::VersionsChecked(1, results)).unwrap();
+        tx.send(ScanResult::VersionsChecked(
+            1,
+            crate::security::VersionCheckOutcome {
+                results,
+                unchecked_packages: 0,
+            },
+        ))
+        .unwrap();
         app.tick();
         assert!(!app.versioncheck_in_progress);
         assert_eq!(app.version_results.len(), 1);
@@ -1191,11 +1348,38 @@ mod tests {
         let (mut app, tx, _rx) = build_app(bare_config());
         app.tree
             .set_roots(vec![mk_node("serde", 1, CacheKind::Cargo)]);
-        tx.send(ScanResult::VersionsChecked(3, HashMap::new()))
-            .unwrap();
+        tx.send(ScanResult::VersionsChecked(
+            3,
+            crate::security::VersionCheckOutcome::default(),
+        ))
+        .unwrap();
         app.tick();
         let msg = app.status_msg.as_deref().unwrap_or("");
         assert!(msg.contains("all up to date"), "clean msg: {msg}");
+    }
+
+    #[test]
+    fn tick_versions_checked_incomplete_surfaces_unchecked_count() {
+        let (mut app, tx, _rx) = build_app(bare_config());
+        app.tree.set_roots(vec![mk_node("ok", 1, CacheKind::Cargo)]);
+        tx.send(ScanResult::VersionsChecked(
+            10,
+            crate::security::VersionCheckOutcome {
+                results: HashMap::new(),
+                unchecked_packages: 4,
+            },
+        ))
+        .unwrap();
+        app.tick();
+        let msg = app.status_msg.as_deref().unwrap_or("");
+        assert!(
+            !msg.contains("all up to date"),
+            "must not claim 'all up to date' when some packages were unchecked: {msg}"
+        );
+        assert!(
+            msg.contains("unchecked") || msg.contains("incomplete"),
+            "must surface unchecked count: {msg}"
+        );
     }
 
     #[test]
@@ -1230,6 +1414,122 @@ mod tests {
             .unwrap();
         app.tick();
         assert!(app.status_msg.is_none(), "should stay silent on zero");
+    }
+
+    // --- H4: status message clobbering on rapid scan completion -----------
+    #[test]
+    fn tick_merges_status_when_multiple_scans_arrive_in_one_tick() {
+        let (mut app, tx, _rx) = build_app(bare_config());
+        let node = mk_node("urllib3", 1, CacheKind::Pip);
+        let path = node.path.clone();
+        app.tree.set_roots(vec![node]);
+
+        // Push three status-producing results before tick() drains them.
+        let mut vuln = HashMap::new();
+        vuln.insert(
+            path.clone(),
+            SecurityInfo {
+                vulns: vec![Vulnerability {
+                    id: "CVE".into(),
+                    summary: "".into(),
+                    severity: None,
+                    fix_version: None,
+                }],
+            },
+        );
+        tx.send(ScanResult::VulnsScanned(
+            1,
+            crate::security::VulnScanOutcome {
+                results: vuln,
+                unscanned_packages: 0,
+            },
+        ))
+        .unwrap();
+
+        let mut versions = HashMap::new();
+        versions.insert(
+            path.clone(),
+            VersionInfo {
+                current: "1.0".into(),
+                latest: "2.0".into(),
+                is_outdated: true,
+            },
+        );
+        tx.send(ScanResult::VersionsChecked(
+            1,
+            crate::security::VersionCheckOutcome {
+                results: versions,
+                unchecked_packages: 0,
+            },
+        ))
+        .unwrap();
+
+        let mut brew = HashMap::new();
+        brew.insert(
+            "wget".into(),
+            BrewOutdatedEntry {
+                installed: "1.21".into(),
+                current: "1.24".into(),
+                pinned: false,
+            },
+        );
+        tx.send(ScanResult::BrewOutdatedCompleted(brew)).unwrap();
+
+        app.tick();
+
+        let msg = app.status_msg.as_deref().unwrap_or("");
+        // All three summaries must be present — no silent clobbering.
+        assert!(msg.contains("vulnerab"), "vuln summary missing: {msg}");
+        assert!(
+            msg.contains("outdated") && msg.contains("1 outdated"),
+            "version summary missing: {msg}"
+        );
+        assert!(msg.contains("brew"), "brew summary missing: {msg}");
+    }
+
+    #[test]
+    fn tick_zero_result_messages_do_not_clobber_findings() {
+        // A "no findings" message arriving after a "1 vuln" message must not
+        // erase the vuln summary — aggregation should prefer the informative
+        // finding.
+        let (mut app, tx, _rx) = build_app(bare_config());
+        let node = mk_node("urllib3", 1, CacheKind::Pip);
+        let path = node.path.clone();
+        app.tree.set_roots(vec![node]);
+
+        let mut vuln = HashMap::new();
+        vuln.insert(
+            path.clone(),
+            SecurityInfo {
+                vulns: vec![Vulnerability {
+                    id: "CVE".into(),
+                    summary: "".into(),
+                    severity: None,
+                    fix_version: None,
+                }],
+            },
+        );
+        tx.send(ScanResult::VulnsScanned(
+            1,
+            crate::security::VulnScanOutcome {
+                results: vuln,
+                unscanned_packages: 0,
+            },
+        ))
+        .unwrap();
+        tx.send(ScanResult::VersionsChecked(
+            3,
+            crate::security::VersionCheckOutcome::default(),
+        ))
+        .unwrap();
+
+        app.tick();
+
+        let msg = app.status_msg.as_deref().unwrap_or("");
+        assert!(
+            msg.contains("vulnerab"),
+            "vuln finding must not be clobbered by 'all up to date': {msg}"
+        );
     }
 
     #[test]
@@ -1328,6 +1628,133 @@ mod tests {
         let (mut app, _tx, _rx) = build_app(bare_config());
         app.perform_delete();
         assert!(app.status_msg.is_none());
+    }
+
+    // --- M6: scanner death surfaced to the user -----------------------
+    #[test]
+    fn send_scan_request_sets_scanner_dead_on_receiver_drop() {
+        let (result_tx, result_rx) = mpsc::channel::<ScanResult>();
+        let (scan_tx, scan_rx) = mpsc::channel::<ScanRequest>();
+        // Drop the scanner-side receiver so the next send fails.
+        drop(scan_rx);
+        let mut app = App::new(bare_config(), result_rx, scan_tx);
+        let _ = result_tx; // keep ScanResult tx alive; only scan_rx is dropped
+
+        app.vulnscan_in_progress = true;
+        app.send_scan_request(ScanRequest::ScanVulns(vec![]));
+
+        assert!(app.scanner_dead, "scanner_dead must flip on send failure");
+        assert!(
+            !app.vulnscan_in_progress,
+            "in-progress spinners must clear when the scanner dies"
+        );
+        let msg = app.status_msg.as_deref().unwrap_or("");
+        assert!(
+            msg.contains("Scanner") || msg.contains("unavailable"),
+            "status must surface scanner death: {msg}"
+        );
+    }
+
+    #[test]
+    fn send_scan_request_is_noop_once_scanner_is_dead() {
+        let (result_tx, result_rx) = mpsc::channel::<ScanResult>();
+        let (scan_tx, scan_rx) = mpsc::channel::<ScanRequest>();
+        drop(scan_rx);
+        let mut app = App::new(bare_config(), result_rx, scan_tx);
+        let _ = result_tx;
+
+        app.send_scan_request(ScanRequest::ScanVulns(vec![]));
+        assert!(app.scanner_dead);
+        // Subsequent calls should short-circuit without panicking on the
+        // already-dropped channel.
+        app.send_scan_request(ScanRequest::CheckVersions(vec![]));
+        app.send_scan_request(ScanRequest::BrewOutdated);
+    }
+
+    // --- H3: perform_delete refuses Unsafe items --------------------------
+    #[test]
+    fn perform_delete_refuses_unsafe_items_and_reports_skip() {
+        // Build a fake "bun binary" path that would resolve to Unsafe.
+        // We point it at a real tempfile so if the refusal breaks, the test
+        // will fail loudly by actually removing a file.
+        let tmp = tempfile::tempdir().unwrap();
+        // Mirror the `.bun/bin/bun` layout so providers::safety returns Unsafe.
+        let bin_dir = tmp.path().join(".bun").join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let bun_path = bin_dir.join("bun");
+        std::fs::write(&bun_path, b"fake-bun-binary").unwrap();
+
+        let (mut app, _tx, _rx) = build_app(bare_config());
+        let node = mk_node_with_path("bun", bun_path.clone(), CacheKind::Bun);
+        app.tree.set_roots(vec![node]);
+        app.delete_candidates = vec![bun_path.clone()];
+
+        app.perform_delete();
+
+        assert!(
+            bun_path.exists(),
+            "Unsafe item must NOT be deleted by perform_delete"
+        );
+        let msg = app.status_msg.as_deref().unwrap_or("");
+        assert!(
+            msg.contains("refused") || msg.contains("skipped") || msg.contains("Unsafe"),
+            "status should surface the refusal: {msg}"
+        );
+    }
+
+    // --- M3: perform_delete error paths -----------------------------------
+    #[test]
+    fn perform_delete_nonexistent_path_records_skip_not_deleted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("never-existed");
+
+        let (mut app, _tx, _rx) = build_app(bare_config());
+        let node = mk_node_with_path("missing", missing.clone(), CacheKind::Cargo);
+        app.tree.set_roots(vec![node]);
+        app.delete_candidates = vec![missing];
+
+        app.perform_delete();
+
+        let msg = app.status_msg.as_deref().unwrap_or("");
+        assert!(
+            !msg.contains("Deleted 1"),
+            "non-existent path must not be counted as deleted: {msg}"
+        );
+        assert!(
+            msg.contains("skip")
+                || msg.contains("failed")
+                || msg.contains("0 item")
+                || msg.is_empty()
+                || msg.contains("no items"),
+            "status should not falsely report a successful delete: {msg}"
+        );
+    }
+
+    #[test]
+    fn perform_delete_mixed_success_and_failure_reports_both() {
+        let tmp = tempfile::tempdir().unwrap();
+        let good = tmp.path().join("good.txt");
+        std::fs::write(&good, b"x").unwrap();
+        let missing = tmp.path().join("missing.txt");
+
+        let (mut app, _tx, _rx) = build_app(bare_config());
+        let g = mk_node_with_path("good", good.clone(), CacheKind::Cargo);
+        let m = mk_node_with_path("missing", missing.clone(), CacheKind::Cargo);
+        app.tree.set_roots(vec![g, m]);
+        app.delete_candidates = vec![good.clone(), missing];
+
+        app.perform_delete();
+
+        assert!(!good.exists(), "good file should be deleted");
+        let msg = app.status_msg.as_deref().unwrap_or("");
+        assert!(
+            msg.contains("Deleted 1"),
+            "partial success must report actual deleted count: {msg}"
+        );
+        assert!(
+            msg.contains("skip") || msg.contains("fail"),
+            "status must indicate the failed item: {msg}"
+        );
     }
 
     // --- upgrade_command_for_selected -------------------------------------

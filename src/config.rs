@@ -160,6 +160,25 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Tests-only default that skips subprocess probes for yarn/pnpm/bun.
+    /// `Config::default()` shells out to several package-manager CLIs on
+    /// every call; in a test suite that builds many configs that's both
+    /// slow and coupling tests to host tool availability (L9). New
+    /// callers: use this in place of `Config { ..Default::default() }`
+    /// when the config's cache-root probing is not what's under test.
+    #[cfg(any(test, feature = "e2e"))]
+    #[allow(dead_code)] // provided for tests; not yet consumed in-tree
+    pub fn default_for_test() -> Self {
+        Self {
+            roots: vec![],
+            sort_by: SortField::Size,
+            sort_desc: true,
+            confirm_delete: true,
+            vulncheck: VulncheckConfig::default(),
+            versioncheck: VersioncheckConfig::default(),
+        }
+    }
+
     pub fn load() -> (Self, Cli) {
         let cli = Cli::parse();
         let mut config = Self::load_from_file().unwrap_or_default();
@@ -259,25 +278,25 @@ fn probe_yarn_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
     // Try CLI detection (with timeout to avoid blocking if yarn hangs)
-    if let Some(output) = run_with_timeout("yarn", &["cache", "dir"]) {
-        if output.status.success() {
-            let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let path = PathBuf::from(&path_str);
-            if path.exists() {
-                paths.push(path);
-            }
+    if let Some(output) = run_with_timeout("yarn", &["cache", "dir"])
+        && output.status.success()
+    {
+        let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let path = PathBuf::from(&path_str);
+        if path.exists() {
+            paths.push(path);
         }
     }
 
     // Yarn 2+ (Berry) cache folder
-    if let Some(output) = run_with_timeout("yarn", &["config", "get", "cacheFolder"]) {
-        if output.status.success() {
-            let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path_str.is_empty() && path_str != "undefined" {
-                let path = PathBuf::from(&path_str);
-                if path.exists() && !paths.contains(&path) {
-                    paths.push(path);
-                }
+    if let Some(output) = run_with_timeout("yarn", &["config", "get", "cacheFolder"])
+        && output.status.success()
+    {
+        let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !path_str.is_empty() && path_str != "undefined" {
+            let path = PathBuf::from(&path_str);
+            if path.exists() && !paths.contains(&path) {
+                paths.push(path);
             }
         }
     }
@@ -307,19 +326,19 @@ fn probe_pnpm_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
     // Try CLI detection (with timeout to avoid blocking if pnpm hangs)
-    if let Some(output) = run_with_timeout("pnpm", &["store", "path"]) {
-        if output.status.success() {
-            let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let path = PathBuf::from(&path_str);
-            if path.exists() {
-                // `pnpm store path` returns e.g. .../store/v10; go up to `store`
-                // so the tree shows the full store hierarchy.
-                let root = path
-                    .parent()
-                    .filter(|p| p.parent().is_some()) // reject "/" or ""
-                    .unwrap_or(&path);
-                paths.push(root.to_path_buf());
-            }
+    if let Some(output) = run_with_timeout("pnpm", &["store", "path"])
+        && output.status.success()
+    {
+        let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let path = PathBuf::from(&path_str);
+        if path.exists() {
+            // `pnpm store path` returns e.g. .../store/v10; go up to `store`
+            // so the tree shows the full store hierarchy.
+            let root = path
+                .parent()
+                .filter(|p| p.parent().is_some()) // reject "/" or ""
+                .unwrap_or(&path);
+            paths.push(root.to_path_buf());
         }
     }
 

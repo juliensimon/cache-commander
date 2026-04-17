@@ -31,6 +31,23 @@ pub struct NodeStatus {
     pub has_outdated: bool,
 }
 
+/// Outcome of a vulnerability scan. Tracks both successful results and the
+/// number of packages whose OSV query failed — callers must distinguish
+/// "empty because clean" from "empty because scan was incomplete" (H5).
+#[derive(Debug, Clone, Default)]
+pub struct VulnScanOutcome {
+    pub results: HashMap<PathBuf, SecurityInfo>,
+    pub unscanned_packages: usize,
+}
+
+/// Outcome of a version check. Tracks successful results and the number of
+/// packages whose registry query failed.
+#[derive(Debug, Clone, Default)]
+pub struct VersionCheckOutcome {
+    pub results: HashMap<PathBuf, VersionInfo>,
+    pub unchecked_packages: usize,
+}
+
 /// Returns true if a vulnerability is still active (not fixed) for the given package version.
 fn is_vuln_active(fix_version: &Option<String>, pkg_version: &str) -> bool {
     match fix_version {
@@ -102,21 +119,35 @@ fn backfill_and_filter_vulns(
     results.retain(|_, info| !info.vulns.is_empty());
 }
 
-pub fn scan_vulns(packages: &[(PathBuf, PackageId)]) -> HashMap<PathBuf, SecurityInfo> {
+pub fn scan_vulns(packages: &[(PathBuf, PackageId)]) -> VulnScanOutcome {
+    scan_vulns_with_querier(packages, osv::query_osv)
+}
+
+/// Testable core of `scan_vulns`: accepts an OSV querier closure. Tracks
+/// failed-chunk packages in the returned outcome so the caller can
+/// distinguish "no vulns" from "partial scan" (H5).
+fn scan_vulns_with_querier<Q>(packages: &[(PathBuf, PackageId)], mut querier: Q) -> VulnScanOutcome
+where
+    Q: FnMut(&[PackageId]) -> Result<osv::OsvResponse, String>,
+{
     let mut results = HashMap::new();
+    let mut unscanned = 0usize;
     if packages.is_empty() {
-        return results;
+        return VulnScanOutcome {
+            results,
+            unscanned_packages: 0,
+        };
     }
 
-    // OSV batch API works best with chunks of ~100 packages
     let mut vuln_ids_to_fetch: Vec<String> = Vec::new();
 
     for chunk in packages.chunks(100) {
         let ids: Vec<PackageId> = chunk.iter().map(|(_, id)| id.clone()).collect();
-        let response = match osv::query_osv(&ids) {
+        let response = match querier(&ids) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("OSV batch query failed for chunk: {e}");
+                unscanned += chunk.len();
                 continue;
             }
         };
@@ -128,7 +159,10 @@ pub fn scan_vulns(packages: &[(PathBuf, PackageId)]) -> HashMap<PathBuf, Securit
 
     let detail_cache = fetch_fix_versions(&vuln_ids_to_fetch);
     backfill_and_filter_vulns(&mut results, packages, &detail_cache);
-    results
+    VulnScanOutcome {
+        results,
+        unscanned_packages: unscanned,
+    }
 }
 
 fn fetch_fix_versions(vuln_ids: &[String]) -> HashMap<String, osv::OsvVulnDetail> {
@@ -143,10 +177,10 @@ fn fetch_fix_versions(vuln_ids: &[String]) -> HashMap<String, osv::OsvVulnDetail
                 let id = id.clone();
                 let cache = Arc::clone(&cache);
                 std::thread::spawn(move || {
-                    if let Ok(detail) = osv::fetch_vuln_detail(&id) {
-                        if let Ok(mut map) = cache.lock() {
-                            map.insert(id, detail);
-                        }
+                    if let Ok(detail) = osv::fetch_vuln_detail(&id)
+                        && let Ok(mut map) = cache.lock()
+                    {
+                        map.insert(id, detail);
                     }
                 })
             })
@@ -162,12 +196,14 @@ fn fetch_fix_versions(vuln_ids: &[String]) -> HashMap<String, osv::OsvVulnDetail
     }
 }
 
-pub fn check_versions(packages: &[(PathBuf, PackageId)]) -> HashMap<PathBuf, VersionInfo> {
+pub fn check_versions(packages: &[(PathBuf, PackageId)]) -> VersionCheckOutcome {
     use std::sync::{Arc, Mutex};
 
+    // Track failed lookups so an unreachable registry never appears as
+    // "all up to date" to the user (H5).
     let results = Arc::new(Mutex::new(HashMap::new()));
+    let unchecked = Arc::new(Mutex::new(0usize));
 
-    // Process in chunks of 8 for bounded parallelism
     for chunk in packages.chunks(8) {
         let handles: Vec<_> = chunk
             .iter()
@@ -175,8 +211,9 @@ pub fn check_versions(packages: &[(PathBuf, PackageId)]) -> HashMap<PathBuf, Ver
                 let path = path.clone();
                 let pkg = pkg.clone();
                 let results = Arc::clone(&results);
-                std::thread::spawn(move || {
-                    if let Ok(Some(latest)) = registry::check_latest(&pkg) {
+                let unchecked = Arc::clone(&unchecked);
+                std::thread::spawn(move || match registry::check_latest(&pkg) {
+                    Ok(Some(latest)) => {
                         let is_outdated = osv::compare_versions(&pkg.version, &latest)
                             == std::cmp::Ordering::Less;
                         if let Ok(mut map) = results.lock() {
@@ -190,6 +227,18 @@ pub fn check_versions(packages: &[(PathBuf, PackageId)]) -> HashMap<PathBuf, Ver
                             );
                         }
                     }
+                    Ok(None) => {
+                        // No latest known — treat as unchecked so the UI
+                        // doesn't silently elide the package.
+                        if let Ok(mut n) = unchecked.lock() {
+                            *n += 1;
+                        }
+                    }
+                    Err(_) => {
+                        if let Ok(mut n) = unchecked.lock() {
+                            *n += 1;
+                        }
+                    }
                 })
             })
             .collect();
@@ -198,9 +247,17 @@ pub fn check_versions(packages: &[(PathBuf, PackageId)]) -> HashMap<PathBuf, Ver
             let _ = handle.join();
         }
     }
-    match Arc::try_unwrap(results) {
-        Ok(mutex) => mutex.into_inner().unwrap_or_default(),
+    let results = match Arc::try_unwrap(results) {
+        Ok(m) => m.into_inner().unwrap_or_default(),
         Err(arc) => arc.lock().map(|g| g.clone()).unwrap_or_default(),
+    };
+    let unchecked_packages = match Arc::try_unwrap(unchecked) {
+        Ok(m) => m.into_inner().unwrap_or(0),
+        Err(arc) => arc.lock().map(|g| *g).unwrap_or(0),
+    };
+    VersionCheckOutcome {
+        results,
+        unchecked_packages,
     }
 }
 
@@ -264,16 +321,62 @@ mod tests {
     }
 
     #[test]
-    fn scan_vulns_empty_input_returns_empty_map_without_network() {
+    fn scan_vulns_empty_input_returns_empty_outcome_without_network() {
         // Early-return path — must not attempt any network call.
         let out = scan_vulns(&[]);
-        assert!(out.is_empty());
+        assert!(out.results.is_empty());
+        assert_eq!(out.unscanned_packages, 0);
     }
 
     #[test]
-    fn check_versions_empty_input_returns_empty_map_without_network() {
+    fn check_versions_empty_input_returns_empty_outcome_without_network() {
         let out = check_versions(&[]);
-        assert!(out.is_empty());
+        assert!(out.results.is_empty());
+        assert_eq!(out.unchecked_packages, 0);
+    }
+
+    // --- H5: querier-based unit tests for unscanned tracking --------------
+
+    #[test]
+    fn scan_vulns_with_querier_tracks_failed_chunks() {
+        let pkgs: Vec<(PathBuf, PackageId)> = (0..3)
+            .map(|i| {
+                (
+                    PathBuf::from(format!("/test/pkg{i}")),
+                    PackageId {
+                        ecosystem: "npm",
+                        name: format!("pkg{i}"),
+                        version: "1.0.0".into(),
+                    },
+                )
+            })
+            .collect();
+        // Querier always errors — simulates OSV being unreachable.
+        let out = scan_vulns_with_querier(&pkgs, |_ids| Err("simulated network failure".into()));
+        assert!(out.results.is_empty());
+        assert_eq!(
+            out.unscanned_packages, 3,
+            "all 3 packages should be counted as unscanned"
+        );
+    }
+
+    #[test]
+    fn scan_vulns_with_querier_succeeds_returns_zero_unscanned() {
+        let pkgs = vec![(
+            PathBuf::from("/test/ok"),
+            PackageId {
+                ecosystem: "npm",
+                name: "ok".into(),
+                version: "1.0.0".into(),
+            },
+        )];
+        let out = scan_vulns_with_querier(&pkgs, |_ids| {
+            Ok(osv::OsvResponse {
+                results: vec![osv::OsvQueryResult { vulns: vec![] }],
+            })
+        });
+        assert!(out.results.is_empty());
+        assert_eq!(out.unscanned_packages, 0);
     }
 
     #[test]

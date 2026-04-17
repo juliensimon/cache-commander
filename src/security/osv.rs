@@ -55,9 +55,18 @@ pub fn build_vuln_detail_url(vuln_id: &str) -> String {
 }
 
 pub fn query_osv(packages: &[crate::providers::PackageId]) -> Result<OsvResponse, String> {
+    query_osv_at(OSV_BATCH_URL, packages)
+}
+
+/// Query OSV using a configurable URL — enables HTTP-level testing (M2)
+/// against a local mock server without having to hit api.osv.dev.
+pub fn query_osv_at(
+    url: &str,
+    packages: &[crate::providers::PackageId],
+) -> Result<OsvResponse, String> {
     let body = build_query(packages);
     let resp = ureq::agent()
-        .post(OSV_BATCH_URL)
+        .post(url)
         .timeout(std::time::Duration::from_secs(30))
         .set("Content-Type", "application/json")
         .set(
@@ -178,20 +187,109 @@ pub fn extract_fix_version(
     None
 }
 
-/// Compare two version strings numerically component by component.
+/// Compare two version strings with semver + PEP 440 pre-release semantics.
+///
+/// M5: previously this was a pure numeric component compare, which meant
+/// `1.0.0-rc1 == 1.0.0` and `2.0.0a1 == 2.0.0`, silently producing false-
+/// negative vuln matches near the fix boundary. We now normalize each
+/// input to `(core_nums, stage, stage_nums)` and order lexicographically.
+///
+/// Build metadata (everything after `+`) is stripped (semver §10: build
+/// metadata does not affect precedence).
 pub fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
-    let a_parts: Vec<u64> = a.split('.').filter_map(|s| s.parse().ok()).collect();
-    let b_parts: Vec<u64> = b.split('.').filter_map(|s| s.parse().ok()).collect();
-    let len = a_parts.len().max(b_parts.len());
+    let (a_core, a_stage, a_stage_nums) = normalize_version(a);
+    let (b_core, b_stage, b_stage_nums) = normalize_version(b);
+    // Pad the shorter core with zeros so `1.2` == `1.2.0`.
+    let len = a_core.len().max(b_core.len());
     for i in 0..len {
-        let a_val = a_parts.get(i).copied().unwrap_or(0);
-        let b_val = b_parts.get(i).copied().unwrap_or(0);
-        match a_val.cmp(&b_val) {
+        let av = a_core.get(i).copied().unwrap_or(0);
+        let bv = b_core.get(i).copied().unwrap_or(0);
+        match av.cmp(&bv) {
             std::cmp::Ordering::Equal => continue,
-            ord => return ord,
+            other => return other,
         }
     }
-    std::cmp::Ordering::Equal
+    match a_stage.cmp(&b_stage) {
+        std::cmp::Ordering::Equal => a_stage_nums.cmp(&b_stage_nums),
+        other => other,
+    }
+}
+
+/// Ordered tuple key for a version string.
+fn normalize_version(v: &str) -> (Vec<u64>, u8, Vec<u64>) {
+    // 1. Strip build metadata (everything after '+').
+    let v = v.split('+').next().unwrap_or(v);
+
+    // 2. Split at '-' for semver-style pre-release tail.
+    let (head, tail_dash) = match v.split_once('-') {
+        Some((h, t)) => (h, Some(t)),
+        None => (v, None),
+    };
+
+    // 3. If no '-', try PEP 440 inline suffix: find the first non-numeric,
+    //    non-dot char in `head` and split there.
+    let (core, tail_inline) = if tail_dash.is_some() {
+        (head, None)
+    } else {
+        let mut split_at = head.len();
+        for (i, c) in head.char_indices() {
+            if !c.is_ascii_digit() && c != '.' {
+                split_at = i;
+                break;
+            }
+        }
+        if split_at == head.len() {
+            (head, None)
+        } else {
+            (&head[..split_at], Some(&head[split_at..]))
+        }
+    };
+
+    let core_nums: Vec<u64> = core.split('.').filter_map(|s| s.parse().ok()).collect();
+
+    // Stage rank: dev < alpha < beta < rc < stable < post
+    const STAGE_DEV: u8 = 0;
+    const STAGE_ALPHA: u8 = 1;
+    const STAGE_BETA: u8 = 2;
+    const STAGE_RC: u8 = 3;
+    const STAGE_STABLE: u8 = 4;
+    const STAGE_POST: u8 = 5;
+
+    let tail = tail_dash
+        .or(tail_inline)
+        .unwrap_or("")
+        .trim_start_matches('.');
+    if tail.is_empty() {
+        return (core_nums, STAGE_STABLE, Vec::new());
+    }
+    let tail_lower = tail.to_ascii_lowercase();
+    let (stage, rest) = if let Some(r) = tail_lower.strip_prefix("post") {
+        (STAGE_POST, r)
+    } else if let Some(r) = tail_lower.strip_prefix("dev") {
+        (STAGE_DEV, r)
+    } else if let Some(r) = tail_lower.strip_prefix("alpha") {
+        (STAGE_ALPHA, r)
+    } else if let Some(r) = tail_lower.strip_prefix("beta") {
+        (STAGE_BETA, r)
+    } else if let Some(r) = tail_lower.strip_prefix("rc") {
+        (STAGE_RC, r)
+    } else if let Some(r) = tail_lower.strip_prefix('a') {
+        (STAGE_ALPHA, r)
+    } else if let Some(r) = tail_lower.strip_prefix('b') {
+        (STAGE_BETA, r)
+    } else {
+        // Unknown tail — treat as pre-release of lowest precedence so we
+        // never falsely upgrade an unparseable version above stable.
+        (STAGE_DEV, tail_lower.as_str())
+    };
+
+    let stage_nums: Vec<u64> = rest
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| s.parse().ok())
+        .collect();
+
+    (core_nums, stage, stage_nums)
 }
 
 /// Check if version a <= version b.
@@ -200,9 +298,14 @@ pub fn version_lte(a: &str, b: &str) -> bool {
 }
 
 pub fn fetch_vuln_detail(vuln_id: &str) -> Result<OsvVulnDetail, String> {
-    let url = build_vuln_detail_url(vuln_id);
+    fetch_vuln_detail_at(&build_vuln_detail_url(vuln_id))
+}
+
+/// Fetch a single OSV vuln detail from a configurable URL — enables
+/// HTTP-level tests (M2).
+pub fn fetch_vuln_detail_at(url: &str) -> Result<OsvVulnDetail, String> {
     let resp = ureq::agent()
-        .get(&url)
+        .get(url)
         .timeout(std::time::Duration::from_secs(15))
         .set(
             "User-Agent",
@@ -458,16 +561,66 @@ mod tests {
         assert_eq!(compare_versions("1.2", "1.2.1"), std::cmp::Ordering::Less);
     }
 
+    // M5: pre-release / build-metadata ordering — semver + PEP 440 rules.
     #[test]
-    fn compare_versions_prerelease_limitation() {
-        // Document known limitation: non-numeric parts are silently dropped
-        // "1.0.0rc1" → "0rc1" fails parse → [1, 0] compared to [1, 0, 0] = Equal
-        let result = compare_versions("1.0.0rc1", "1.0.0");
-        // Pre-release is NOT properly handled — this documents the limitation
-        assert!(
-            result == std::cmp::Ordering::Equal || result == std::cmp::Ordering::Less,
-            "Pre-release should be <= stable, got {:?}",
-            result
+    fn compare_versions_semver_prerelease_less_than_stable() {
+        assert_eq!(
+            compare_versions("1.0.0-rc1", "1.0.0"),
+            std::cmp::Ordering::Less,
+            "semver pre-release must rank below the stable release"
+        );
+    }
+
+    #[test]
+    fn compare_versions_semver_prerelease_progression() {
+        // alpha < beta < rc < stable
+        assert_eq!(
+            compare_versions("1.0.0-alpha", "1.0.0-beta"),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_versions("1.0.0-beta", "1.0.0-rc"),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_versions("1.0.0-rc1", "1.0.0-rc2"),
+            std::cmp::Ordering::Less
+        );
+    }
+
+    #[test]
+    fn compare_versions_pep440_alpha_less_than_stable() {
+        // PEP 440 inline style — no dash
+        assert_eq!(
+            compare_versions("2.0.0a1", "2.0.0"),
+            std::cmp::Ordering::Less,
+            "PEP 440 alpha must rank below stable"
+        );
+        assert_eq!(
+            compare_versions("1.0.0rc1", "1.0.0"),
+            std::cmp::Ordering::Less,
+            "PEP 440 rc must rank below stable"
+        );
+    }
+
+    #[test]
+    fn compare_versions_build_metadata_ignored() {
+        // Build metadata after '+' does not affect precedence (semver §10).
+        assert_eq!(
+            compare_versions("1.0.0+build1", "1.0.0"),
+            std::cmp::Ordering::Equal,
+        );
+        assert_eq!(
+            compare_versions("1.0.0+a", "1.0.0+b"),
+            std::cmp::Ordering::Equal,
+        );
+    }
+
+    #[test]
+    fn compare_versions_pep440_post_greater_than_stable() {
+        assert_eq!(
+            compare_versions("1.0.0.post1", "1.0.0"),
+            std::cmp::Ordering::Greater
         );
     }
 

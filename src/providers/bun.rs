@@ -101,6 +101,18 @@ pub fn semantic_name(path: &Path) -> Option<String> {
 }
 
 pub fn package_id(path: &Path) -> Option<PackageId> {
+    // Reject transitive nested packages — a directory whose parent is
+    // `node_modules` is a vendored dep inside another cached package's tree,
+    // not a direct Bun cache entry. Treating it as one would double-count in
+    // the OSV query batch and tag it with the wrong ecosystem position.
+    if path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        == Some("node_modules")
+    {
+        return None;
+    }
     let (name, version) = parse_package_from_path(path)?;
     Some(PackageId {
         ecosystem: "npm",
@@ -403,5 +415,30 @@ mod tests {
         assert_eq!(id.ecosystem, "npm");
         assert_eq!(id.name, "@types/node");
         assert_eq!(id.version, "22.0.0");
+    }
+
+    // =================================================================
+    // Transitive nested package rejection (H7)
+    // A package inside another cached package's own node_modules is
+    // NOT a direct Bun cache entry, and must not feed OSV queries.
+    // =================================================================
+
+    #[test]
+    fn package_id_rejects_nested_node_modules() {
+        let path = PathBuf::from(
+            "/home/user/.bun/install/cache/@babel/core@7.24.0/node_modules/foo@1.0.0",
+        );
+        assert!(
+            package_id(&path).is_none(),
+            "nested transitive package must not be identified as a direct Bun cache entry"
+        );
+    }
+
+    #[test]
+    fn package_id_rejects_deep_node_modules_vendored() {
+        // Vendored transitive inside a non-scoped cached package
+        let path =
+            PathBuf::from("/home/user/.bun/install/cache/express@4.18.2/node_modules/debug@2.6.9");
+        assert!(package_id(&path).is_none());
     }
 }

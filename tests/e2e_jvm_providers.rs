@@ -83,33 +83,34 @@ fn coord(p: &(&str, &str, &str)) -> String {
 /// Assert that `scan_vulns` reported at least one vulnerability for a package
 /// whose name matches `group:artifact`. Panics with the full result map on miss.
 fn assert_vuln_reported(
-    results: &std::collections::HashMap<PathBuf, ccmd::security::SecurityInfo>,
+    outcome: &ccmd::security::VulnScanOutcome,
     group_artifact: &str,
     label: &str,
 ) {
-    let hit = results.iter().any(|(path, info)| {
+    let hit = outcome.results.iter().any(|(path, info)| {
         path.to_string_lossy().contains(group_artifact) && !info.vulns.is_empty()
     });
     assert!(
         hit,
-        "expected OSV to report vulns for {label} ({group_artifact}), got results:\n{:#?}",
-        results
+        "expected OSV to report vulns for {label} ({group_artifact}); unscanned={}, results:\n{:#?}",
+        outcome.unscanned_packages, outcome.results
     );
 }
 
 /// Assert that `check_versions` reported a package as outdated.
 fn assert_outdated_reported(
-    results: &std::collections::HashMap<PathBuf, ccmd::security::VersionInfo>,
+    outcome: &ccmd::security::VersionCheckOutcome,
     group_artifact: &str,
     label: &str,
 ) {
-    let hit = results
+    let hit = outcome
+        .results
         .iter()
         .any(|(path, info)| path.to_string_lossy().contains(group_artifact) && info.is_outdated);
     assert!(
         hit,
-        "expected Maven Central to mark {label} ({group_artifact}) outdated, got:\n{:#?}",
-        results
+        "expected Maven Central to mark {label} ({group_artifact}) outdated; unchecked={}, results:\n{:#?}",
+        outcome.unchecked_packages, outcome.results
     );
 }
 

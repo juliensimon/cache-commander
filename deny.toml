@@ -1,7 +1,10 @@
 [advisories]
+# L6: Every ignore entry must carry a revisit date so stale ignores don't
+# silently persist. When the date is reached, review upstream progress and
+# either remove the ignore or extend the date with a fresh review.
 ignore = [
-    # Transitive dep via ratatui — no direct usage, waiting on upstream fix
-    { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained but only used transitively via ratatui" },
+    # Transitive dep via ratatui — no direct usage. Revisit: 2026-10-01
+    { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained but only used transitively via ratatui; revisit 2026-10-01" },
 ]
 
 [licenses]
@@ -19,6 +22,11 @@ allow = [
 ]
 
 [bans]
+# L7: kept as warn — the current duplicates are all in transitive deps
+# (rustix, hashbrown, getrandom, unicode-width, rustls-webpki transitives)
+# that we can't pin without forcing incompatible upgrades on upstream
+# crates. CI emits a visible signal in the log; revisit when upstream
+# ratatui / ureq converge.
 multiple-versions = "warn"
 wildcards = "deny"
 

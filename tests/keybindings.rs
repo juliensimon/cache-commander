@@ -1023,7 +1023,7 @@ fn node_status_cleared_on_recompute() {
     app.vuln_results.clear();
     app.recompute_node_status();
     assert!(
-        app.node_status.get(&child_path).is_none(),
+        !app.node_status.contains_key(&child_path),
         "Status should be cleared after removing vuln results"
     );
 }
