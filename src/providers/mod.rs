@@ -218,6 +218,16 @@ fn is_safe_for_shell(s: &str) -> bool {
 }
 
 pub fn upgrade_command(kind: CacheKind, name: &str, version: &str) -> Option<String> {
+    // Maven and Gradle take a different path: the name is `group:artifact`
+    // (colon is not shell-safe) and the output is an XML / Groovy snippet
+    // pasted into pom.xml or build.gradle, not a shell command. They have
+    // their own safety rules in `maven_snippet` / `gradle_snippet`.
+    match kind {
+        CacheKind::Maven => return maven_snippet(name, version),
+        CacheKind::Gradle => return gradle_snippet(name, version),
+        _ => {}
+    }
+
     if !is_safe_for_shell(name) || !is_safe_for_shell(version) {
         return None;
     }
@@ -231,6 +241,41 @@ pub fn upgrade_command(kind: CacheKind, name: &str, version: &str) -> Option<Str
         CacheKind::Bun => Some(format!("bun add {name}@{version}")),
         _ => None,
     }
+}
+
+/// True iff `s` is a plausible Maven coordinate fragment: alphanumerics plus
+/// `.` `-` `_`. No angle brackets, quotes, spaces, or backslashes — those
+/// would break the XML / Groovy snippet we paste into project files.
+fn is_safe_for_maven_fragment(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+}
+
+fn maven_snippet(name: &str, version: &str) -> Option<String> {
+    let (group, artifact) = name.split_once(':')?;
+    if !is_safe_for_maven_fragment(group)
+        || !is_safe_for_maven_fragment(artifact)
+        || !is_safe_for_maven_fragment(version)
+    {
+        return None;
+    }
+    Some(format!(
+        "<dependency><groupId>{group}</groupId>\
+         <artifactId>{artifact}</artifactId>\
+         <version>{version}</version></dependency>"
+    ))
+}
+
+fn gradle_snippet(name: &str, version: &str) -> Option<String> {
+    let (group, artifact) = name.split_once(':')?;
+    if !is_safe_for_maven_fragment(group)
+        || !is_safe_for_maven_fragment(artifact)
+        || !is_safe_for_maven_fragment(version)
+    {
+        return None;
+    }
+    Some(format!("implementation '{group}:{artifact}:{version}'"))
 }
 
 /// Returns true if `path` contains two adjacent path components equal to `first`
@@ -726,6 +771,85 @@ mod tests {
                 kind
             );
         }
+    }
+
+    // --- Maven / Gradle: snippets rather than shell commands -------------
+    //
+    // There's no clean single-line CLI to upgrade a JVM dependency — the
+    // user must edit pom.xml or build.gradle. So upgrade_command returns a
+    // copy-pasteable snippet instead. This is still a `String` on the
+    // clipboard; the UI layer doesn't care that it isn't a shell command.
+
+    #[test]
+    fn upgrade_command_maven_returns_xml_snippet() {
+        assert_eq!(
+            upgrade_command(
+                CacheKind::Maven,
+                "org.apache.logging.log4j:log4j-core",
+                "2.26.0",
+            ),
+            Some(
+                "<dependency><groupId>org.apache.logging.log4j</groupId>\
+                 <artifactId>log4j-core</artifactId>\
+                 <version>2.26.0</version></dependency>"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn upgrade_command_gradle_returns_groovy_dsl_line() {
+        assert_eq!(
+            upgrade_command(CacheKind::Gradle, "com.google.guava:guava", "33.0.0-jre"),
+            Some("implementation 'com.google.guava:guava:33.0.0-jre'".to_string())
+        );
+    }
+
+    #[test]
+    fn upgrade_command_maven_without_colon_returns_none() {
+        // Name must be `group:artifact`. A bare artifact name is malformed.
+        assert_eq!(
+            upgrade_command(CacheKind::Maven, "log4j-core", "2.26.0"),
+            None
+        );
+    }
+
+    #[test]
+    fn upgrade_command_gradle_without_colon_returns_none() {
+        assert_eq!(
+            upgrade_command(CacheKind::Gradle, "guava", "33.0.0-jre"),
+            None
+        );
+    }
+
+    #[test]
+    fn upgrade_command_maven_rejects_xml_breaking_chars() {
+        // Defense in depth: prevent the snippet from escaping XML context
+        // if a malformed coordinate ever reaches here.
+        for bad in &["group<x:artifact", "group:art<ifact", "group:artifact"] {
+            let out = upgrade_command(CacheKind::Maven, bad, "2.26.0");
+            if *bad == "group:artifact" {
+                assert!(out.is_some(), "baseline should succeed");
+            } else {
+                assert_eq!(out, None, "{} must be rejected", bad);
+            }
+        }
+        assert_eq!(
+            upgrade_command(CacheKind::Maven, "group:artifact", "1.0<inject>"),
+            None
+        );
+    }
+
+    #[test]
+    fn upgrade_command_gradle_rejects_quote_injection() {
+        assert_eq!(
+            upgrade_command(CacheKind::Gradle, "group:art'ifact", "1.0"),
+            None
+        );
+        assert_eq!(
+            upgrade_command(CacheKind::Gradle, "group:artifact", "1.0'; evil"),
+            None
+        );
     }
 
     // --- Shell safety in upgrade_command ---

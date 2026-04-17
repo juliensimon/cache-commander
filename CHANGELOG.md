@@ -1,5 +1,23 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **Maven / Gradle upgrade snippets**: pressing `c` on a Maven or Gradle
+  artifact now copies a paste-ready snippet to the clipboard — a
+  `<dependency>…</dependency>` block for Maven, an `implementation
+  'group:artifact:version'` line for Gradle. Previously a silent no-op
+  because there is no single-line CLI equivalent for JVM dependencies.
+
+### Fixed
+- Dropped duplicate MCP screenshots at repo root (~150 KiB per published
+  crate tarball); README now points at `docs/ccmd-mcp-*.png`.
+- README screenshot reference switched to the GitHub raw URL so it
+  renders on the crates.io page (the local `screenshot.png` is excluded
+  from the crate).
+- Rust MSRV badge corrected from 1.85 to 1.88 to match `Cargo.toml` and
+  the CI job.
+
 ## [0.3.1] — 2026-04-17
 
 ### Added
