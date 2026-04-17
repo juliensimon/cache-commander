@@ -79,11 +79,31 @@ pub fn check(
     }
 }
 
-/// Placeholder — real signature lands in Task 7.
+/// Spawns a background thread that checks GitHub for a newer `ccmd` release.
+/// Returns a receiver that yields at most one `UpdateMsg::Available` if a
+/// newer version exists. Silent on all errors.
 #[allow(dead_code)] // called from main.rs in Task 9
-pub fn start(_config: &crate::config::Config) -> mpsc::Receiver<UpdateMsg> {
-    let (_tx, rx) = mpsc::channel();
+pub fn start(config: &crate::config::Config) -> mpsc::Receiver<UpdateMsg> {
+    let (tx, rx) = mpsc::channel();
+    if !config.updater.enabled {
+        return rx;
+    }
+    std::thread::spawn(move || {
+        let cache_path = match cache_file_path() {
+            Some(p) => p,
+            None => return,
+        };
+        let http = http::UreqClient::for_ccmd();
+        if let Some(info) = check(env!("CARGO_PKG_VERSION"), &cache_path, &http, Utc::now()) {
+            let _ = tx.send(UpdateMsg::Available(info));
+        }
+    });
     rx
+}
+
+fn cache_file_path() -> Option<std::path::PathBuf> {
+    let proj = directories::ProjectDirs::from("", "", "ccmd")?;
+    Some(proj.cache_dir().join("update-check.json"))
 }
 
 #[cfg(test)]
