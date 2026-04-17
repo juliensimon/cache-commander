@@ -22,12 +22,40 @@ pub fn parse_npm_latest(json: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// Extract the content between `<tag>` and `</tag>` from XML-like text.
+fn extract_tag(xml: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = xml.find(&open)? + open.len();
+    let end = xml[start..].find(&close)?;
+    let value = xml[start..start + end].trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+/// Parse Maven Central's maven-metadata.xml. Prefers `<release>` over `<latest>`
+/// because `<latest>` may include snapshot versions that users shouldn't be pushed to.
+pub fn parse_maven_latest(xml: &str) -> Option<String> {
+    extract_tag(xml, "release").or_else(|| extract_tag(xml, "latest"))
+}
+
 /// Build the registry URL for a given package, or `None` if the ecosystem is unsupported.
 pub fn build_registry_url(pkg: &crate::providers::PackageId) -> Option<String> {
     match pkg.ecosystem {
         "PyPI" => Some(format!("https://pypi.org/pypi/{}/json", pkg.name)),
         "crates.io" => Some(format!("https://crates.io/api/v1/crates/{}", pkg.name)),
         "npm" => Some(format!("https://registry.npmjs.org/{}/latest", pkg.name)),
+        "Maven" => {
+            // pkg.name is `group:artifact`; group dots become path slashes.
+            let (group, artifact) = pkg.name.split_once(':')?;
+            let group_path = group.replace('.', "/");
+            Some(format!(
+                "https://repo1.maven.org/maven2/{group_path}/{artifact}/maven-metadata.xml"
+            ))
+        }
         _ => None,
     }
 }
@@ -38,6 +66,7 @@ pub fn parse_registry_response(ecosystem: &str, body: &str) -> Option<String> {
         "PyPI" => parse_pypi_latest(body),
         "crates.io" => parse_crates_io_latest(body),
         "npm" => parse_npm_latest(body),
+        "Maven" => parse_maven_latest(body),
         _ => None,
     }
 }
@@ -192,6 +221,78 @@ mod tests {
         assert_eq!(
             parse_crates_io_latest(r#"{"crate": {"max_version": ""}}"#),
             None
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Maven Central (pkg.ecosystem == "Maven", pkg.name == "group:artifact")
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn build_registry_url_maven_simple_group() {
+        // group `com.google.guava`, artifact `guava`
+        // → https://repo1.maven.org/maven2/com/google/guava/guava/maven-metadata.xml
+        let p = pkg("Maven", "com.google.guava:guava");
+        assert_eq!(
+            build_registry_url(&p),
+            Some(
+                "https://repo1.maven.org/maven2/com/google/guava/guava/maven-metadata.xml"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn build_registry_url_maven_multi_segment_group() {
+        let p = pkg("Maven", "org.apache.logging.log4j:log4j-core");
+        assert_eq!(
+            build_registry_url(&p),
+            Some(
+                "https://repo1.maven.org/maven2/org/apache/logging/log4j/log4j-core/maven-metadata.xml"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn build_registry_url_maven_missing_colon_returns_none() {
+        // Malformed Maven coord (no `:`) — can't be used to build a URL.
+        let p = pkg("Maven", "guava");
+        assert_eq!(build_registry_url(&p), None);
+    }
+
+    #[test]
+    fn parse_maven_latest_prefers_release_over_latest() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<metadata>
+  <groupId>com.google.guava</groupId>
+  <artifactId>guava</artifactId>
+  <versioning>
+    <latest>34.0.0-SNAPSHOT</latest>
+    <release>33.6.0-jre</release>
+  </versioning>
+</metadata>"#;
+        assert_eq!(parse_maven_latest(xml), Some("33.6.0-jre".to_string()));
+    }
+
+    #[test]
+    fn parse_maven_latest_falls_back_to_latest_when_no_release() {
+        let xml = r#"<metadata><versioning><latest>1.2.3</latest></versioning></metadata>"#;
+        assert_eq!(parse_maven_latest(xml), Some("1.2.3".to_string()));
+    }
+
+    #[test]
+    fn parse_maven_latest_returns_none_when_empty() {
+        assert_eq!(parse_maven_latest(""), None);
+        assert_eq!(parse_maven_latest("<metadata></metadata>"), None);
+    }
+
+    #[test]
+    fn parse_registry_response_dispatches_to_maven() {
+        let xml = r#"<metadata><versioning><release>2.0.0</release></versioning></metadata>"#;
+        assert_eq!(
+            parse_registry_response("Maven", xml),
+            Some("2.0.0".to_string())
         );
     }
 }

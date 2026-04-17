@@ -18,6 +18,8 @@ pub enum CacheKind {
     Yarn,
     Pnpm,
     Bun,
+    Maven,
+    Gradle,
     #[default]
     Unknown,
 }
@@ -40,6 +42,8 @@ impl CacheKind {
             Self::Yarn => "Yarn",
             Self::Pnpm => "pnpm",
             Self::Bun => "Bun",
+            Self::Maven => "Maven",
+            Self::Gradle => "Gradle",
             Self::Unknown => "",
         }
     }
@@ -61,6 +65,12 @@ impl CacheKind {
             Self::Yarn => "Yarn package manager — cached packages and metadata",
             Self::Pnpm => "pnpm package manager — content-addressed package store",
             Self::Bun => "Bun runtime — cached npm packages from global install cache",
+            Self::Maven => {
+                "Java/Kotlin build tool — local repository of downloaded .jar/.pom artifacts"
+            }
+            Self::Gradle => {
+                "JVM build tool — dependency cache, wrapper distributions, and build cache"
+            }
             Self::Unknown => "",
         }
     }
@@ -82,6 +92,8 @@ impl CacheKind {
             Self::Yarn => "https://yarnpkg.com",
             Self::Pnpm => "https://pnpm.io",
             Self::Bun => "https://bun.sh",
+            Self::Maven => "https://maven.apache.org",
+            Self::Gradle => "https://gradle.org",
             Self::Unknown => "",
         }
     }
@@ -234,6 +246,8 @@ mod tests {
             CacheKind::Yarn,
             CacheKind::Pnpm,
             CacheKind::Bun,
+            CacheKind::Maven,
+            CacheKind::Gradle,
         ];
         for kind in &all {
             assert!(!kind.label().is_empty(), "{:?} label empty", kind);

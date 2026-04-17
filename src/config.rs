@@ -118,6 +118,14 @@ impl Default for Config {
         if cargo_registry.exists() {
             roots.push(cargo_registry);
         }
+        let m2_repo = home.join(".m2").join("repository");
+        if m2_repo.exists() {
+            roots.push(m2_repo);
+        }
+        let gradle_caches = home.join(".gradle").join("caches");
+        if gradle_caches.exists() {
+            roots.push(gradle_caches);
+        }
 
         // Yarn cache paths
         for path in probe_yarn_paths() {
@@ -528,6 +536,34 @@ mod tests {
             .iter()
             .any(|r| r.to_string_lossy().contains(".cache"));
         assert!(has_cache, "Default config should include ~/.cache");
+    }
+
+    #[test]
+    fn config_default_includes_m2_repository_when_home_has_it() {
+        let m2 = dirs_home().join(".m2").join("repository");
+        if !m2.exists() {
+            return; // no-op on machines without Maven installed
+        }
+        let config = Config::default();
+        assert!(
+            config.roots.contains(&m2),
+            "Config::default() must include ~/.m2/repository when it exists; roots: {:?}",
+            config.roots
+        );
+    }
+
+    #[test]
+    fn config_default_includes_gradle_caches_when_home_has_it() {
+        let gradle = dirs_home().join(".gradle").join("caches");
+        if !gradle.exists() {
+            return; // no-op on machines without Gradle installed
+        }
+        let config = Config::default();
+        assert!(
+            config.roots.contains(&gradle),
+            "Config::default() must include ~/.gradle/caches when it exists; roots: {:?}",
+            config.roots
+        );
     }
 
     #[test]

@@ -3,8 +3,10 @@ pub mod cargo;
 pub mod chroma;
 pub mod generic;
 pub mod gh;
+pub mod gradle;
 pub mod homebrew;
 pub mod huggingface;
+pub mod maven;
 pub mod npm;
 pub mod pip;
 pub mod pnpm;
@@ -74,6 +76,8 @@ pub fn detect(path: &Path) -> CacheKind {
         ".yarn-cache" => return CacheKind::Yarn,
         ".pnpm-store" => return CacheKind::Pnpm,
         ".pnpm" => return CacheKind::Pnpm,
+        ".m2" => return CacheKind::Maven,
+        ".gradle" => return CacheKind::Gradle,
         _ => {}
     }
 
@@ -90,6 +94,11 @@ pub fn detect(path: &Path) -> CacheKind {
             }
             "pnpm" if path.to_string_lossy().contains("store") => {
                 return CacheKind::Pnpm;
+            }
+            ".m2" => return CacheKind::Maven,
+            ".gradle" => return CacheKind::Gradle,
+            "repository" if ancestor.to_string_lossy().contains(".m2") => {
+                return CacheKind::Maven;
             }
             ".yarn-cache" | "Yarn" => return CacheKind::Yarn,
             ".yarn"
@@ -148,6 +157,8 @@ pub fn semantic_name(kind: CacheKind, path: &Path) -> Option<String> {
         CacheKind::Yarn => yarn::semantic_name(path),
         CacheKind::Pnpm => pnpm::semantic_name(path),
         CacheKind::Bun => bun::semantic_name(path),
+        CacheKind::Maven => maven::semantic_name(path),
+        CacheKind::Gradle => gradle::semantic_name(path),
         CacheKind::Unknown => None,
     }
 }
@@ -170,6 +181,8 @@ pub fn metadata(kind: CacheKind, path: &Path) -> Vec<MetadataField> {
         CacheKind::Yarn => yarn::metadata(path),
         CacheKind::Pnpm => pnpm::metadata(path),
         CacheKind::Bun => bun::metadata(path),
+        CacheKind::Maven => maven::metadata(path),
+        CacheKind::Gradle => gradle::metadata(path),
         CacheKind::Unknown => generic::metadata(path),
     }
 }
@@ -190,6 +203,8 @@ pub fn package_id(kind: CacheKind, path: &Path) -> Option<PackageId> {
         CacheKind::Yarn => yarn::package_id(path),
         CacheKind::Pnpm => pnpm::package_id(path),
         CacheKind::Bun => bun::package_id(path),
+        CacheKind::Maven => maven::package_id(path),
+        CacheKind::Gradle => gradle::package_id(path),
         _ => None,
     }
 }
@@ -268,6 +283,20 @@ pub fn safety(kind: CacheKind, path: &Path) -> SafetyLevel {
                 SafetyLevel::Safe
             } else {
                 SafetyLevel::Caution
+            }
+        }
+        CacheKind::Gradle => {
+            // Gradle's caches/ subdir houses a mix: dep caches (Safe) and
+            // rebuild-expensive caches (Caution). Classify by subdir name.
+            let path_str = path.to_string_lossy();
+            if path_str.contains("/build-cache-")
+                || path_str.contains("\\build-cache-")
+                || path_str.contains("/transforms-")
+                || path_str.contains("\\transforms-")
+            {
+                SafetyLevel::Caution
+            } else {
+                SafetyLevel::Safe
             }
         }
         CacheKind::Unknown => SafetyLevel::Caution,
@@ -380,6 +409,55 @@ mod tests {
         assert_eq!(
             detect(&PathBuf::from("/home/user/.cache/something_random")),
             CacheKind::Unknown
+        );
+    }
+
+    #[test]
+    fn detect_maven_m2_dir() {
+        assert_eq!(detect(&PathBuf::from("/home/user/.m2")), CacheKind::Maven);
+    }
+
+    #[test]
+    fn detect_maven_repository_dir() {
+        assert_eq!(
+            detect(&PathBuf::from("/home/user/.m2/repository")),
+            CacheKind::Maven
+        );
+    }
+
+    #[test]
+    fn detect_maven_jar_deep() {
+        assert_eq!(
+            detect(&PathBuf::from(
+                "/home/user/.m2/repository/com/google/guava/guava/32.0.0-jre/guava-32.0.0-jre.jar"
+            )),
+            CacheKind::Maven
+        );
+    }
+
+    #[test]
+    fn detect_gradle_dot_dir() {
+        assert_eq!(
+            detect(&PathBuf::from("/home/user/.gradle")),
+            CacheKind::Gradle
+        );
+    }
+
+    #[test]
+    fn detect_gradle_caches_subdir() {
+        assert_eq!(
+            detect(&PathBuf::from("/home/user/.gradle/caches")),
+            CacheKind::Gradle
+        );
+    }
+
+    #[test]
+    fn detect_gradle_jar_deep() {
+        assert_eq!(
+            detect(&PathBuf::from(
+                "/home/user/.gradle/caches/modules-2/files-2.1/com.google.guava/guava/32.0.0-jre/abc/guava-32.0.0-jre.jar"
+            )),
+            CacheKind::Gradle
         );
     }
 
@@ -1015,6 +1093,56 @@ mod tests {
     }
 
     #[test]
+    fn safety_gradle_modules_files_is_safe() {
+        // Dependency cache — re-resolvable from Maven Central.
+        assert_eq!(
+            safety(
+                CacheKind::Gradle,
+                &PathBuf::from(
+                    "/home/user/.gradle/caches/modules-2/files-2.1/com.google.guava/guava/32.0.0-jre/abc/guava-32.0.0-jre.jar"
+                )
+            ),
+            SafetyLevel::Safe
+        );
+    }
+
+    #[test]
+    fn safety_gradle_build_cache_is_caution() {
+        // build-cache-* stores compiled outputs — deletion triggers full rebuild.
+        assert_eq!(
+            safety(
+                CacheKind::Gradle,
+                &PathBuf::from("/home/user/.gradle/caches/build-cache-1/abc123")
+            ),
+            SafetyLevel::Caution
+        );
+    }
+
+    #[test]
+    fn safety_gradle_transforms_is_caution() {
+        // transforms-* stores expensive dependency transformations.
+        assert_eq!(
+            safety(
+                CacheKind::Gradle,
+                &PathBuf::from("/home/user/.gradle/caches/transforms-4/abc")
+            ),
+            SafetyLevel::Caution
+        );
+    }
+
+    #[test]
+    fn safety_gradle_wrapper_dist_is_safe() {
+        // ~/.gradle/wrapper/dists/ — re-downloadable from services.gradle.org.
+        assert_eq!(
+            safety(
+                CacheKind::Gradle,
+                &PathBuf::from("/home/user/.gradle/wrapper/dists/gradle-8.5-bin")
+            ),
+            SafetyLevel::Safe
+        );
+    }
+
+    #[test]
     fn safety_bun_install_cache_backup_not_safe() {
         // A sibling dir like "install/cache-backup" must NOT be treated as
         // the Bun package cache (H7): substring match leaks auto-delete to
@@ -1101,6 +1229,8 @@ mod tests {
             CacheKind::Yarn,
             CacheKind::Pnpm,
             CacheKind::Bun,
+            CacheKind::Maven,
+            CacheKind::Gradle,
             CacheKind::Unknown,
         ];
         for kind in &all {

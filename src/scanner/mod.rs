@@ -40,7 +40,10 @@ pub fn discover_packages(roots: &[PathBuf]) -> Vec<(PathBuf, crate::providers::P
         if !root.exists() {
             continue;
         }
-        let walk = jwalk::WalkDir::new(root).skip_hidden(false).max_depth(6);
+        // Depth 12 accommodates the deepest layouts: Maven's `~/.m2/repository/<group-path>/<artifact>/<version>/<file>`
+        // where the group path alone can be 4-5 segments (e.g. `org/apache/logging/log4j`), and Gradle's
+        // `~/.gradle/caches/modules-2/files-2.1/<group>/<artifact>/<version>/<hash>/<file>`.
+        let walk = jwalk::WalkDir::new(root).skip_hidden(false).max_depth(12);
         for entry in walk.into_iter().filter_map(|e| e.ok()) {
             let path = entry.path();
             let kind = crate::providers::detect(&path);
