@@ -1,3 +1,4 @@
+pub mod cache;
 pub mod osv;
 pub mod registry;
 
@@ -34,18 +35,25 @@ pub struct NodeStatus {
 /// Outcome of a vulnerability scan. Tracks both successful results and the
 /// number of packages whose OSV query failed — callers must distinguish
 /// "empty because clean" from "empty because scan was incomplete" (H5).
+///
+/// `cached_hits` counts packages whose result was served from the on-disk
+/// cache instead of a network call; the UI surfaces this so users can see
+/// the cache is doing its job.
 #[derive(Debug, Clone, Default)]
 pub struct VulnScanOutcome {
     pub results: HashMap<PathBuf, SecurityInfo>,
     pub unscanned_packages: usize,
+    pub cached_hits: usize,
 }
 
 /// Outcome of a version check. Tracks successful results and the number of
-/// packages whose registry query failed.
+/// packages whose registry query failed. `cached_hits` counts packages
+/// answered from the disk cache.
 #[derive(Debug, Clone, Default)]
 pub struct VersionCheckOutcome {
     pub results: HashMap<PathBuf, VersionInfo>,
     pub unchecked_packages: usize,
+    pub cached_hits: usize,
 }
 
 /// Returns true if a vulnerability is still active (not fixed) for the given package version.
@@ -123,25 +131,82 @@ pub fn scan_vulns(packages: &[(PathBuf, PackageId)]) -> VulnScanOutcome {
     scan_vulns_with_querier(packages, osv::query_osv)
 }
 
+/// Run a vuln scan, consulting `cache` for hits and writing misses back into
+/// it. Packages present in the cache never reach the network.
+pub fn scan_vulns_with_cache(
+    packages: &[(PathBuf, PackageId)],
+    cache: &mut cache::VulnCache,
+) -> VulnScanOutcome {
+    scan_vulns_with_querier_and_cache(packages, osv::query_osv, Some(cache))
+}
+
 /// Testable core of `scan_vulns`: accepts an OSV querier closure. Tracks
 /// failed-chunk packages in the returned outcome so the caller can
 /// distinguish "no vulns" from "partial scan" (H5).
-fn scan_vulns_with_querier<Q>(packages: &[(PathBuf, PackageId)], mut querier: Q) -> VulnScanOutcome
+fn scan_vulns_with_querier<Q>(packages: &[(PathBuf, PackageId)], querier: Q) -> VulnScanOutcome
+where
+    Q: FnMut(&[PackageId]) -> Result<osv::OsvResponse, String>,
+{
+    scan_vulns_with_querier_and_cache(packages, querier, None)
+}
+
+/// Cache-aware core. Splits `packages` into cache hits and misses, queries
+/// only the misses, records fresh results into the cache, and merges.
+///
+/// Invariants:
+/// - Cache hits never count toward `unscanned_packages`.
+/// - On querier error for a miss chunk, those packages count as unscanned
+///   and the cache is not updated for them.
+/// - Negative results (no vulns) are cached too, so clean packages stop
+///   being re-queried on every run.
+fn scan_vulns_with_querier_and_cache<Q>(
+    packages: &[(PathBuf, PackageId)],
+    mut querier: Q,
+    mut cache: Option<&mut cache::VulnCache>,
+) -> VulnScanOutcome
 where
     Q: FnMut(&[PackageId]) -> Result<osv::OsvResponse, String>,
 {
     let mut results = HashMap::new();
     let mut unscanned = 0usize;
+    let mut cached_hits = 0usize;
     if packages.is_empty() {
+        return VulnScanOutcome::default();
+    }
+
+    // Split hits from misses. Hits' active vulns go straight into results;
+    // misses fall through to the network path below. Both positive and
+    // negative (no-vulns) hits count toward `cached_hits`.
+    let mut misses: Vec<(PathBuf, PackageId)> = Vec::new();
+    for (path, pkg) in packages {
+        let hit = cache.as_ref().and_then(|c| c.get(pkg));
+        match hit {
+            Some(info) if !info.vulns.is_empty() => {
+                cached_hits += 1;
+                results.insert(path.clone(), info);
+            }
+            Some(_) => {
+                cached_hits += 1;
+            }
+            None => misses.push((path.clone(), pkg.clone())),
+        }
+    }
+
+    if misses.is_empty() {
         return VulnScanOutcome {
             results,
             unscanned_packages: 0,
+            cached_hits,
         };
     }
 
     let mut vuln_ids_to_fetch: Vec<String> = Vec::new();
+    let mut fresh_results: HashMap<PathBuf, SecurityInfo> = HashMap::new();
+    // Tracks chunks whose query succeeded so the cache can record negative
+    // results for packages in those chunks without vulns.
+    let mut succeeded_miss_pkgs: Vec<PackageId> = Vec::new();
 
-    for chunk in packages.chunks(100) {
+    for chunk in misses.chunks(100) {
         let ids: Vec<PackageId> = chunk.iter().map(|(_, id)| id.clone()).collect();
         let response = match querier(&ids) {
             Ok(r) => r,
@@ -151,17 +216,40 @@ where
                 continue;
             }
         };
-
+        succeeded_miss_pkgs.extend(ids);
         for (path, info) in process_osv_response(chunk, &response, &mut vuln_ids_to_fetch) {
-            results.insert(path, info);
+            fresh_results.insert(path, info);
         }
     }
 
     let detail_cache = fetch_fix_versions(&vuln_ids_to_fetch);
-    backfill_and_filter_vulns(&mut results, packages, &detail_cache);
+    backfill_and_filter_vulns(&mut fresh_results, &misses, &detail_cache);
+
+    // Write cache entries for everything we successfully queried (including
+    // negatives), then merge fresh results into the output.
+    if let Some(c) = cache.as_mut() {
+        for pkg in &succeeded_miss_pkgs {
+            let empty = SecurityInfo { vulns: vec![] };
+            let path = misses
+                .iter()
+                .find(|(_, p)| p == pkg)
+                .map(|(p, _)| p.clone());
+            let info = path
+                .as_ref()
+                .and_then(|p| fresh_results.get(p))
+                .unwrap_or(&empty);
+            c.insert(pkg, info);
+        }
+    }
+
+    for (path, info) in fresh_results {
+        results.insert(path, info);
+    }
+
     VulnScanOutcome {
         results,
         unscanned_packages: unscanned,
+        cached_hits,
     }
 }
 
@@ -197,6 +285,79 @@ fn fetch_fix_versions(vuln_ids: &[String]) -> HashMap<String, osv::OsvVulnDetail
 }
 
 pub fn check_versions(packages: &[(PathBuf, PackageId)]) -> VersionCheckOutcome {
+    check_versions_inner(packages, registry::check_latest)
+}
+
+/// Run a version check, consulting `cache` for hits and writing misses back.
+/// Packages present in the cache never reach the registry.
+pub fn check_versions_with_cache(
+    packages: &[(PathBuf, PackageId)],
+    cache: &mut cache::VersionCache,
+) -> VersionCheckOutcome {
+    check_versions_with_cache_inner(packages, registry::check_latest, Some(cache))
+}
+
+/// Cache-aware split/merge wrapper. Tested via an injectable `checker` so we
+/// don't need network. The heavy threaded path is reused for misses.
+fn check_versions_with_cache_inner<F>(
+    packages: &[(PathBuf, PackageId)],
+    checker: F,
+    mut cache: Option<&mut cache::VersionCache>,
+) -> VersionCheckOutcome
+where
+    F: Fn(&PackageId) -> Result<Option<String>, String> + Send + Sync + 'static + Copy,
+{
+    let mut results = HashMap::new();
+    let mut misses: Vec<(PathBuf, PackageId)> = Vec::new();
+    let mut cached_hits = 0usize;
+    for (path, pkg) in packages {
+        match cache.as_ref().and_then(|c| c.get(pkg)) {
+            Some(info) => {
+                // Replay stored result verbatim. Inner check_versions returns
+                // every successful lookup (outdated or not); the UI filters
+                // on is_outdated, so cache hits must surface the same shape.
+                cached_hits += 1;
+                results.insert(path.clone(), info);
+            }
+            None => misses.push((path.clone(), pkg.clone())),
+        }
+    }
+
+    if misses.is_empty() {
+        return VersionCheckOutcome {
+            results,
+            unchecked_packages: 0,
+            cached_hits,
+        };
+    }
+
+    let fresh = check_versions_inner(&misses, checker);
+
+    // Only cache successful lookups. A miss that produced an entry in
+    // fresh.results succeeded; a miss absent from fresh.results failed
+    // (counted in unchecked_packages) and must not pollute the cache.
+    if let Some(c) = cache.as_mut() {
+        for (path, pkg) in &misses {
+            if let Some(info) = fresh.results.get(path) {
+                c.insert(pkg, info);
+            }
+        }
+    }
+
+    for (path, info) in fresh.results {
+        results.insert(path, info);
+    }
+    VersionCheckOutcome {
+        results,
+        unchecked_packages: fresh.unchecked_packages,
+        cached_hits,
+    }
+}
+
+fn check_versions_inner<F>(packages: &[(PathBuf, PackageId)], checker: F) -> VersionCheckOutcome
+where
+    F: Fn(&PackageId) -> Result<Option<String>, String> + Send + Sync + 'static + Copy,
+{
     use std::sync::{Arc, Mutex};
 
     // Track failed lookups so an unreachable registry never appears as
@@ -212,7 +373,7 @@ pub fn check_versions(packages: &[(PathBuf, PackageId)]) -> VersionCheckOutcome 
                 let pkg = pkg.clone();
                 let results = Arc::clone(&results);
                 let unchecked = Arc::clone(&unchecked);
-                std::thread::spawn(move || match registry::check_latest(&pkg) {
+                std::thread::spawn(move || match checker(&pkg) {
                     Ok(Some(latest)) => {
                         let is_outdated = osv::compare_versions(&pkg.version, &latest)
                             == std::cmp::Ordering::Less;
@@ -258,6 +419,7 @@ pub fn check_versions(packages: &[(PathBuf, PackageId)]) -> VersionCheckOutcome 
     VersionCheckOutcome {
         results,
         unchecked_packages,
+        cached_hits: 0,
     }
 }
 
@@ -605,6 +767,203 @@ mod tests {
         backfill_and_filter_vulns(&mut results, &packages, &detail_cache);
         // Orphan entry retained (not in packages → loop body skipped, retain preserves)
         assert_eq!(results.len(), 1);
+    }
+
+    // --- Cache integration ----------------------------------------------
+
+    #[test]
+    fn scan_vulns_with_cache_skips_cached_packages() {
+        use std::cell::RefCell;
+        let pkgs: Vec<(PathBuf, PackageId)> = vec![
+            (PathBuf::from("/a"), pkg("requests", "2.31.0")),
+            (PathBuf::from("/b"), pkg("flask", "2.0.0")),
+            (PathBuf::from("/c"), pkg("django", "4.0.0")),
+        ];
+        let mut cache = cache::VulnCache::with_default_ttl();
+        // Pre-populate cache for two of the three.
+        cache.insert(
+            &pkgs[0].1,
+            &SecurityInfo {
+                vulns: vec![Vulnerability {
+                    id: "CVE-CACHED".into(),
+                    summary: "from cache".into(),
+                    severity: None,
+                    fix_version: None,
+                }],
+            },
+        );
+        cache.insert(&pkgs[1].1, &SecurityInfo { vulns: vec![] });
+
+        let saw_ids: RefCell<Vec<Vec<String>>> = RefCell::new(Vec::new());
+        let out = scan_vulns_with_querier_and_cache(
+            &pkgs,
+            |ids| {
+                saw_ids
+                    .borrow_mut()
+                    .push(ids.iter().map(|i| i.name.clone()).collect());
+                Ok(osv::OsvResponse {
+                    results: ids
+                        .iter()
+                        .map(|_| osv::OsvQueryResult { vulns: vec![] })
+                        .collect(),
+                })
+            },
+            Some(&mut cache),
+        );
+
+        let calls = saw_ids.borrow();
+        assert_eq!(calls.len(), 1, "exactly one chunk for the misses");
+        assert_eq!(
+            calls[0],
+            vec!["django".to_string()],
+            "only the uncached pkg"
+        );
+        assert_eq!(out.unscanned_packages, 0);
+        // Cached vulnerable package must show up in results.
+        let cached_hit = out
+            .results
+            .get(&PathBuf::from("/a"))
+            .expect("cache hit surfaced");
+        assert_eq!(cached_hit.vulns[0].id, "CVE-CACHED");
+        // Negative cache hit for /b → absent from results.
+        assert!(!out.results.contains_key(&PathBuf::from("/b")));
+    }
+
+    #[test]
+    fn scan_vulns_with_cache_all_hits_skips_network() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let pkgs = vec![(PathBuf::from("/a"), pkg("x", "1.0"))];
+        let mut cache = cache::VulnCache::with_default_ttl();
+        cache.insert(&pkgs[0].1, &SecurityInfo { vulns: vec![] });
+
+        let calls = AtomicUsize::new(0);
+        let out = scan_vulns_with_querier_and_cache(
+            &pkgs,
+            |_ids| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(osv::OsvResponse { results: vec![] })
+            },
+            Some(&mut cache),
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "querier never invoked");
+        assert_eq!(out.unscanned_packages, 0);
+        assert!(out.results.is_empty());
+    }
+
+    #[test]
+    fn scan_vulns_with_cache_records_misses_into_cache() {
+        let pkgs = vec![(PathBuf::from("/a"), pkg("clean-pkg", "1.0"))];
+        let mut cache = cache::VulnCache::with_default_ttl();
+        let out = scan_vulns_with_querier_and_cache(
+            &pkgs,
+            |_ids| {
+                Ok(osv::OsvResponse {
+                    results: vec![osv::OsvQueryResult { vulns: vec![] }],
+                })
+            },
+            Some(&mut cache),
+        );
+        assert!(out.results.is_empty());
+        assert!(
+            cache.get(&pkgs[0].1).is_some(),
+            "negative result must be cached"
+        );
+    }
+
+    #[test]
+    fn check_versions_with_cache_skips_cached_packages() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let pkgs: Vec<(PathBuf, PackageId)> = vec![
+            (PathBuf::from("/a"), pkg("requests", "2.31.0")),
+            (PathBuf::from("/b"), pkg("flask", "2.0.0")),
+        ];
+        let mut cache = cache::VersionCache::with_default_ttl();
+        // Pre-cache /a as outdated — should surface without hitting registry.
+        cache.insert(
+            &pkgs[0].1,
+            &VersionInfo {
+                current: "2.31.0".into(),
+                latest: "2.32.0".into(),
+                is_outdated: true,
+            },
+        );
+        // Counter captured by the checker closure.
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        CALLS.store(0, Ordering::SeqCst);
+        let _ = Arc::new(()); // keeps import used
+
+        fn fake_checker(_pkg: &PackageId) -> Result<Option<String>, String> {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            Ok(Some("2.1.0".into()))
+        }
+
+        let out = check_versions_with_cache_inner(&pkgs, fake_checker, Some(&mut cache));
+        assert_eq!(
+            CALLS.load(Ordering::SeqCst),
+            1,
+            "checker called only for miss"
+        );
+        // Cached outdated entry present in results.
+        let a = out.results.get(&PathBuf::from("/a")).expect("cache hit");
+        assert_eq!(a.latest, "2.32.0");
+        // /b got fresh check → now cached + present (2.0.0 < 2.1.0 => outdated).
+        assert!(out.results.contains_key(&PathBuf::from("/b")));
+        assert!(cache.get(&pkgs[1].1).is_some(), "miss got cached");
+    }
+
+    #[test]
+    fn check_versions_with_cache_caches_up_to_date_as_negative() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        CALLS.store(0, Ordering::SeqCst);
+        fn up_to_date(pkg: &PackageId) -> Result<Option<String>, String> {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(pkg.version.clone()))
+        }
+        let pkgs = vec![(PathBuf::from("/a"), pkg("x", "1.0.0"))];
+        let mut cache = cache::VersionCache::with_default_ttl();
+
+        let out = check_versions_with_cache_inner(&pkgs, up_to_date, Some(&mut cache));
+        let entry = out.results.get(&PathBuf::from("/a")).expect("present");
+        assert!(!entry.is_outdated, "up-to-date flagged as current");
+        assert!(cache.get(&pkgs[0].1).is_some(), "up-to-date cached");
+
+        // Second call should skip the network entirely and replay the cache.
+        let out2 = check_versions_with_cache_inner(&pkgs, up_to_date, Some(&mut cache));
+        assert_eq!(CALLS.load(Ordering::SeqCst), 1, "second call reuses cache");
+        let entry2 = out2.results.get(&PathBuf::from("/a")).expect("cache hit");
+        assert!(!entry2.is_outdated);
+    }
+
+    #[test]
+    fn check_versions_with_cache_does_not_cache_when_unchecked_present() {
+        // If any miss failed, we can't tell which ones — avoid polluting cache
+        // with spurious "up-to-date" entries for packages that actually failed.
+        fn fails(_pkg: &PackageId) -> Result<Option<String>, String> {
+            Err("nope".into())
+        }
+        let pkgs = vec![(PathBuf::from("/a"), pkg("x", "1.0.0"))];
+        let mut cache = cache::VersionCache::with_default_ttl();
+        let out = check_versions_with_cache_inner(&pkgs, fails, Some(&mut cache));
+        assert_eq!(out.unchecked_packages, 1);
+        assert!(cache.get(&pkgs[0].1).is_none(), "no cache on failure");
+    }
+
+    #[test]
+    fn scan_vulns_with_cache_failed_chunk_does_not_poison_cache() {
+        let pkgs = vec![(PathBuf::from("/a"), pkg("p", "1.0"))];
+        let mut cache = cache::VulnCache::with_default_ttl();
+        let out = scan_vulns_with_querier_and_cache(
+            &pkgs,
+            |_ids| Err("network down".into()),
+            Some(&mut cache),
+        );
+        assert_eq!(out.unscanned_packages, 1);
+        assert!(
+            cache.get(&pkgs[0].1).is_none(),
+            "failed fetches must not cache"
+        );
     }
 
     #[test]

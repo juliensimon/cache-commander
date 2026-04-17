@@ -164,6 +164,7 @@ impl App {
                 }
                 ScanResult::VulnsScanned(scanned, outcome) => {
                     let unscanned = outcome.unscanned_packages;
+                    let cached_hits = outcome.cached_hits;
                     self.vuln_results.extend(outcome.results);
                     self.vulnscan_in_progress = false;
                     self.recompute_node_status();
@@ -180,30 +181,37 @@ impl App {
                     } else {
                         String::new()
                     };
+                    let cache_suffix = cache_hit_suffix(cached_hits, scanned);
                     if vuln_count > 0 {
                         had_informative_vuln = true;
                         tick_parts.push(format!(
-                            "Scanned {} packages — {} vulnerabilit{} found{}",
+                            "Scanned {} packages — {} vulnerabilit{} found{}{}",
                             scanned,
                             vuln_count,
                             if vuln_count == 1 { "y" } else { "ies" },
-                            incomplete_suffix
+                            incomplete_suffix,
+                            cache_suffix,
                         ));
                     } else if !had_informative_vuln {
                         let tail = if unscanned > 0 {
                             format!(
-                                "scan incomplete — {} package{} unscanned (network error?)",
+                                "scan incomplete — {} package{} unscanned (network error?){}",
                                 unscanned,
-                                if unscanned == 1 { "" } else { "s" }
+                                if unscanned == 1 { "" } else { "s" },
+                                cache_suffix,
                             )
                         } else {
-                            format!("Scanned {} packages — no vulnerabilities found", scanned)
+                            format!(
+                                "Scanned {} packages — no vulnerabilities found{}",
+                                scanned, cache_suffix
+                            )
                         };
                         tick_parts.push(tail);
                     }
                 }
                 ScanResult::VersionsChecked(checked, outcome) => {
                     let unchecked = outcome.unchecked_packages;
+                    let cached_hits = outcome.cached_hits;
                     self.version_results.extend(outcome.results);
                     self.versioncheck_in_progress = false;
                     self.recompute_node_status();
@@ -218,21 +226,26 @@ impl App {
                     } else {
                         String::new()
                     };
+                    let cache_suffix = cache_hit_suffix(cached_hits, checked);
                     if outdated > 0 {
                         had_informative_version = true;
                         tick_parts.push(format!(
-                            "Checked {} packages — {} outdated{}",
-                            checked, outdated, incomplete_suffix
+                            "Checked {} packages — {} outdated{}{}",
+                            checked, outdated, incomplete_suffix, cache_suffix,
                         ));
                     } else if !had_informative_version {
                         let tail = if unchecked > 0 {
                             format!(
-                                "version check incomplete — {} package{} unchecked (network error?)",
+                                "version check incomplete — {} package{} unchecked (network error?){}",
                                 unchecked,
-                                if unchecked == 1 { "" } else { "s" }
+                                if unchecked == 1 { "" } else { "s" },
+                                cache_suffix,
                             )
                         } else {
-                            format!("Checked {} packages — all up to date", checked)
+                            format!(
+                                "Checked {} packages — all up to date{}",
+                                checked, cache_suffix
+                            )
                         };
                         tick_parts.push(tail);
                     }
@@ -937,6 +950,21 @@ impl App {
     }
 }
 
+/// Format a "X/Y cached (Z%)" suffix for the status bar when cache hits
+/// are non-zero. Returns an empty string when nothing was served from
+/// cache — on the first run after `rm ~/Library/Caches/ccmd/*.json` this
+/// keeps the message clean.
+///
+/// The percentage is computed against the attempted total, not against
+/// cache+misses, so a partial-failure run still produces a stable ratio.
+pub(crate) fn cache_hit_suffix(cached_hits: usize, attempted: usize) -> String {
+    if cached_hits == 0 || attempted == 0 {
+        return String::new();
+    }
+    let pct = (cached_hits as f64 / attempted as f64 * 100.0).round() as u64;
+    format!(" [cache: {}/{} ({}%)]", cached_hits, attempted, pct)
+}
+
 fn extract_package_name(name: &str) -> String {
     let stripped = if let Some(rest) = name.strip_prefix('[') {
         rest.split_once("] ").map(|(_, n)| n).unwrap_or(name)
@@ -1311,6 +1339,7 @@ mod tests {
             crate::security::VulnScanOutcome {
                 results,
                 unscanned_packages: 0,
+                cached_hits: 0,
             },
         ))
         .unwrap();
@@ -1320,6 +1349,57 @@ mod tests {
         let msg = app.status_msg.as_deref().unwrap_or("");
         assert!(msg.contains("1 vulnerability"), "singular grammar: {msg}");
         assert!(app.node_status.get(&path).unwrap().has_vuln);
+    }
+
+    #[test]
+    fn cache_hit_suffix_formats_ratio_when_hits_present() {
+        assert_eq!(cache_hit_suffix(0, 10), "", "zero hits → no suffix");
+        assert_eq!(cache_hit_suffix(5, 0), "", "zero attempted → no suffix");
+        assert_eq!(cache_hit_suffix(10, 10), " [cache: 10/10 (100%)]");
+        assert_eq!(cache_hit_suffix(1, 4), " [cache: 1/4 (25%)]");
+        assert_eq!(cache_hit_suffix(2, 3), " [cache: 2/3 (67%)]");
+    }
+
+    #[test]
+    fn tick_vulns_surfaces_cache_ratio_in_status() {
+        let (mut app, tx, _rx) = build_app(bare_config());
+        app.tree.set_roots(vec![mk_node("ok", 1, CacheKind::Cargo)]);
+        tx.send(ScanResult::VulnsScanned(
+            10,
+            crate::security::VulnScanOutcome {
+                results: HashMap::new(),
+                unscanned_packages: 0,
+                cached_hits: 7,
+            },
+        ))
+        .unwrap();
+        app.tick();
+        let msg = app.status_msg.as_deref().unwrap_or("");
+        assert!(
+            msg.contains("cache: 7/10 (70%)"),
+            "status must show cache ratio: {msg}"
+        );
+    }
+
+    #[test]
+    fn tick_versions_surfaces_cache_ratio_in_status() {
+        let (mut app, tx, _rx) = build_app(bare_config());
+        app.tree.set_roots(vec![mk_node("ok", 1, CacheKind::Cargo)]);
+        tx.send(ScanResult::VersionsChecked(
+            4,
+            crate::security::VersionCheckOutcome {
+                results: HashMap::new(),
+                unchecked_packages: 0,
+                cached_hits: 4,
+            },
+        ))
+        .unwrap();
+        app.tick();
+        let msg = app.status_msg.as_deref().unwrap_or("");
+        assert!(
+            msg.contains("cache: 4/4 (100%)"),
+            "status must show 100% cache ratio: {msg}"
+        );
     }
 
     #[test]
@@ -1346,6 +1426,7 @@ mod tests {
             crate::security::VulnScanOutcome {
                 results: HashMap::new(),
                 unscanned_packages: 3,
+                cached_hits: 0,
             },
         ))
         .unwrap();
@@ -1381,6 +1462,7 @@ mod tests {
             crate::security::VersionCheckOutcome {
                 results,
                 unchecked_packages: 0,
+                cached_hits: 0,
             },
         ))
         .unwrap();
@@ -1416,6 +1498,7 @@ mod tests {
             crate::security::VersionCheckOutcome {
                 results: HashMap::new(),
                 unchecked_packages: 4,
+                cached_hits: 0,
             },
         ))
         .unwrap();
@@ -1491,6 +1574,7 @@ mod tests {
             crate::security::VulnScanOutcome {
                 results: vuln,
                 unscanned_packages: 0,
+                cached_hits: 0,
             },
         ))
         .unwrap();
@@ -1509,6 +1593,7 @@ mod tests {
             crate::security::VersionCheckOutcome {
                 results: versions,
                 unchecked_packages: 0,
+                cached_hits: 0,
             },
         ))
         .unwrap();
@@ -1563,6 +1648,7 @@ mod tests {
             crate::security::VulnScanOutcome {
                 results: vuln,
                 unscanned_packages: 0,
+                cached_hits: 0,
             },
         ))
         .unwrap();
