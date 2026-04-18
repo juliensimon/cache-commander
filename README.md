@@ -5,7 +5,7 @@
 [![Release](https://github.com/juliensimon/cache-commander/actions/workflows/release.yml/badge.svg)](https://github.com/juliensimon/cache-commander/releases)
 [![GitHub release](https://img.shields.io/github/v/release/juliensimon/cache-commander)](https://github.com/juliensimon/cache-commander/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-1.85%2B-orange?logo=rust)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/Rust-1.88%2B-orange?logo=rust)](https://www.rust-lang.org)
 [![macOS](https://img.shields.io/badge/macOS-x86__64%20%7C%20ARM-black?logo=apple)](https://github.com/juliensimon/cache-commander/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64%20%7C%20ARM-black?logo=linux&logoColor=white)](https://github.com/juliensimon/cache-commander/releases)
 [![crates.io](https://img.shields.io/crates/v/ccmd)](https://crates.io/crates/ccmd)
@@ -17,7 +17,7 @@ A terminal UI (TUI) for exploring, auditing, and cleaning developer cache direct
 
 Developer machines accumulate tens of gigabytes of invisible cache data — ML models, package archives, build artifacts, downloaded bottles. `ccmd` makes it all visible, scannable for vulnerabilities, and safely deletable.
 
-![Cache Commander screenshot](screenshot.png)
+![Cache Commander screenshot](https://raw.githubusercontent.com/juliensimon/cache-commander/master/screenshot.png)
 
 ## Why
 
@@ -254,11 +254,11 @@ Total: ~53.6 GiB across 2,167 items
 
 > "find the most vulnerable npm packages"
 
-![Vulnerable npm packages](ccmd-mcp-vuln-npm.png)
+![Vulnerable npm packages](docs/ccmd-mcp-vuln-npm.png)
 
 > "find outdated packages in my cache"
 
-![Outdated packages](ccmd-mcp-outdated-uv.png)
+![Outdated packages](docs/ccmd-mcp-outdated-uv.png)
 
 Available tools: `list_caches`, `get_summary`, `search_packages`, `get_package_details`, `scan_vulnerabilities`, `check_outdated`, `preview_delete`, `delete_packages`. See [docs/mcp.md](docs/mcp.md) for full details.
 
