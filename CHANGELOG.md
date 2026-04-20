@@ -3,6 +3,26 @@
 ## [Unreleased]
 
 ### Added
+- **SwiftPM provider (#11)**: detects `~/Library/Caches/org.swift.swiftpm`
+  (macOS) and `~/.cache/org.swift.swiftpm` (Linux). Classifies
+  `repositories/` as Caution (re-clone cost on rebuild) and
+  `artifacts/`/`manifests/` as Safe. Repository directories render with
+  the trailing git-URL hash stripped (e.g. `swift-collections-abc1234`
+  → `swift-collections`). **No OSV or version-check**: package identity
+  in SwiftPM's `repositories/` requires git-ref parsing that is too
+  brittle for v1, and OSV's `SwiftURL` coverage is sparse. Pressing `c`
+  on a SwiftPM entry is a no-op by design — Swift package upgrades are
+  project-local (`Package.swift` / `Package.resolved`), not global.
+- **Xcode provider (#17)**: detects `~/Library/Developer/Xcode/DerivedData`,
+  `~/Library/Developer/Xcode/iOS DeviceSupport`, and
+  `~/Library/Developer/CoreSimulator/Caches` — often the single largest
+  caches on macOS dev machines (DerivedData alone is routinely 50–200 GB).
+  DerivedData is classified as Caution (rebuild takes 5–30 min); the
+  other two are Safe. DerivedData project directories show the original
+  workspace path (extracted from `Info.plist` `WORKSPACE_PATH`) in the
+  detail panel so you can confirm which project you're about to delete.
+  **No OSV, no version-check, no upgrade command** — these are build
+  artifacts, not packages.
 - **Maven / Gradle upgrade snippets**: pressing `c` on a Maven or Gradle
   artifact now copies a paste-ready snippet to the clipboard — a
   `<dependency>…</dependency>` block for Maven, an `implementation

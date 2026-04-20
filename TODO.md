@@ -10,8 +10,8 @@
 - [ ] **Maven** — `~/.m2/repository`
 - [ ] **Gradle** — `~/.gradle/caches`, `~/.gradle/wrapper/dists`
 - [ ] **CocoaPods** — `~/Library/Caches/CocoaPods`
-- [ ] **Xcode DerivedData** — `~/Library/Developer/Xcode/DerivedData`
-- [ ] **Swift Package Manager** — `~/Library/Caches/org.swift.swiftpm`
+- [x] **Xcode DerivedData** — `~/Library/Developer/Xcode/DerivedData` (#17)
+- [x] **Swift Package Manager** — `~/Library/Caches/org.swift.swiftpm` (#11)
 - [ ] **Composer** (PHP) — `~/.cache/composer`, `~/.composer/cache`
 - [ ] **Ruby gems** — `~/.gem`, `~/.bundle/cache`
 - [ ] **Bazel** — `~/.cache/bazel`
