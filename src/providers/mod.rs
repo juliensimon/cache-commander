@@ -379,6 +379,17 @@ pub fn safety(kind: CacheKind, path: &Path) -> SafetyLevel {
             // Path is the root itself or outside the known layout.
             SafetyLevel::Caution
         }
+        CacheKind::Xcode => {
+            // Only DerivedData triggers Caution (rebuild cost). iOS
+            // DeviceSupport and CoreSimulator caches are Safe. Component
+            // matching avoids L1 substring leaks (DerivedData-backup stays
+            // on the Safe fall-through).
+            if has_adjacent_components(path, "Xcode", "DerivedData") {
+                SafetyLevel::Caution
+            } else {
+                SafetyLevel::Safe
+            }
+        }
         CacheKind::Unknown => SafetyLevel::Caution,
         _ => SafetyLevel::Safe,
     }
@@ -1546,5 +1557,33 @@ mod tests {
             safety(CacheKind::SwiftPm, &confusable),
             SafetyLevel::Caution
         );
+    }
+
+    // --- Xcode safety ---
+
+    #[test]
+    fn safety_xcode_derived_data_is_caution() {
+        let path = PathBuf::from("/Users/j/Library/Developer/Xcode/DerivedData/MyApp-abc");
+        assert_eq!(safety(CacheKind::Xcode, &path), SafetyLevel::Caution);
+    }
+
+    #[test]
+    fn safety_xcode_ios_device_support_is_safe() {
+        let path =
+            PathBuf::from("/Users/j/Library/Developer/Xcode/iOS DeviceSupport/17.4 (21E213)");
+        assert_eq!(safety(CacheKind::Xcode, &path), SafetyLevel::Safe);
+    }
+
+    #[test]
+    fn safety_xcode_core_simulator_caches_is_safe() {
+        let path = PathBuf::from("/Users/j/Library/Developer/CoreSimulator/Caches/something");
+        assert_eq!(safety(CacheKind::Xcode, &path), SafetyLevel::Safe);
+    }
+
+    #[test]
+    fn safety_xcode_rejects_confusable_suffix_derived_data() {
+        // L1: DerivedData-backup must not be classified as Caution-DerivedData.
+        let path = PathBuf::from("/Users/j/Library/Developer/Xcode/DerivedData-backup/junk");
+        assert_eq!(safety(CacheKind::Xcode, &path), SafetyLevel::Safe);
     }
 }
