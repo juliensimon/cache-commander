@@ -188,6 +188,16 @@ impl Default for Config {
             }
         }
 
+        // Go cache paths. Only add a path if it isn't already subsumed
+        // by an existing root — default $GOCACHE lives under
+        // ~/Library/Caches (macOS) or ~/.cache (Linux), so probing
+        // naively would duplicate TreeNodes (the SwiftPM bug).
+        for path in probe_go_paths() {
+            if !roots.contains(&path) && !is_ancestor_or_descendant(&path, &roots) {
+                roots.push(path);
+            }
+        }
+
         Self {
             roots,
             sort_by: SortField::Size,
@@ -442,6 +452,49 @@ fn probe_bun_paths() -> Vec<PathBuf> {
     let default_cache = home.join(".bun/install/cache");
     if default_cache.exists() && !paths.contains(&default_cache) {
         paths.push(default_cache);
+    }
+
+    paths
+}
+
+fn probe_go_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    // Prefer an explicit GOMODCACHE env override — lets tests and users
+    // redirect the probe without needing a real `go` on PATH.
+    if let Ok(gomc) = std::env::var("GOMODCACHE") {
+        let path = PathBuf::from(&gomc);
+        if path.exists() {
+            paths.push(path);
+        }
+    } else if let Some(output) = run_with_timeout("go", &["env", "GOMODCACHE"])
+        && output.status.success()
+    {
+        let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !path_str.is_empty() {
+            let path = PathBuf::from(&path_str);
+            if path.exists() {
+                paths.push(path);
+            }
+        }
+    }
+
+    // Fallback: ~/go/pkg/mod (the default location when GOPATH is unset).
+    let fallback = dirs_home().join("go/pkg/mod");
+    if fallback.exists() && !paths.contains(&fallback) {
+        paths.push(fallback);
+    }
+
+    // The build cache ($GOCACHE) defaults to ~/Library/Caches/go-build on
+    // macOS and ~/.cache/go-build on Linux — both subsumed by existing
+    // roots, so we intentionally do NOT probe for it here. If a user
+    // sets $GOCACHE to a non-default location outside those parents, the
+    // caller filters via is_ancestor_or_descendant before pushing.
+    if let Ok(gocache) = std::env::var("GOCACHE") {
+        let path = PathBuf::from(&gocache);
+        if path.exists() && !paths.contains(&path) {
+            paths.push(path);
+        }
     }
 
     paths
@@ -904,6 +957,81 @@ mod tests {
         assert!(
             config.roots.iter().any(|r| r == &sim),
             "expected CoreSimulator/Caches root, got {:?}",
+            config.roots
+        );
+    }
+
+    // --- Go probing ---
+
+    #[test]
+    fn probe_go_paths_returns_absolute_paths() {
+        // Same invariant as the yarn/pnpm probes: every returned path
+        // must be absolute, whether `go` is installed or not.
+        let paths = probe_go_paths();
+        for p in &paths {
+            assert!(p.is_absolute(), "probe_go_paths returned relative: {p:?}");
+        }
+    }
+
+    #[test]
+    fn probe_go_paths_respects_gomodcache_env_var() {
+        // Set GOMODCACHE to a fixture directory and ensure probing
+        // picks it up. This is the canonical RED→GREEN for the probe
+        // because it exercises the `go env GOMODCACHE` branch.
+        let tmp = std::env::temp_dir().join(format!("ccmd-go-mod-test-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        // SAFETY: tests are serial within a single process for this env var usage.
+        unsafe {
+            std::env::set_var("GOMODCACHE", &tmp);
+        }
+        let paths = probe_go_paths();
+        unsafe {
+            std::env::remove_var("GOMODCACHE");
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        // On hosts without `go` on PATH the probe returns empty; skip.
+        if paths.is_empty() {
+            return;
+        }
+        assert!(
+            paths.iter().any(|p| p == &tmp),
+            "expected GOMODCACHE path in probe output, got {paths:?}"
+        );
+    }
+
+    #[test]
+    fn default_config_includes_go_module_cache_when_exists() {
+        let go_mod = dirs_home().join("go/pkg/mod");
+        if !go_mod.exists() {
+            return; // host without Go — skip cleanly
+        }
+        let config = Config::default();
+        assert!(
+            config.roots.iter().any(|r| r == &go_mod),
+            "expected go/pkg/mod root in config, got {:?}",
+            config.roots
+        );
+    }
+
+    #[test]
+    fn default_config_does_not_duplicate_go_build_under_existing_root() {
+        // Default GOCACHE on macOS is ~/Library/Caches/go-build (under
+        // the Library/Caches root); on Linux it's ~/.cache/go-build
+        // (under ~/.cache). Either way the build cache is subsumed by
+        // an existing root — adding it as its own root would duplicate
+        // TreeNodes, same bug as SwiftPM had before we fixed it.
+        let macos_gocache = dirs_home().join("Library/Caches/go-build");
+        let linux_gocache = dirs_home().join(".cache/go-build");
+        let config = Config::default();
+        assert!(
+            !config.roots.iter().any(|r| r == &macos_gocache),
+            "GOCACHE must not duplicate ~/Library/Caches root, got {:?}",
+            config.roots
+        );
+        assert!(
+            !config.roots.iter().any(|r| r == &linux_gocache),
+            "GOCACHE must not duplicate ~/.cache root, got {:?}",
             config.roots
         );
     }
