@@ -14,15 +14,31 @@ use std::path::Path;
 pub fn semantic_name(path: &Path) -> Option<String> {
     let name = path.file_name()?.to_string_lossy().to_string();
 
-    // Build cache entries are opaque content-addressed hex blobs; no
-    // meaningful semantic name.
-    if path_has_component(path, "go-build") {
+    // Module zip in the canonical download layout takes priority:
+    // .../cache/download/<module>/@v/<version>.zip. Checking this
+    // FIRST ensures a module whose import path is literally `go-build`
+    // or `sumdb` (both legal Go module-path segments) isn't
+    // mis-classified as a build-cache/sumdb internal entry below.
+    if let Some((module, version)) = parse_download_zip(path) {
+        return Some(format!("{module} {version}"));
+    }
+
+    // sumdb internal checksum data — matched only on the actual
+    // `cache/download/sumdb/` adjacency. Must be checked BEFORE
+    // parse_extracted_module_dir, because a sumdb lookup filename like
+    // `.../lookup/github.com/foo/bar@v1.0.0` ends in `@vX.Y.Z` and
+    // would otherwise be mis-parsed as an extracted module dir.
+    if is_under_cache_sumdb(path) {
         return None;
     }
 
-    // sumdb entries under cache/download/ are internal checksum data;
-    // the user has no use for per-file names there.
-    if path_has_component(path, "sumdb") {
+    // Extracted module directory: .../pkg/mod/<module>@<version>
+    if let Some((module, version)) = parse_extracted_module_dir(path) {
+        return Some(format!("{module} {version}"));
+    }
+
+    // Build cache entries are opaque content-addressed hex blobs.
+    if is_under_build_cache(path) {
         return None;
     }
 
@@ -31,27 +47,36 @@ pub fn semantic_name(path: &Path) -> Option<String> {
         return None;
     }
 
-    // Module zip in the canonical download layout:
-    // .../cache/download/<module>/@v/<version>.zip
-    if let Some((module, version)) = parse_download_zip(path) {
-        return Some(format!("{module} {version}"));
-    }
-
-    // Extracted module directory: .../pkg/mod/<module>@<version>
-    if let Some((module, version)) = parse_extracted_module_dir(path) {
-        return Some(format!("{module} {version}"));
-    }
-
     None
 }
 
-fn path_has_component(path: &Path, target: &str) -> bool {
-    path.components().any(|c| c.as_os_str() == target)
+/// True iff `path` is somewhere under a Go build-cache root (i.e. the
+/// `go-build` component sits adjacent to a well-known GOCACHE parent).
+/// We do NOT treat any `go-build` anywhere in the path as build-cache,
+/// because `go-build` is a legal Go module-path segment on its own.
+fn is_under_build_cache(path: &Path) -> bool {
+    // Known GOCACHE parents: `Caches` (macOS, under `~/Library/Caches`)
+    // or `.cache` (Linux XDG). The check is "adjacent components
+    // <parent> / go-build", which matches the canonical default
+    // locations and a reasonable set of user-set $GOCACHE overrides
+    // under other cache directories.
+    super::has_adjacent_components(path, "Caches", "go-build")
+        || super::has_adjacent_components(path, ".cache", "go-build")
+}
+
+/// True iff `path` points into the `cache/download/sumdb/` checksum-db
+/// subtree (whose layout has `download` immediately above `sumdb`).
+fn is_under_cache_sumdb(path: &Path) -> bool {
+    super::has_adjacent_components(path, "download", "sumdb")
 }
 
 /// Parse `.../cache/download/<module-path>/@v/<version>.zip` into
 /// `(decoded-module, version)`. The module path is the chain of
-/// components between `download/` and `@v/`, joined by `/`.
+/// components between the canonical `cache/download` pair and `@v/`,
+/// joined by `/`. We anchor on the `cache/download` pair (not on any
+/// component named `download`) because `download` is a legal Go
+/// module-path element — e.g. `github.com/foo/download` must not trip
+/// the loop early.
 fn parse_download_zip(path: &Path) -> Option<(String, String)> {
     let name = path.file_name()?.to_string_lossy().to_string();
     let version = name.strip_suffix(".zip")?.to_string();
@@ -64,13 +89,18 @@ fn parse_download_zip(path: &Path) -> Option<(String, String)> {
         return None;
     }
 
-    // Walk up from `@v`'s parent to the `download` marker, collecting
-    // module-path components.
+    // Walk up from `@v`'s parent, collecting module-path components
+    // until we reach a `download` whose parent is `cache`.
     let mut components: Vec<String> = Vec::new();
     let mut current = at_v.parent()?;
     loop {
         let comp = current.file_name()?.to_string_lossy().to_string();
-        if comp == "download" {
+        if comp == "download"
+            && current
+                .parent()
+                .and_then(|p| p.file_name())
+                .is_some_and(|n| n == "cache")
+        {
             break;
         }
         components.push(decode_module_path(&comp));
@@ -159,8 +189,11 @@ pub fn package_id(path: &Path) -> Option<super::PackageId> {
     if !name.ends_with(".zip") {
         return None;
     }
-    // sumdb entries live under cache/download/ but aren't packages.
-    if path_has_component(path, "sumdb") {
+    // sumdb `.zip` entries (if any ever appeared) aren't packages.
+    // The real sumdb layout is `cache/download/sumdb/...` without any
+    // `.zip`, but guard anyway. This check uses the tight
+    // `download/sumdb` adjacency, NOT any path component named `sumdb`.
+    if is_under_cache_sumdb(path) {
         return None;
     }
     let (module, version) = parse_download_zip(path)?;
@@ -193,8 +226,19 @@ pub fn pre_delete(path: &Path) -> Result<(), String> {
 fn chmod_plus_w_recursive(path: &Path) {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
-    // Set the entry itself writable first so we can descend into it.
+    // symlink_metadata does NOT follow symlinks — we inspect the
+    // link itself. fs::set_permissions, however, DOES follow on
+    // Unix, so we must explicitly skip symlinks: a malicious or
+    // accidental symlink inside the module tree pointing at
+    // `/etc`, `~/.ssh`, or another cache must not get its target
+    // chmod'd via our walk. Skipping is safe — Go never creates
+    // symlinks in the module cache, so no real Go tree contains
+    // them; if one does, it's something the user (or an attacker)
+    // put there and we shouldn't escalate its permissions.
     if let Ok(metadata) = fs::symlink_metadata(path) {
+        if metadata.file_type().is_symlink() {
+            return;
+        }
         let mode = metadata.permissions().mode();
         // Add owner write (0o200). Leave group/other bits untouched.
         let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o200));
@@ -373,6 +417,51 @@ mod tests {
         }
     }
 
+    // L1 edge cases: module path segments that happen to match our
+    // special-case component names must still produce a semantic name
+    // and PackageId. Go module path elements allow `letter`, `digit`,
+    // `.`, `-`, `_`, `~` — so `go-build`, `sumdb`, `download` are all
+    // legal path elements.
+
+    #[test]
+    fn semantic_name_module_named_go_build_is_not_suppressed() {
+        // github.com/foo/go-build is a valid Go module path. The .zip
+        // must produce a semantic name (build-cache classification
+        // only applies when the path is actually under a GOCACHE root).
+        let path = PathBuf::from(
+            "/Users/j/go/pkg/mod/cache/download/github.com/foo/go-build/@v/v1.0.0.zip",
+        );
+        assert_eq!(
+            semantic_name(&path),
+            Some("github.com/foo/go-build v1.0.0".into())
+        );
+    }
+
+    #[test]
+    fn semantic_name_module_named_sumdb_is_not_suppressed() {
+        // `sumdb` is a legal module-path segment too.
+        let path =
+            PathBuf::from("/Users/j/go/pkg/mod/cache/download/example.com/sumdb/@v/v0.1.0.zip");
+        assert_eq!(
+            semantic_name(&path),
+            Some("example.com/sumdb v0.1.0".into())
+        );
+    }
+
+    #[test]
+    fn semantic_name_module_named_download_is_not_suppressed() {
+        // A module literally named `download` used to trip
+        // parse_download_zip's loop (it broke on the first `download`
+        // it saw).
+        let path = PathBuf::from(
+            "/Users/j/go/pkg/mod/cache/download/github.com/foo/download/@v/v2.0.0.zip",
+        );
+        assert_eq!(
+            semantic_name(&path),
+            Some("github.com/foo/download v2.0.0".into())
+        );
+    }
+
     // --- package_id ---
 
     #[test]
@@ -441,6 +530,24 @@ mod tests {
             "/Users/j/go/pkg/mod/cache/download/sumdb/sum.golang.org/lookup/github.com/foo/bar@v1.0.0",
         );
         assert_eq!(package_id(&path), None);
+    }
+
+    #[test]
+    fn package_id_module_named_go_build_is_not_suppressed() {
+        let path = PathBuf::from(
+            "/Users/j/go/pkg/mod/cache/download/github.com/foo/go-build/@v/v1.0.0.zip",
+        );
+        let id = package_id(&path).expect("expected PackageId for module named 'go-build'");
+        assert_eq!(id.name, "github.com/foo/go-build");
+        assert_eq!(id.version, "v1.0.0");
+    }
+
+    #[test]
+    fn package_id_module_named_sumdb_is_not_suppressed() {
+        let path =
+            PathBuf::from("/Users/j/go/pkg/mod/cache/download/example.com/sumdb/@v/v0.1.0.zip");
+        let id = package_id(&path).expect("expected PackageId for module named 'sumdb'");
+        assert_eq!(id.name, "example.com/sumdb");
     }
 
     // --- metadata ---
@@ -548,5 +655,39 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let ghost = tmp.path().join("pkg/mod/does-not-exist");
         assert!(pre_delete(&ghost).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pre_delete_does_not_follow_symlinks_outside_subtree() {
+        // Security guard: a module tree containing a symlink pointing
+        // OUTSIDE the subtree must not be chmod'd via that symlink.
+        // Rust's fs::set_permissions follows symlinks on Unix, so the
+        // hook must skip them explicitly.
+        //
+        // We exercise the bug by freezing an outside file at a precise
+        // mode (0o400) and pointing a symlink DIRECTLY at the file. If
+        // the hook follows the link, fs::set_permissions adds 0o200
+        // (owner-write) to the file — observable via a post-mode check.
+        use std::fs;
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let tmp = tempfile::tempdir().unwrap();
+        let outside_file = tmp.path().join("do-not-touch.txt");
+        fs::write(&outside_file, "keep").unwrap();
+        fs::set_permissions(&outside_file, fs::Permissions::from_mode(0o400)).unwrap();
+
+        let module = tmp.path().join("pkg/mod/example.com/mod@v1.0.0");
+        fs::create_dir_all(&module).unwrap();
+        let trap = module.join("escape.txt");
+        // Symlink inside the module pointing directly at the file.
+        symlink(&outside_file, &trap).unwrap();
+
+        pre_delete(&module).expect("pre_delete should succeed");
+
+        let after_mode = fs::metadata(&outside_file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            after_mode, 0o400,
+            "symlink target was chmod'd by pre_delete — hook follows symlinks out of the subtree"
+        );
     }
 }

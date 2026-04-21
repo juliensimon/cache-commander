@@ -22,7 +22,6 @@ use ccmd::providers::{self, SafetyLevel};
 use ccmd::tree::node::CacheKind;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::Duration;
 
 fn is_available(cmd: &str) -> bool {
     Command::new(cmd)
@@ -223,6 +222,4 @@ fn e2e_go_discovery_vuln_scan_version_check_and_delete() {
     drop(gomodcache);
     drop(gocache);
     drop(gopath);
-    // Silence unused Duration import (used for potential future timeouts).
-    let _ = Duration::from_secs(0);
 }

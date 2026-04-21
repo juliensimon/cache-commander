@@ -87,11 +87,11 @@ Classification uses component-level matching (L1), not substring.
 
 - OSV ecosystem `Go` — no `registry.rs` arm needed for OSV (dispatched by ecosystem string).
 - Version-check registry: `https://proxy.golang.org/<module-path>/@v/list` returns newline-delimited versions (UTF-8, no JSON). Parser picks the highest non-pseudo semver:
-  - Skip lines matching the pseudo-version regex `v0\.0\.0-\d{14}-[0-9a-f]{12}` (timestamped git-hash format).
+  - Skip lines that look like pseudo-versions. Per Go's three pseudo-version forms, the rule is: the second-to-last `-` segment's last dot-piece is 14 digits AND the last `-` segment is 12 hex chars. This covers `v0.0.0-YYYYMMDDHHMMSS-<12hex>`, `vX.Y.Z-pre.0.YYYYMMDDHHMMSS-<12hex>`, and `vX.Y.(Z+1)-0.YYYYMMDDHHMMSS-<12hex>`.
   - Skip lines ending in `+incompatible` when a non-incompatible option exists; fall back to `+incompatible` if that's all there is.
   - Compare via the existing `compare_versions` helper; L3 lesson says pre-release (`-alpha.1`) must compare correctly.
 
-Module path in the URL uses the **decoded** form (no bang-escapes), per proxy.golang.org spec. But the module path stored in `PackageId.name` is decoded already, so the URL builder just URL-escapes slashes-as-slashes and passes through.
+Module path in the URL uses the Go module proxy's **escaped** form — uppercase ASCII → `!<lower>` per the proxy protocol. `PackageId.name` stores the decoded form for display and OSV parity, so the URL builder re-applies the bang-escape via `encode_go_module_path`. (Go's module-path charset excludes `!`, so no `!!` round-trip is needed: `golang.org/x/mod/module.CheckPath` rejects `!` in decoded paths, and `UnescapePath` rejects `!!` as malformed — confirmed empirically against the upstream library.)
 
 ## New architecture: pre-delete hook
 

@@ -973,29 +973,37 @@ mod tests {
         }
     }
 
+    /// Process-wide lock for tests that mutate environment variables.
+    /// Rust 2024 makes `set_var` unsafe specifically because tests
+    /// run in parallel by default and env-var mutations race with
+    /// other threads reading them. Tests that touch env vars should
+    /// take this lock first.
+    fn env_var_test_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
     #[test]
     fn probe_go_paths_respects_gomodcache_env_var() {
         // Set GOMODCACHE to a fixture directory and ensure probing
         // picks it up. This is the canonical RED→GREEN for the probe
-        // because it exercises the `go env GOMODCACHE` branch.
-        let tmp = std::env::temp_dir().join(format!("ccmd-go-mod-test-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
-        // SAFETY: tests are serial within a single process for this env var usage.
+        // because it exercises the env branch without needing `go` on
+        // PATH. Unlike the previous version, we no longer short-circuit
+        // on an empty result — the env-var branch runs whether or not
+        // `go` is installed, so an empty paths vector here IS a failure.
+        let _guard = env_var_test_lock().lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: held across both set/remove under env_var_test_lock.
         unsafe {
-            std::env::set_var("GOMODCACHE", &tmp);
+            std::env::set_var("GOMODCACHE", tmp.path());
         }
         let paths = probe_go_paths();
         unsafe {
             std::env::remove_var("GOMODCACHE");
         }
-        let _ = std::fs::remove_dir_all(&tmp);
 
-        // On hosts without `go` on PATH the probe returns empty; skip.
-        if paths.is_empty() {
-            return;
-        }
         assert!(
-            paths.iter().any(|p| p == &tmp),
+            paths.iter().any(|p| p == tmp.path()),
             "expected GOMODCACHE path in probe output, got {paths:?}"
         );
     }

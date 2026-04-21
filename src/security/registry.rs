@@ -42,21 +42,31 @@ pub fn parse_maven_latest(xml: &str) -> Option<String> {
     extract_tag(xml, "release").or_else(|| extract_tag(xml, "latest"))
 }
 
-/// Is `v` a Go pseudo-version of the form `vX.Y.Z-YYYYMMDDHHMMSS-<12hex>`?
-/// Used to filter commit-timestamp placeholders out of proxy.golang.org's
-/// /@v/list output so users aren't told their stable v1.2.3 is "outdated"
-/// compared to some nameless commit from last week.
+/// Is `v` a Go pseudo-version? Per
+/// https://go.dev/ref/mod#pseudo-versions there are three forms:
+///   1. `vX.0.0-YYYYMMDDHHMMSS-<12hex>`                        (no tagged release)
+///   2. `vX.Y.Z-pre.0.YYYYMMDDHHMMSS-<12hex>`                  (after a tagged pre-release)
+///   3. `vX.Y.(Z+1)-0.YYYYMMDDHHMMSS-<12hex>`                  (after a tagged release)
+///
+/// The common shape: the last two `-`-delimited segments are
+/// `[<prerelease>.]YYYYMMDDHHMMSS` and `<12hex>`. The 14-digit
+/// timestamp is always the final dot-separated piece of the
+/// second-to-last `-` segment.
 fn is_go_pseudo_version(v: &str) -> bool {
     let parts: Vec<&str> = v.split('-').collect();
     if parts.len() < 3 {
         return false;
     }
-    let ts = parts[parts.len() - 2];
     let hash = parts[parts.len() - 1];
-    ts.len() == 14
-        && ts.chars().all(|c| c.is_ascii_digit())
-        && hash.len() == 12
-        && hash.chars().all(|c| c.is_ascii_hexdigit())
+    if hash.len() != 12 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        return false;
+    }
+    // The timestamp chunk may be bare (`YYYYMMDDHHMMSS`) or suffixed
+    // (`0.YYYYMMDDHHMMSS`, `pre.0.YYYYMMDDHHMMSS`). Take the last
+    // dot-separated piece and check the 14-digit rule.
+    let ts_chunk = parts[parts.len() - 2];
+    let ts = ts_chunk.rsplit('.').next().unwrap_or(ts_chunk);
+    ts.len() == 14 && ts.chars().all(|c| c.is_ascii_digit())
 }
 
 /// Parse `proxy.golang.org/<module>/@v/list` — newline-delimited versions.
@@ -403,6 +413,24 @@ mod tests {
             parse_go_proxy_list(body),
             Some("v0.0.0-20220202130000-beefcafe1234".into())
         );
+    }
+
+    #[test]
+    fn parse_go_proxy_list_skips_pseudo_version_after_tagged_release_form() {
+        // Form 3 per Go pseudo-version spec:
+        // vX.Y.(Z+1)-0.YYYYMMDDHHMMSS-<12hex>
+        // (used when there was an earlier tagged release).
+        let body = "v1.5.0\nv1.5.1-0.20210101120000-abcdef123456\n";
+        assert_eq!(parse_go_proxy_list(body), Some("v1.5.0".into()));
+    }
+
+    #[test]
+    fn parse_go_proxy_list_skips_pseudo_version_after_prerelease_form() {
+        // Form 2 per Go pseudo-version spec:
+        // vX.Y.Z-pre.0.YYYYMMDDHHMMSS-<12hex>
+        // (used when there was an earlier tagged pre-release).
+        let body = "v1.5.0\nv1.5.1-beta.0.20210101120000-abcdef123456\n";
+        assert_eq!(parse_go_proxy_list(body), Some("v1.5.0".into()));
     }
 
     #[test]
