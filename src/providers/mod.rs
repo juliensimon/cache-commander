@@ -274,6 +274,7 @@ pub fn upgrade_command(kind: CacheKind, name: &str, version: &str) -> Option<Str
         CacheKind::Yarn => Some(format!("yarn add {name}@{version}")),
         CacheKind::Pnpm => Some(format!("pnpm add {name}@{version}")),
         CacheKind::Bun => Some(format!("bun add {name}@{version}")),
+        CacheKind::Go => Some(format!("go get {name}@{version}")),
         _ => None,
     }
 }
@@ -404,6 +405,20 @@ pub fn safety(kind: CacheKind, path: &Path) -> SafetyLevel {
                 SafetyLevel::Caution
             } else {
                 SafetyLevel::Safe
+            }
+        }
+        CacheKind::Go => {
+            // Module cache (pkg/mod) → Safe (re-resolvable from
+            // proxy.golang.org / VCS). Everything else classified as
+            // Go (build cache go-build, or any unknown-layout path) →
+            // Caution (cold rebuild cost for the build cache;
+            // conservative default for unknown subtrees). Component
+            // matching rejects L1 confusable suffixes like
+            // `pkg/mod-backup`.
+            if has_adjacent_components(path, "pkg", "mod") {
+                SafetyLevel::Safe
+            } else {
+                SafetyLevel::Caution
             }
         }
         CacheKind::Unknown => SafetyLevel::Caution,
@@ -1615,6 +1630,47 @@ mod tests {
         // L1: DerivedData-backup must not be classified as Caution-DerivedData.
         let path = PathBuf::from("/Users/j/Library/Developer/Xcode/DerivedData-backup/junk");
         assert_eq!(safety(CacheKind::Xcode, &path), SafetyLevel::Safe);
+    }
+
+    // --- Go safety ---
+
+    #[test]
+    fn safety_go_module_cache_is_safe() {
+        let path = PathBuf::from(
+            "/Users/j/go/pkg/mod/cache/download/github.com/stretchr/testify/@v/v1.8.4.zip",
+        );
+        assert_eq!(safety(CacheKind::Go, &path), SafetyLevel::Safe);
+    }
+
+    #[test]
+    fn safety_go_module_cache_extracted_is_safe() {
+        let path = PathBuf::from("/Users/j/go/pkg/mod/github.com/stretchr/testify@v1.8.4");
+        assert_eq!(safety(CacheKind::Go, &path), SafetyLevel::Safe);
+    }
+
+    #[test]
+    fn safety_go_build_cache_is_caution() {
+        let path = PathBuf::from("/Users/j/Library/Caches/go-build/ab/abcdef-d");
+        assert_eq!(safety(CacheKind::Go, &path), SafetyLevel::Caution);
+    }
+
+    #[test]
+    fn safety_go_rejects_confusable_pkg_mod_backup() {
+        // L1: pkg/mod-backup must not be classified as module-cache Safe.
+        // Falls through to the Go default (Caution) since neither
+        // pkg/mod nor go-build matches.
+        let path = PathBuf::from("/Users/j/go/pkg/mod-backup/foo");
+        assert_eq!(safety(CacheKind::Go, &path), SafetyLevel::Caution);
+    }
+
+    // --- Go upgrade_command ---
+
+    #[test]
+    fn upgrade_command_go_emits_go_get() {
+        assert_eq!(
+            upgrade_command(CacheKind::Go, "github.com/stretchr/testify", "v1.8.4"),
+            Some("go get github.com/stretchr/testify@v1.8.4".into())
+        );
     }
 
     // --- Go detect ---
