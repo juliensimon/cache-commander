@@ -1,6 +1,6 @@
 [package]
 name = "ccmd"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Cache Commander — a TUI for browsing and managing cache directories"

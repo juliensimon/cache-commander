@@ -7,8 +7,8 @@
 - [x] **Go modules** — `~/go/pkg/mod`, `~/go/pkg/mod/cache` (#8)
 - [ ] **Conda / Mamba** — `~/anaconda3/pkgs`, `~/.conda/pkgs`, `~/miniforge3/pkgs`
 - [ ] **Docker** — `~/Library/Containers/com.docker.docker/Data/vms` (macOS), `/var/lib/docker` (Linux), BuildKit cache
-- [ ] **Maven** — `~/.m2/repository`
-- [ ] **Gradle** — `~/.gradle/caches`, `~/.gradle/wrapper/dists`
+- [x] **Maven** — `~/.m2/repository` (#25)
+- [x] **Gradle** — `~/.gradle/caches`, `~/.gradle/wrapper/dists` (#25)
 - [ ] **CocoaPods** — `~/Library/Caches/CocoaPods`
 - [x] **Xcode DerivedData** — `~/Library/Developer/Xcode/DerivedData` (#17)
 - [x] **Swift Package Manager** — `~/Library/Caches/org.swift.swiftpm` (#11)

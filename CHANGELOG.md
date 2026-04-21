@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-04-21
+
 ### Added
 - **Go provider (#8)**: new `CacheKind::Go` covers the module cache
   (`$GOMODCACHE`, default `~/go/pkg/mod`) and the build cache

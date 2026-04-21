@@ -323,11 +323,11 @@ src/
 │   ├── pip.rs, uv.rs    # Python package providers
 │   ├── npm.rs           # npm + npx + node_modules scanning
 │   ├── cargo.rs         # Rust crate provider
-│   └── ...              # 12 more providers
+│   └── ...              # 15 more providers (Yarn, pnpm, Bun, Maven, Gradle, Go, SwiftPM, Xcode, Homebrew, …)
 ├── security/
 │   ├── mod.rs           # Scan orchestration, vulnerability filtering
 │   ├── osv.rs           # OSV.dev API, version comparison, fix extraction
-│   └── registry.rs      # PyPI, crates.io, npm registry lookups
+│   └── registry.rs      # PyPI, crates.io, npm, Maven Central, proxy.golang.org lookups
 ├── mcp/                 # MCP server (optional, behind `mcp` feature flag)
 │   ├── mod.rs           # ServerHandler, tool routing, cache scanning
 │   ├── tools.rs         # Tool parameter and response types
