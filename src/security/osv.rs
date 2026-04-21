@@ -217,6 +217,9 @@ pub fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
 
 /// Ordered tuple key for a version string.
 fn normalize_version(v: &str) -> (Vec<u64>, u8, Vec<u64>) {
+    // 0. Strip leading 'v' prefix (Go/Helm style).
+    let v = v.strip_prefix('v').unwrap_or(v);
+
     // 1. Strip build metadata (everything after '+').
     let v = v.split('+').next().unwrap_or(v);
 
@@ -655,6 +658,81 @@ mod tests {
     fn compare_versions_long_versions() {
         assert_eq!(
             compare_versions("1.2.3.4.5", "1.2.3.4.6"),
+            std::cmp::Ordering::Less
+        );
+    }
+
+    #[test]
+    fn compare_versions_go_v_prefix_stripped() {
+        // Go proxy list returns "v1.5.0" — the 'v' must not affect numeric comparison.
+        assert_eq!(
+            compare_versions("v1.5.0", "v1.4.0"),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            compare_versions("v1.0.0", "v1.0.0"),
+            std::cmp::Ordering::Equal
+        );
+        assert_eq!(
+            compare_versions("v2.0.0", "v1.9.9"),
+            std::cmp::Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn compare_versions_build_metadata_above_prerelease() {
+        // semver §10: build metadata does not affect precedence,
+        // but pre-release < release even with build metadata on both.
+        assert_eq!(
+            compare_versions("1.0.0-alpha+build", "1.0.0-alpha"),
+            std::cmp::Ordering::Equal,
+            "identical pre-release with build metadata should be equal"
+        );
+        // Build metadata on stable does not change its rank above pre-release.
+        assert_eq!(
+            compare_versions("1.0.0+build", "1.0.0-alpha"),
+            std::cmp::Ordering::Greater,
+            "stable with build metadata ranks above pre-release without"
+        );
+    }
+
+    #[test]
+    fn compare_versions_pep440_post_numeric_comparison() {
+        // PEP 440 post-releases: post1 < post2 < post10
+        assert_eq!(
+            compare_versions("1.0.0.post1", "1.0.0.post2"),
+            std::cmp::Ordering::Less,
+            "post1 < post2"
+        );
+        assert_eq!(
+            compare_versions("1.0.0.post9", "1.0.0.post10"),
+            std::cmp::Ordering::Less,
+            "post9 < post10"
+        );
+    }
+
+    #[test]
+    fn compare_versions_pep440_alpha_numeric_comparison() {
+        // PEP 440 alpha: a1 < a2 < a10
+        assert_eq!(
+            compare_versions("2.0.0a1", "2.0.0a2"),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_versions("2.0.0a9", "2.0.0a10"),
+            std::cmp::Ordering::Less
+        );
+    }
+
+    #[test]
+    fn compare_versions_go_v_prefix_less_than_stable() {
+        // Go versions with 'v' prefix still compare correctly against versions without.
+        assert_eq!(
+            compare_versions("v1.0.0-rc1", "v1.0.0"),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_versions("v1.0.0-rc1", "1.0.0"),
             std::cmp::Ordering::Less
         );
     }

@@ -998,4 +998,17 @@ mod tests {
         assert_eq!(info.vulns.len(), 1);
         assert_eq!(info.vulns[0].id, "CVE-active");
     }
+
+    #[test]
+    fn is_vuln_active_with_go_v_prefixed_fix() {
+        // Go proxy returns "v1.0.0" as fix version; normalize_version now strips leading 'v'.
+        assert!(
+            !is_vuln_active(&Some("v1.0.0".into()), "v1.0.0"),
+            "same version is not vulnerable"
+        );
+        assert!(
+            is_vuln_active(&Some("v2.0.0".into()), "v1.0.0"),
+            "fix > installed means still vulnerable"
+        );
+    }
 }
