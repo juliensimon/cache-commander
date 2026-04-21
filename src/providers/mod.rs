@@ -1673,6 +1673,44 @@ mod tests {
         );
     }
 
+    // --- pre_delete default dispatch ---
+
+    #[test]
+    fn pre_delete_default_is_ok_for_every_non_go_cache_kind() {
+        // Regression guard: any CacheKind without a dedicated hook
+        // must fall through the _ arm returning Ok(()). A buggy arm
+        // here would block deletes globally.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().to_path_buf();
+        for kind in [
+            CacheKind::HuggingFace,
+            CacheKind::Pip,
+            CacheKind::Uv,
+            CacheKind::Npm,
+            CacheKind::Homebrew,
+            CacheKind::Cargo,
+            CacheKind::PreCommit,
+            CacheKind::Whisper,
+            CacheKind::Gh,
+            CacheKind::Torch,
+            CacheKind::Chroma,
+            CacheKind::Prisma,
+            CacheKind::Yarn,
+            CacheKind::Pnpm,
+            CacheKind::Bun,
+            CacheKind::Maven,
+            CacheKind::Gradle,
+            CacheKind::SwiftPm,
+            CacheKind::Xcode,
+            CacheKind::Unknown,
+        ] {
+            assert!(
+                pre_delete(kind, &path).is_ok(),
+                "{kind:?} pre_delete must default to Ok(())"
+            );
+        }
+    }
+
     // --- Go detect ---
 
     #[test]

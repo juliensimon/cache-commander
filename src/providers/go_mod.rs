@@ -171,8 +171,50 @@ pub fn package_id(path: &Path) -> Option<super::PackageId> {
     })
 }
 
-pub fn pre_delete(_path: &Path) -> Result<(), String> {
+/// Prepare a subtree under the Go cache for deletion by stripping
+/// read-only flags. Go `chmod -R -w`'s the extracted module tree
+/// (`pkg/mod/<module>@<version>/`), so `remove_dir_all` fails without
+/// this step.
+///
+/// On the build cache (`go-build/`) this is a no-op because Go keeps
+/// those files writable — but we still walk safely: any per-entry
+/// chmod failure is swallowed (the subsequent remove_dir_all will
+/// produce the more informative error). A missing path is OK too —
+/// the caller surfaces the real error.
+pub fn pre_delete(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+    chmod_plus_w_recursive(path);
     Ok(())
+}
+
+#[cfg(unix)]
+fn chmod_plus_w_recursive(path: &Path) {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    // Set the entry itself writable first so we can descend into it.
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        let mode = metadata.permissions().mode();
+        // Add owner write (0o200). Leave group/other bits untouched.
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o200));
+        if metadata.is_dir()
+            && let Ok(entries) = fs::read_dir(path)
+        {
+            for entry in entries.flatten() {
+                chmod_plus_w_recursive(&entry.path());
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn chmod_plus_w_recursive(_path: &Path) {
+    // Windows / other platforms: Go doesn't ship on the unsupported
+    // ones we care about, and std::fs::remove_dir_all on Windows
+    // handles read-only files via a compatibility path since Rust
+    // 1.77. Leave this as a no-op rather than maintain a parallel
+    // implementation.
 }
 
 /// Decode Go's on-disk bang-escape scheme for module paths.
@@ -445,5 +487,65 @@ mod tests {
             "/Users/j/go/pkg/mod/cache/download/github.com/stretchr/testify/@v/v1.8.4.zip",
         );
         assert!(metadata(&path).is_empty());
+    }
+
+    // --- pre_delete ---
+    //
+    // Go chmod -w's the extracted module tree (cache/download/ keeps
+    // its zips writable). Without a pre-delete +w walk,
+    // remove_dir_all fails on those directories.
+
+    #[cfg(unix)]
+    #[test]
+    fn pre_delete_chmods_read_only_module_subtree() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let module_dir = tmp
+            .path()
+            .join("pkg/mod/github.com/stretchr/testify@v1.8.4");
+        fs::create_dir_all(&module_dir).unwrap();
+        let file = module_dir.join("README.md");
+        fs::write(&file, "readme").unwrap();
+
+        // Simulate Go's chmod -R -w on the module tree.
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o444)).unwrap();
+        fs::set_permissions(&module_dir, fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(
+            !file.metadata().unwrap().permissions().readonly() == false,
+            "sanity: file should be read-only before pre_delete runs"
+        );
+        // (Write flag is off on the file.)
+        assert!(fs::write(&file, "still writable?").is_err());
+
+        // Run the hook.
+        assert!(pre_delete(&module_dir).is_ok());
+
+        // Now both dir and file should be writable; remove_dir_all should succeed.
+        assert!(fs::write(&file, "ok now").is_ok());
+        assert!(fs::remove_dir_all(&module_dir).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pre_delete_on_build_cache_path_is_noop() {
+        use std::fs;
+        let tmp = tempfile::tempdir().unwrap();
+        let build_dir = tmp.path().join("Library/Caches/go-build/ab");
+        fs::create_dir_all(&build_dir).unwrap();
+        let file = build_dir.join("abcdef-d");
+        fs::write(&file, "").unwrap();
+        // Should succeed and not mess with permissions.
+        assert!(pre_delete(&build_dir).is_ok());
+    }
+
+    #[test]
+    fn pre_delete_on_nonexistent_path_is_ok() {
+        // Don't error on paths that don't exist — the caller is about
+        // to try remove_dir_all anyway and that will produce a more
+        // informative error if the path truly is wrong.
+        let tmp = tempfile::tempdir().unwrap();
+        let ghost = tmp.path().join("pkg/mod/does-not-exist");
+        assert!(pre_delete(&ghost).is_ok());
     }
 }
