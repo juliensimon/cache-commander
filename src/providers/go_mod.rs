@@ -114,8 +114,41 @@ fn parse_extracted_module_dir(path: &Path) -> Option<(String, String)> {
     Some((components.join("/"), version.to_string()))
 }
 
-pub fn metadata(_path: &Path) -> Vec<MetadataField> {
-    Vec::new()
+pub fn metadata(path: &Path) -> Vec<MetadataField> {
+    let mut fields = Vec::new();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let parent_name = path
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    match name.as_str() {
+        "mod" if parent_name == "pkg" => {
+            fields.push(MetadataField {
+                label: "Contents".into(),
+                value: "Module cache (re-downloadable from proxy.golang.org / VCS)".into(),
+            });
+        }
+        "go-build" => {
+            fields.push(MetadataField {
+                label: "Contents".into(),
+                value: "Build cache (rebuildable, cold rebuild is minutes on large repos)".into(),
+            });
+        }
+        "sumdb" if parent_name == "download" => {
+            fields.push(MetadataField {
+                label: "Contents".into(),
+                value: "Module checksum database (authoritative; re-downloadable)".into(),
+            });
+        }
+        _ => {}
+    }
+
+    fields
 }
 
 pub fn package_id(path: &Path) -> Option<super::PackageId> {
@@ -366,5 +399,51 @@ mod tests {
             "/Users/j/go/pkg/mod/cache/download/sumdb/sum.golang.org/lookup/github.com/foo/bar@v1.0.0",
         );
         assert_eq!(package_id(&path), None);
+    }
+
+    // --- metadata ---
+
+    #[test]
+    fn metadata_pkg_mod_root_reports_contents() {
+        let path = PathBuf::from("/Users/j/go/pkg/mod");
+        let fields = metadata(&path);
+        assert!(
+            fields
+                .iter()
+                .any(|f| f.label == "Contents" && f.value.contains("Module cache")),
+            "got {fields:?}"
+        );
+    }
+
+    #[test]
+    fn metadata_go_build_root_reports_contents() {
+        let path = PathBuf::from("/Users/j/Library/Caches/go-build");
+        let fields = metadata(&path);
+        assert!(
+            fields
+                .iter()
+                .any(|f| f.label == "Contents" && f.value.contains("Build cache")),
+            "got {fields:?}"
+        );
+    }
+
+    #[test]
+    fn metadata_sumdb_reports_contents() {
+        let path = PathBuf::from("/Users/j/go/pkg/mod/cache/download/sumdb");
+        let fields = metadata(&path);
+        assert!(
+            fields
+                .iter()
+                .any(|f| f.label == "Contents" && f.value.contains("checksum")),
+            "got {fields:?}"
+        );
+    }
+
+    #[test]
+    fn metadata_leaf_file_returns_empty() {
+        let path = PathBuf::from(
+            "/Users/j/go/pkg/mod/cache/download/github.com/stretchr/testify/@v/v1.8.4.zip",
+        );
+        assert!(metadata(&path).is_empty());
     }
 }
