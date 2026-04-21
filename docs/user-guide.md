@@ -135,6 +135,7 @@ Participating providers (cover all package-manager ecosystems supported by OSV):
 - **npm**, **Yarn**, **pnpm**, **Bun** → OSV `npm`
 - **Cargo** → OSV `crates.io`
 - **Maven**, **Gradle** → OSV `Maven`
+- **Go** → OSV `Go`
 
 Other providers (HuggingFace, Homebrew, Whisper, GitHub CLI, PyTorch, Chroma, Prisma, pre-commit, SwiftPM, Xcode) are disk-hygiene only — pressing `v`/`V` on entries from those providers is a no-op. See the [Provider Capabilities matrix](../README.md#provider-capabilities) in the README for the full list.
 
@@ -155,6 +156,7 @@ Registries queried:
 - **npm**, **Yarn**, **pnpm**, **Bun** → npm registry
 - **Cargo** → crates.io
 - **Maven**, **Gradle** → Maven Central (`maven-metadata.xml`, prefers `<release>` over `<latest>` to avoid SNAPSHOTs)
+- **Go** → proxy.golang.org `/@v/list` (skips pseudo-versions and `+incompatible` tags)
 
 Providers without a public registry (SwiftPM, Xcode, etc.) skip this step. See the README's Provider Capabilities matrix for the full list.
 
@@ -267,6 +269,7 @@ Shell commands:
 - **pnpm** → `pnpm add express@4.19.0`
 - **Bun** → `bun add express@4.19.0`
 - **Cargo** → `cargo update -p serde`
+- **Go** → `go get github.com/gin-gonic/gin@v1.10.0`
 
 Paste-ready snippets (JVM ecosystems have no single-line CLI upgrade):
 - **Maven** → `<dependency><groupId>…</groupId><artifactId>…</artifactId><version>…</version></dependency>`

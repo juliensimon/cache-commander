@@ -3,6 +3,23 @@
 ## [Unreleased]
 
 ### Added
+- **Go provider (#8)**: new `CacheKind::Go` covers the module cache
+  (`$GOMODCACHE`, default `~/go/pkg/mod`) and the build cache
+  (`$GOCACHE`, default `~/Library/Caches/go-build` on macOS,
+  `~/.cache/go-build` on Linux). Full OSV scanning via the `Go`
+  ecosystem and version-check against `proxy.golang.org /@v/list`
+  (filters pseudo-versions and `+incompatible` tags). Module-path
+  bang-escapes (`!uber` → `Uber`) are decoded at `semantic_name` /
+  `package_id` time so OSV sees the real module path. `c` copies a
+  `go get <module>@<version>` upgrade command. Module cache is Safe;
+  build cache is Caution.
+- **`providers::pre_delete` hook**: new dispatch that lets providers
+  prepare a subtree before `remove_dir_all`. Default is a no-op so
+  existing providers are unaffected. The Go provider implements it to
+  `chmod -R +w` the module tree — Go `chmod -w`'s extracted modules
+  by design, and without the hook `remove_dir_all` fails silently.
+  Additional future use-cases: stripping macOS `com.apple.quarantine`
+  xattrs, releasing file handles, pausing watchers.
 - **SwiftPM provider (#11)**: detects `~/Library/Caches/org.swift.swiftpm`
   (macOS) and `~/.cache/org.swift.swiftpm` (Linux). Classifies
   `repositories/` as Caution (re-clone cost on rebuild) and

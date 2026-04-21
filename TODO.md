@@ -4,7 +4,7 @@
 
 - [ ] **Yarn** — `~/.cache/yarn`, Berry PnP cache (`#1`)
 - [ ] **pnpm** — `~/.local/share/pnpm/store` (`#1`)
-- [ ] **Go modules** — `~/go/pkg/mod`, `~/go/pkg/mod/cache`
+- [x] **Go modules** — `~/go/pkg/mod`, `~/go/pkg/mod/cache` (#8)
 - [ ] **Conda / Mamba** — `~/anaconda3/pkgs`, `~/.conda/pkgs`, `~/miniforge3/pkgs`
 - [ ] **Docker** — `~/Library/Containers/com.docker.docker/Data/vms` (macOS), `/var/lib/docker` (Linux), BuildKit cache
 - [ ] **Maven** — `~/.m2/repository`

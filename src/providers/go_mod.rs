@@ -511,12 +511,13 @@ mod tests {
         // Simulate Go's chmod -R -w on the module tree.
         fs::set_permissions(&file, fs::Permissions::from_mode(0o444)).unwrap();
         fs::set_permissions(&module_dir, fs::Permissions::from_mode(0o555)).unwrap();
+        // Sanity: the file is now non-writable. If a subsequent
+        // fs::write succeeds we've lost the chmod and the test isn't
+        // exercising what we think it is.
         assert!(
-            !file.metadata().unwrap().permissions().readonly() == false,
+            fs::write(&file, "still writable?").is_err(),
             "sanity: file should be read-only before pre_delete runs"
         );
-        // (Write flag is off on the file.)
-        assert!(fs::write(&file, "still writable?").is_err());
 
         // Run the hook.
         assert!(pre_delete(&module_dir).is_ok());

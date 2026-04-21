@@ -101,6 +101,13 @@ work but silently fail on that axis.
       there's no CLI — note it in the CHANGELOG explicitly).
 - [ ] `safety()` arm if any path inside the cache is not `Safe` by
       default.
+- [ ] `pre_delete()` arm **only if** the cache needs custodial setup
+      before `remove_dir_all` — e.g. Go `chmod -w`'s its extracted
+      module tree so the hook must `chmod -R +w` before delete.
+      Default is a no-op `Ok(())` via the `_` fall-through; don't add
+      an arm unless your provider actually needs one. A returned
+      `Err(String)` aborts the delete and increments the `errored`
+      counter in the status line.
 
 ### Tree & config (`src/tree/node.rs`, `src/config.rs`)
 
@@ -300,6 +307,20 @@ an essay.
   avoids a `plist` crate dependency; Xcode always emits XML for
   DerivedData's `Info.plist`, and char-boundary-safe slicing keeps
   multi-byte workspace paths (日本語) from panicking.
+- **Go (#8):** first provider to need a pre-delete hook — Go
+  `chmod -R -w`'s its extracted module tree
+  (`pkg/mod/<module>@<version>/`), so `remove_dir_all` fails silently
+  without a prep step. The `providers::pre_delete` dispatch was added
+  in this PR; default is `_ => Ok(())` so existing providers stay
+  untouched. If a future cache needs similar prep (xattr strip,
+  watcher pause, file-handle release), that's the seam. Also: Go
+  bang-escapes uppercase ASCII letters on disk (`github.com/Uber/zap`
+  → `github.com/!uber/zap`). Decode at `semantic_name` /
+  `package_id` so OSV sees the real module path; re-encode when
+  building the proxy.golang.org URL. And: Go's pseudo-versions
+  (`v0.0.0-YYYYMMDDHHMMSS-<12hex>`) must be filtered out of the
+  registry's `/@v/list` output — otherwise the outdated signal shows
+  a random recent commit instead of a real tagged release.
 
 <!--
 Template for new entries:

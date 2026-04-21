@@ -22,8 +22,9 @@ Developer machines accumulate tens of gigabytes of invisible cache data — ML m
 ## Why
 
 - **ML models** (HuggingFace, PyTorch, Whisper) — tens of GB you forgot about
-- **Package caches** (pip, uv, npm, Yarn, pnpm, Bun, Cargo, Maven, Gradle, SwiftPM, Homebrew) — old versions with known CVEs
+- **Package caches** (pip, uv, npm, Yarn, pnpm, Bun, Cargo, Maven, Gradle, Go, Homebrew) — old versions with known CVEs
 - **Xcode DerivedData** — often 50–200 GB on macOS dev machines; never cleaned
+- **Swift Package Manager** — reclaim space from cached git clones and artifacts; no CVE scanning yet (OSV `SwiftURL` coverage is sparse)
 - **npm supply chain risk** — transitive deps with install scripts hiding in npx cache
 - **Build artifacts** (pre-commit hooks, Prisma engines) — stale and re-downloadable
 
@@ -78,7 +79,7 @@ ccmd --root ~/.cache/huggingface  # scan a specific directory
 ### Browse and Understand
 
 - **Two-pane TUI** — navigable tree on the left, details on the right
-- **19 cache providers** — semantic names instead of hash directories
+- **20 cache providers** — semantic names instead of hash directories
 - **Safety levels** — green (safe to delete), yellow (may cause rebuilds), red (contains state)
 - **Sort** by size, name, or last modified
 - **Search** with `/` — case-insensitive filter across the tree
@@ -125,6 +126,7 @@ ccmd --root ~/.cache/huggingface  # scan a specific directory
 | Gradle | `~/.gradle/caches` | `group:artifact version` from `files-2.1` layout |
 | SwiftPM | `~/Library/Caches/org.swift.swiftpm` (macOS), `~/.cache/org.swift.swiftpm` (Linux) | Package names from `repositories/` and `artifacts/` |
 | Xcode | `~/Library/Developer/Xcode/DerivedData`, `~/Library/Developer/Xcode/iOS DeviceSupport`, `~/Library/Developer/CoreSimulator/Caches` | Workspace path from `Info.plist`, iOS version strings |
+| Go | `~/go/pkg/mod` (module cache), `$GOCACHE` / `~/Library/Caches/go-build` (build cache) | Module paths (bang-decoded) with versions from `cache/download/<module>/@v/*.zip` |
 
 ## Provider Capabilities
 
@@ -151,6 +153,7 @@ All providers support tree navigation, size display, and deletion. This matrix s
 | Gradle | Safe; `build-cache-*/` + `transforms-*/` = **Caution** | OSV `Maven` | Maven Central | `implementation '…'` line |
 | SwiftPM | `repositories/` = **Caution** (re-clone); `artifacts/` + `manifests/` = Safe; unknown subdirs = **Caution** | — ¹ | — ¹ | — ¹ |
 | Xcode | `DerivedData/` = **Caution** (5–30 min rebuild); `iOS DeviceSupport/` + `CoreSimulator/Caches/` = Safe | — ² | — ² | — ² |
+| Go | `pkg/mod` = Safe (re-resolvable from proxy); `go-build` = **Caution** (cold rebuild cost) | OSV `Go` | proxy.golang.org `/@v/list` | `go get` |
 
 Legend:
 - **Safe** = re-downloadable, free to delete (shown with `●` in the detail panel).
