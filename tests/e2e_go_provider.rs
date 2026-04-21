@@ -20,7 +20,7 @@
 
 use ccmd::providers::{self, SafetyLevel};
 use ccmd::tree::node::CacheKind;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -129,34 +129,66 @@ fn e2e_go_discovery_vuln_scan_version_check_and_delete() {
 
     // 1. Discover: the scanner should find gin with the expected identity.
     let packages = ccmd::scanner::discover_packages(&[gomodcache.clone()]);
+    eprintln!(
+        "[e2e] discover_packages returned {} entries",
+        packages.len()
+    );
     let gin = packages
         .iter()
         .find(|(_, id)| id.name == GIN_VULN_MODULE && id.ecosystem == "Go")
-        .expect(&format!(
-            "expected Go/{GIN_VULN_MODULE} in discovered packages, got {:?}",
-            packages
-                .iter()
-                .map(|(_, id)| (id.ecosystem, id.name.clone(), id.version.clone()))
-                .collect::<Vec<_>>()
-        ));
+        .unwrap_or_else(|| {
+            panic!(
+                "expected Go/{GIN_VULN_MODULE} in discovered packages, got {:?}",
+                packages
+                    .iter()
+                    .map(|(_, id)| (id.ecosystem, id.name.clone(), id.version.clone()))
+                    .collect::<Vec<_>>()
+            )
+        });
     assert_eq!(gin.1.version, GIN_VULN_VERSION);
+    eprintln!(
+        "[e2e] found {} @ {} at {}",
+        gin.1.name,
+        gin.1.version,
+        gin.0.display()
+    );
 
     // 2. OSV vuln scan: proxy.golang.org / osv.dev agree this version is vulnerable.
     let vuln_outcome = ccmd::security::scan_vulns(&packages);
-    let vuln_hit = vuln_outcome
+    let cve_count: usize = vuln_outcome
         .results
         .iter()
-        .any(|(path, info)| path.to_string_lossy().contains("gin") && !info.vulns.is_empty());
+        .filter(|(path, _)| path.to_string_lossy().contains("gin"))
+        .map(|(_, info)| info.vulns.len())
+        .sum();
+    let cve_ids: Vec<String> = vuln_outcome
+        .results
+        .iter()
+        .filter(|(path, _)| path.to_string_lossy().contains("gin"))
+        .flat_map(|(_, info)| info.vulns.iter().map(|v| v.id.clone()))
+        .collect();
+    eprintln!(
+        "[e2e] OSV scanned {} package(s), {} unscanned; gin CVEs: {} ({})",
+        vuln_outcome.results.len(),
+        vuln_outcome.unscanned_packages,
+        cve_count,
+        cve_ids.join(", ")
+    );
     assert!(
-        vuln_hit,
+        cve_count > 0,
         "expected OSV to flag gin v1.6.0; unscanned={}, results:\n{:#?}",
-        vuln_outcome.unscanned_packages, vuln_outcome.results
+        vuln_outcome.unscanned_packages,
+        vuln_outcome.results
     );
 
     // 3. Version check: proxy.golang.org /@v/list should return something newer.
     let outdated = ccmd::security::registry::check_latest(&gin.1)
         .expect("check_latest should succeed for Go ecosystem");
     let latest = outdated.expect("expected a latest version from proxy.golang.org");
+    eprintln!(
+        "[e2e] proxy.golang.org latest for {}: {} (installed: {})",
+        gin.1.name, latest, GIN_VULN_VERSION
+    );
     // compare_versions strips the leading `v` for Go-style versions — if the
     // returned version is strictly greater than v1.6.0, we're good.
     assert!(
@@ -179,8 +211,10 @@ fn e2e_go_discovery_vuln_scan_version_check_and_delete() {
     assert_eq!(providers::detect(&target), CacheKind::Go);
     assert_eq!(providers::safety(CacheKind::Go, &target), SafetyLevel::Safe);
     providers::pre_delete(CacheKind::Go, &target).expect("pre_delete should succeed");
+    eprintln!("[e2e] pre_delete succeeded on {}", target.display());
     // Now the canonical delete path.
     std::fs::remove_dir_all(&target).expect("remove_dir_all should succeed after pre_delete");
+    eprintln!("[e2e] remove_dir_all succeeded — delete flow verified end-to-end");
 
     // Tempdir drops at scope exit → clean on green, preserved on red
     // (we explicitly didn't register a cleanup for a failed run so the
