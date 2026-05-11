@@ -45,7 +45,7 @@ fn scanner_discovers_roots_and_computes_sizes() {
     create_uv_cache(tmp.path());
 
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = ccmd::scanner::start(result_tx);
+    let scan_tx = ccmd::scanner::start(result_tx, None);
 
     scan_tx
         .send(ccmd::scanner::ScanRequest::ScanRoots(vec![
@@ -84,7 +84,7 @@ fn scanner_expand_discovers_children_with_providers() {
     let cache_dir = tmp.path().to_path_buf();
 
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = ccmd::scanner::start(result_tx);
+    let scan_tx = ccmd::scanner::start(result_tx, None);
 
     scan_tx
         .send(ccmd::scanner::ScanRequest::ExpandNode(cache_dir.clone()))
@@ -135,7 +135,7 @@ fn scanner_expand_huggingface_hub_shows_semantic_names() {
     let hub_path = tmp.path().join("huggingface").join("hub");
 
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = ccmd::scanner::start(result_tx);
+    let scan_tx = ccmd::scanner::start(result_tx, None);
 
     scan_tx
         .send(ccmd::scanner::ScanRequest::ExpandNode(hub_path))
@@ -175,7 +175,7 @@ fn scanner_expand_whisper_shows_model_names() {
     let whisper_path = tmp.path().join("whisper");
 
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = ccmd::scanner::start(result_tx);
+    let scan_tx = ccmd::scanner::start(result_tx, None);
 
     scan_tx
         .send(ccmd::scanner::ScanRequest::ExpandNode(whisper_path))
@@ -222,7 +222,7 @@ fn full_tree_workflow_expand_navigate_mark_delete() {
 
     // Use scanner to get children
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = ccmd::scanner::start(result_tx);
+    let scan_tx = ccmd::scanner::start(result_tx, None);
 
     scan_tx
         .send(ccmd::scanner::ScanRequest::ExpandNode(
@@ -374,7 +374,7 @@ fn async_expand_returns_children_with_zero_size() {
     std::fs::create_dir_all(tmp.path().join("sub2")).unwrap();
 
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = ccmd::scanner::start(result_tx);
+    let scan_tx = ccmd::scanner::start(result_tx, None);
 
     scan_tx
         .send(ccmd::scanner::ScanRequest::ExpandNode(
@@ -412,7 +412,7 @@ fn scanner_expand_and_size_update_full_cycle() {
     tree.expanded.insert(0);
 
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = ccmd::scanner::start(result_tx);
+    let scan_tx = ccmd::scanner::start(result_tx, None);
 
     scan_tx
         .send(ccmd::scanner::ScanRequest::ExpandNode(
@@ -827,7 +827,7 @@ fn scanner_expand_yarn_berry_shows_semantic_names() {
     let cache_path = tmp.path().join(".yarn/cache");
 
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = ccmd::scanner::start(result_tx);
+    let scan_tx = ccmd::scanner::start(result_tx, None);
 
     scan_tx
         .send(ccmd::scanner::ScanRequest::ExpandNode(cache_path))
@@ -870,7 +870,7 @@ fn scanner_expand_pnpm_virtual_store_shows_semantic_names() {
     let pnpm_path = tmp.path().join("node_modules/.pnpm");
 
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = ccmd::scanner::start(result_tx);
+    let scan_tx = ccmd::scanner::start(result_tx, None);
 
     scan_tx
         .send(ccmd::scanner::ScanRequest::ExpandNode(pnpm_path))
@@ -933,4 +933,482 @@ fn dedup_across_npm_and_yarn_caches() {
         express_count, 1,
         "express@4.21.0 should be deduplicated across npm and yarn"
     );
+}
+
+/// Helper to create a fake Bun cache structure.
+fn create_bun_cache(root: &std::path::Path) {
+    let bun_cache = root.join(".bun/install/cache");
+    std::fs::create_dir_all(bun_cache.join("lodash@4.17.21")).unwrap();
+    std::fs::create_dir_all(bun_cache.join("@types/node@22.0.0")).unwrap();
+    std::fs::create_dir_all(bun_cache.join("@babel/core@7.24.0")).unwrap();
+}
+
+#[test]
+fn discover_packages_finds_bun_cache() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_bun_cache(tmp.path());
+
+    let packages = ccmd::scanner::discover_packages(&[tmp.path().join(".bun/install/cache")]);
+    let names: Vec<&str> = packages.iter().map(|(_, id)| id.name.as_str()).collect();
+    assert!(names.contains(&"lodash"), "Should find lodash: {:?}", names);
+    assert!(
+        names.contains(&"@types/node"),
+        "Should find @types/node: {:?}",
+        names
+    );
+    assert!(
+        names.contains(&"@babel/core"),
+        "Should find @babel/core: {:?}",
+        names
+    );
+}
+
+#[test]
+fn scanner_expand_bun_cache_shows_semantic_names() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_bun_cache(tmp.path());
+
+    let cache_path = tmp.path().join(".bun/install/cache");
+
+    let (result_tx, result_rx) = mpsc::channel();
+    let scan_tx = ccmd::scanner::start(result_tx, None);
+
+    scan_tx
+        .send(ccmd::scanner::ScanRequest::ExpandNode(cache_path.clone()))
+        .unwrap();
+
+    let result = result_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    match result {
+        ccmd::scanner::ScanResult::ChildrenScanned(_, children) => {
+            let names: Vec<&str> = children.iter().map(|n| n.name.as_str()).collect();
+            // lodash@4.17.21 has no scope, so it gets a semantic name
+            assert!(
+                names
+                    .iter()
+                    .any(|n| n.contains("lodash") && n.contains("4.17.21")),
+                "Should show 'lodash 4.17.21': {:?}",
+                names
+            );
+            // @types and @babel are scope directories (no version in dir name),
+            // so semantic_name returns None and the raw scope name is used.
+            // Their actual packages (@types/node, @babel/core) are nested inside.
+            assert!(
+                names.iter().any(|n| *n == "@types"),
+                "Should show '@types' scope dir: {:?}",
+                names
+            );
+            for child in &children {
+                assert_eq!(
+                    child.kind,
+                    ccmd::tree::node::CacheKind::Bun,
+                    "All children should be detected as Bun: {:?}",
+                    child.name
+                );
+            }
+        }
+        _ => panic!("Expected ChildrenScanned"),
+    }
+}
+
+// =====================================================================
+// chroma
+// =====================================================================
+
+fn create_chroma_cache(root: &std::path::Path) {
+    let chroma = root.join("chroma");
+    let onnx_models = chroma.join("onnx_models");
+    std::fs::create_dir_all(&onnx_models).unwrap();
+    std::fs::create_dir_all(onnx_models.join("all-MiniLM-L6-v2")).unwrap();
+    std::fs::create_dir_all(chroma.join("onnx")).unwrap();
+}
+
+#[test]
+fn scanner_expand_chroma_shows_onnx_models_and_runtime() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_chroma_cache(tmp.path());
+
+    let chroma_path = tmp.path().join("chroma");
+
+    let (result_tx, result_rx) = mpsc::channel();
+    let scan_tx = ccmd::scanner::start(result_tx, None);
+
+    scan_tx
+        .send(ccmd::scanner::ScanRequest::ExpandNode(chroma_path))
+        .unwrap();
+
+    let result = result_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    match result {
+        ccmd::scanner::ScanResult::ChildrenScanned(_, children) => {
+            let names: Vec<&str> = children.iter().map(|n| n.name.as_str()).collect();
+            assert!(
+                names.contains(&"Embedding Models"),
+                "Should find Embedding Models: {:?}",
+                names
+            );
+            assert!(
+                names.contains(&"ONNX Runtime"),
+                "Should find ONNX Runtime: {:?}",
+                names
+            );
+            for child in &children {
+                assert_eq!(
+                    child.kind,
+                    ccmd::tree::node::CacheKind::Chroma,
+                    "All children should be detected as Chroma: {:?}",
+                    child.name
+                );
+            }
+        }
+        _ => panic!("Expected ChildrenScanned"),
+    }
+}
+
+#[test]
+fn scanner_expand_chroma_onnx_models_shows_embed_dirs() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_chroma_cache(tmp.path());
+
+    let onnx_models_path = tmp.path().join("chroma/onnx_models");
+
+    let (result_tx, result_rx) = mpsc::channel();
+    let scan_tx = ccmd::scanner::start(result_tx, None);
+
+    scan_tx
+        .send(ccmd::scanner::ScanRequest::ExpandNode(onnx_models_path))
+        .unwrap();
+
+    let result = result_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    match result {
+        ccmd::scanner::ScanResult::ChildrenScanned(_, children) => {
+            let names: Vec<&str> = children.iter().map(|n| n.name.as_str()).collect();
+            assert!(
+                names.iter().any(|n| n.contains("all-MiniLM-L6-v2")),
+                "Should show embedding model dir: {:?}",
+                names
+            );
+        }
+        _ => panic!("Expected ChildrenScanned"),
+    }
+}
+
+// =====================================================================
+// pre_commit
+// =====================================================================
+
+fn create_pre_commit_cache(root: &std::path::Path) {
+    let pre_commit = root.join("pre-commit");
+    // A repo* dir with .pre-commit-hooks.yaml
+    let repo = pre_commit.join("repoabc123");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::write(
+        repo.join(".pre-commit-hooks.yaml"),
+        "- id: mycheck\n  name: My Check Tool\n  entry: mycheck\n",
+    )
+    .unwrap();
+    // Another repo dir without hooks file
+    let repo2 = pre_commit.join("repo456def");
+    std::fs::create_dir_all(&repo2).unwrap();
+}
+
+#[test]
+fn scanner_expand_pre_commit_shows_repos() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_pre_commit_cache(tmp.path());
+
+    let pre_commit_path = tmp.path().join("pre-commit");
+
+    let (result_tx, result_rx) = mpsc::channel();
+    let scan_tx = ccmd::scanner::start(result_tx, None);
+
+    scan_tx
+        .send(ccmd::scanner::ScanRequest::ExpandNode(pre_commit_path))
+        .unwrap();
+
+    let result = result_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    match result {
+        ccmd::scanner::ScanResult::ChildrenScanned(_, children) => {
+            let names: Vec<&str> = children.iter().map(|n| n.name.as_str()).collect();
+            assert!(
+                names.iter().any(|n| n.starts_with("repo")),
+                "Should find repo dirs: {:?}",
+                names
+            );
+            for child in &children {
+                assert_eq!(
+                    child.kind,
+                    ccmd::tree::node::CacheKind::PreCommit,
+                    "All children should be detected as PreCommit: {:?}",
+                    child.name
+                );
+            }
+        }
+        _ => panic!("Expected ChildrenScanned"),
+    }
+}
+
+#[test]
+fn scanner_expand_pre_commit_repo_shows_hooks_file() {
+    // When expanding a repo dir, .pre-commit-hooks.yaml appears as a child file
+    let tmp = tempfile::tempdir().unwrap();
+    create_pre_commit_cache(tmp.path());
+
+    let repo_path = tmp.path().join("pre-commit/repoabc123");
+
+    let (result_tx, result_rx) = mpsc::channel();
+    let scan_tx = ccmd::scanner::start(result_tx, None);
+
+    scan_tx
+        .send(ccmd::scanner::ScanRequest::ExpandNode(repo_path))
+        .unwrap();
+
+    let result = result_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    match result {
+        ccmd::scanner::ScanResult::ChildrenScanned(_, children) => {
+            let names: Vec<&str> = children.iter().map(|n| n.name.as_str()).collect();
+            assert!(
+                names.contains(&".pre-commit-hooks.yaml"),
+                "Should show hooks.yaml file: {:?}",
+                names
+            );
+        }
+        _ => panic!("Expected ChildrenScanned"),
+    }
+}
+
+// =====================================================================
+// torch
+// =====================================================================
+
+fn create_torch_cache(root: &std::path::Path) {
+    let torch = root.join("torch");
+    let hub = torch.join("hub");
+    let checkpoints = hub.join("checkpoints");
+    std::fs::create_dir_all(&checkpoints).unwrap();
+    std::fs::write(checkpoints.join("mobilenet_v2-b0353104.pth"), "fake pth").unwrap();
+    std::fs::write(checkpoints.join("resnet50-0676ba61.pth"), "fake pth").unwrap();
+    std::fs::write(checkpoints.join("weights.pt"), "fake pt").unwrap();
+}
+
+#[test]
+fn scanner_expand_torch_hub_shows_checkpoints_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_torch_cache(tmp.path());
+
+    // The torch cache structure is torch/hub/checkpoints/
+    // Expanding torch/hub should reveal the "checkpoints" dir which shows as "Model Checkpoints"
+    let hub_path = tmp.path().join("torch/hub");
+
+    let (result_tx, result_rx) = mpsc::channel();
+    let scan_tx = ccmd::scanner::start(result_tx, None);
+
+    scan_tx
+        .send(ccmd::scanner::ScanRequest::ExpandNode(hub_path))
+        .unwrap();
+
+    let result = result_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    match result {
+        ccmd::scanner::ScanResult::ChildrenScanned(_, children) => {
+            let names: Vec<&str> = children.iter().map(|n| n.name.as_str()).collect();
+            assert!(
+                names.contains(&"Model Checkpoints"),
+                "Should find Model Checkpoints: {:?}",
+                names
+            );
+            for child in &children {
+                assert_eq!(
+                    child.kind,
+                    ccmd::tree::node::CacheKind::Torch,
+                    "All children should be detected as Torch: {:?}",
+                    child.name
+                );
+            }
+        }
+        _ => panic!("Expected ChildrenScanned"),
+    }
+}
+
+#[test]
+fn scanner_expand_torch_checkpoints_shows_checkpoint_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_torch_cache(tmp.path());
+
+    let checkpoints_path = tmp.path().join("torch/hub/checkpoints");
+
+    let (result_tx, result_rx) = mpsc::channel();
+    let scan_tx = ccmd::scanner::start(result_tx, None);
+
+    scan_tx
+        .send(ccmd::scanner::ScanRequest::ExpandNode(checkpoints_path))
+        .unwrap();
+
+    let result = result_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    match result {
+        ccmd::scanner::ScanResult::ChildrenScanned(_, children) => {
+            let names: Vec<&str> = children.iter().map(|n| n.name.as_str()).collect();
+            assert!(
+                names.iter().any(|n| n.contains("mobilenet_v2")),
+                "Should show mobilenet_v2 checkpoint: {:?}",
+                names
+            );
+            assert!(
+                names.iter().any(|n| n.contains("resnet50")),
+                "Should show resnet50 checkpoint: {:?}",
+                names
+            );
+            for child in &children {
+                assert_eq!(
+                    child.kind,
+                    ccmd::tree::node::CacheKind::Torch,
+                    "All children should be detected as Torch: {:?}",
+                    child.name
+                );
+            }
+        }
+        _ => panic!("Expected ChildrenScanned"),
+    }
+}
+
+// =====================================================================
+// prisma
+// =====================================================================
+
+fn create_prisma_cache(root: &std::path::Path) {
+    let prisma = root.join("prisma");
+    let master = prisma.join("master");
+    std::fs::create_dir_all(&master).unwrap();
+    // Commit hash dir at top level of master
+    std::fs::create_dir_all(master.join("0c8ef2ce45c83248ab3df073180d5eda9e8be7a3")).unwrap();
+    // Platform dir at top level of master (not nested)
+    std::fs::create_dir_all(master.join("darwin-arm64")).unwrap();
+    std::fs::create_dir_all(prisma.join("main")).unwrap();
+}
+
+#[test]
+fn scanner_expand_prisma_shows_branches() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_prisma_cache(tmp.path());
+
+    let prisma_path = tmp.path().join("prisma");
+
+    let (result_tx, result_rx) = mpsc::channel();
+    let scan_tx = ccmd::scanner::start(result_tx, None);
+
+    scan_tx
+        .send(ccmd::scanner::ScanRequest::ExpandNode(prisma_path))
+        .unwrap();
+
+    let result = result_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    match result {
+        ccmd::scanner::ScanResult::ChildrenScanned(_, children) => {
+            let names: Vec<&str> = children.iter().map(|n| n.name.as_str()).collect();
+            assert!(
+                names.contains(&"[branch] master"),
+                "Should show [branch] master: {:?}",
+                names
+            );
+            assert!(
+                names.contains(&"[branch] main"),
+                "Should show [branch] main: {:?}",
+                names
+            );
+            for child in &children {
+                assert_eq!(
+                    child.kind,
+                    ccmd::tree::node::CacheKind::Prisma,
+                    "All children should be detected as Prisma: {:?}",
+                    child.name
+                );
+            }
+        }
+        _ => panic!("Expected ChildrenScanned"),
+    }
+}
+
+#[test]
+fn scanner_expand_prisma_master_shows_commit_and_platform() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_prisma_cache(tmp.path());
+
+    let master_path = tmp.path().join("prisma/master");
+
+    let (result_tx, result_rx) = mpsc::channel();
+    let scan_tx = ccmd::scanner::start(result_tx, None);
+
+    scan_tx
+        .send(ccmd::scanner::ScanRequest::ExpandNode(master_path))
+        .unwrap();
+
+    let result = result_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    match result {
+        ccmd::scanner::ScanResult::ChildrenScanned(_, children) => {
+            let names: Vec<&str> = children.iter().map(|n| n.name.as_str()).collect();
+            assert!(
+                names.iter().any(|n| n.contains("0c8ef2ce")),
+                "Should show [engine] commit hash: {:?}",
+                names
+            );
+            assert!(
+                names.iter().any(|n| n.contains("darwin-arm64")),
+                "Should show [platform] darwin-arm64: {:?}",
+                names
+            );
+        }
+        _ => panic!("Expected ChildrenScanned"),
+    }
+}
+
+// =====================================================================
+// gh
+// =====================================================================
+
+fn create_gh_cache(root: &std::path::Path) {
+    let gh = root.join("gh");
+    std::fs::create_dir_all(&gh).unwrap();
+    std::fs::write(
+        gh.join("run-log-23703509146-1774766949.zip"),
+        "fake log zip",
+    )
+    .unwrap();
+    std::fs::write(gh.join("run-log-12345-67890.zip"), "another fake log").unwrap();
+}
+
+#[test]
+fn scanner_expand_gh_shows_run_logs() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_gh_cache(tmp.path());
+
+    let gh_path = tmp.path().join("gh");
+
+    let (result_tx, result_rx) = mpsc::channel();
+    let scan_tx = ccmd::scanner::start(result_tx, None);
+
+    scan_tx
+        .send(ccmd::scanner::ScanRequest::ExpandNode(gh_path))
+        .unwrap();
+
+    let result = result_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    match result {
+        ccmd::scanner::ScanResult::ChildrenScanned(_, children) => {
+            let names: Vec<&str> = children.iter().map(|n| n.name.as_str()).collect();
+            assert!(
+                names.iter().any(|n| n.contains("23703509146")),
+                "Should show run log with id: {:?}",
+                names
+            );
+            assert!(
+                names.iter().any(|n| n.contains("12345")),
+                "Should show another run log: {:?}",
+                names
+            );
+            for child in &children {
+                assert_eq!(
+                    child.kind,
+                    ccmd::tree::node::CacheKind::Gh,
+                    "All children should be detected as Gh: {:?}",
+                    child.name
+                );
+            }
+        }
+        _ => panic!("Expected ChildrenScanned"),
+    }
 }

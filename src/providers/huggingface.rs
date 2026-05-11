@@ -100,26 +100,16 @@ fn identify_dataset_hash(path: &Path) -> Option<String> {
     let info_path = path.join("dataset_info.json");
     if info_path.exists() {
         let content = std::fs::read_to_string(&info_path).ok()?;
-        // Simple JSON extraction
-        if let Some(name) = extract_json_string(&content, "dataset_name") {
-            return Some(format!("[info] {name}"));
+        #[derive(serde::Deserialize)]
+        struct DatasetInfo {
+            #[serde(rename = "dataset_name")]
+            dataset_name: Option<String>,
         }
+        let info: DatasetInfo = serde_json::from_str(&content).ok()?;
+        info.dataset_name.map(|name| format!("[info] {name}"))
+    } else {
+        None
     }
-    None
-}
-
-fn extract_json_string(json: &str, key: &str) -> Option<String> {
-    let pattern = format!("\"{}\"", key);
-    let pos = json.find(&pattern)?;
-    let rest = &json[pos + pattern.len()..];
-    let colon = rest.find(':')?;
-    let after_colon = rest[colon + 1..].trim_start();
-    if after_colon.starts_with('"') {
-        let start = 1;
-        let end = after_colon[start..].find('"')?;
-        return Some(after_colon[start..start + end].to_string());
-    }
-    None
 }
 
 pub fn metadata(path: &Path) -> Vec<MetadataField> {

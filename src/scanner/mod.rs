@@ -2,7 +2,10 @@ pub mod walker;
 
 use crate::providers;
 use crate::tree::node::TreeNode;
+use rayon::{ThreadPool, ThreadPoolBuilder};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
 fn now_secs() -> u64 {
@@ -65,24 +68,82 @@ pub fn discover_packages(roots: &[PathBuf]) -> Vec<(PathBuf, crate::providers::P
     packages
 }
 
-pub fn start(result_tx: mpsc::Sender<ScanResult>) -> mpsc::Sender<ScanRequest> {
+/// Build a rayon-based thread pool with bounded parallelism.
+fn build_pool(max_threads: usize) -> rayon::ThreadPool {
+    ThreadPoolBuilder::new()
+        .num_threads(max_threads)
+        .thread_name(|i| format!("ccmd-scan-{i}"))
+        .build()
+        .expect("rayon pool build should not fail")
+}
+
+/// Helper: send a result, logging instead of silently dropping.
+fn send_result<T>(tx: &mpsc::Sender<T>, result: T) {
+    if tx.send(result).is_err() {
+        eprintln!("scanner: result channel closed, receiver dropped");
+    }
+}
+
+/// Start the scanner worker thread.
+/// `shutdown` is an optional externally-controlled flag; when set to true, the
+/// worker stops processing new requests and exits cleanly.
+/// If `None`, the scanner runs indefinitely (no shutdown signal).
+/// Returns the request tx handle.
+pub fn start(
+    result_tx: mpsc::Sender<ScanResult>,
+    shutdown: Option<Arc<AtomicBool>>,
+) -> mpsc::Sender<ScanRequest> {
     let (request_tx, request_rx) = mpsc::channel::<ScanRequest>();
 
+    // Bounded pool: 8 threads max.
+    // This prevents thread explosion when the UI sends rapid requests.
+    let pool = build_pool(8);
+
     std::thread::spawn(move || {
-        while let Ok(request) = request_rx.recv() {
-            match request {
-                ScanRequest::ScanRoots(roots) => {
-                    let mut nodes = Vec::new();
-                    for root in &roots {
+        worker_loop(request_rx, result_tx, Some(pool), shutdown.clone());
+    });
+
+    request_tx
+}
+
+fn worker_loop(
+    request_rx: mpsc::Receiver<ScanRequest>,
+    result_tx: mpsc::Sender<ScanResult>,
+    pool: Option<ThreadPool>,
+    shutdown: Option<Arc<AtomicBool>>,
+) {
+    while let Ok(request) = request_rx.recv() {
+        // Check shutdown flag before processing each request.
+        if let Some(ref flag) = shutdown
+            && flag.load(Ordering::Relaxed)
+        {
+            break;
+        }
+        match request {
+            ScanRequest::ScanRoots(roots) => {
+                let mut nodes = Vec::new();
+                for root in &roots {
+                    if !root.exists() {
+                        continue;
+                    }
+                    let mut node = TreeNode::root(root.clone());
+                    node.last_modified = root.metadata().ok().and_then(|m| m.modified().ok());
+                    nodes.push(node);
+                }
+                send_result(&result_tx, ScanResult::RootsScanned(nodes));
+
+                if let Some(ref pool) = pool {
+                    for root in roots {
                         if !root.exists() {
                             continue;
                         }
-                        let mut node = TreeNode::root(root.clone());
-                        node.last_modified = root.metadata().ok().and_then(|m| m.modified().ok());
-                        nodes.push(node);
+                        let tx = result_tx.clone();
+                        pool.spawn(move || {
+                            let size = walker::dir_size(&root);
+                            send_result(&tx, ScanResult::SizeUpdated(root, size));
+                        });
                     }
-                    let _ = result_tx.send(ScanResult::RootsScanned(nodes));
-
+                } else {
                     for root in roots {
                         if !root.exists() {
                             continue;
@@ -90,18 +151,17 @@ pub fn start(result_tx: mpsc::Sender<ScanResult>) -> mpsc::Sender<ScanRequest> {
                         let tx = result_tx.clone();
                         std::thread::spawn(move || {
                             let size = walker::dir_size(&root);
-                            let _ = tx.send(ScanResult::SizeUpdated(root, size));
+                            send_result(&tx, ScanResult::SizeUpdated(root, size));
                         });
                     }
                 }
-                ScanRequest::ScanVulns(roots) => {
-                    let tx = result_tx.clone();
-                    std::thread::spawn(move || {
+            }
+            ScanRequest::ScanVulns(roots) => {
+                let tx = result_tx.clone();
+                if let Some(ref pool) = pool {
+                    pool.spawn(move || {
                         let packages = discover_packages(&roots);
                         let count = packages.len();
-                        // Load the on-disk cache (24h TTL) so unchanged
-                        // packages skip the OSV network round-trip. A save
-                        // failure here is non-fatal — we still surface results.
                         let path = crate::security::cache::default_paths().map(|(v, _)| v);
                         let outcome = match path.as_deref() {
                             Some(p) => {
@@ -115,11 +175,52 @@ pub fn start(result_tx: mpsc::Sender<ScanResult>) -> mpsc::Sender<ScanRequest> {
                             }
                             None => crate::security::scan_vulns(&packages),
                         };
-                        let _ = tx.send(ScanResult::VulnsScanned(count, outcome));
+                        send_result(&tx, ScanResult::VulnsScanned(count, outcome));
+                    });
+                } else {
+                    std::thread::spawn(move || {
+                        let packages = discover_packages(&roots);
+                        let count = packages.len();
+                        let path = crate::security::cache::default_paths().map(|(v, _)| v);
+                        let outcome = match path.as_deref() {
+                            Some(p) => {
+                                let mut c = crate::security::cache::VulnCache::load(p);
+                                let out = crate::security::scan_vulns_with_cache(&packages, &mut c);
+                                c.prune_expired(now_secs());
+                                if let Err(e) = c.save(p) {
+                                    eprintln!("warning: could not save vuln cache: {e}");
+                                }
+                                out
+                            }
+                            None => crate::security::scan_vulns(&packages),
+                        };
+                        send_result(&tx, ScanResult::VulnsScanned(count, outcome));
                     });
                 }
-                ScanRequest::CheckVersions(roots) => {
-                    let tx = result_tx.clone();
+            }
+            ScanRequest::CheckVersions(roots) => {
+                let tx = result_tx.clone();
+                if let Some(ref pool) = pool {
+                    pool.spawn(move || {
+                        let packages = discover_packages(&roots);
+                        let count = packages.len();
+                        let path = crate::security::cache::default_paths().map(|(_, v)| v);
+                        let outcome = match path.as_deref() {
+                            Some(p) => {
+                                let mut c = crate::security::cache::VersionCache::load(p);
+                                let out =
+                                    crate::security::check_versions_with_cache(&packages, &mut c);
+                                c.prune_expired(now_secs());
+                                if let Err(e) = c.save(p) {
+                                    eprintln!("warning: could not save version cache: {e}");
+                                }
+                                out
+                            }
+                            None => crate::security::check_versions(&packages),
+                        };
+                        send_result(&tx, ScanResult::VersionsChecked(count, outcome));
+                    });
+                } else {
                     std::thread::spawn(move || {
                         let packages = discover_packages(&roots);
                         let count = packages.len();
@@ -137,57 +238,74 @@ pub fn start(result_tx: mpsc::Sender<ScanResult>) -> mpsc::Sender<ScanRequest> {
                             }
                             None => crate::security::check_versions(&packages),
                         };
-                        let _ = tx.send(ScanResult::VersionsChecked(count, outcome));
+                        send_result(&tx, ScanResult::VersionsChecked(count, outcome));
                     });
                 }
-                ScanRequest::BrewOutdated => {
-                    let tx = result_tx.clone();
+            }
+            ScanRequest::BrewOutdated => {
+                let tx = result_tx.clone();
+                if let Some(ref pool) = pool {
+                    pool.spawn(move || {
+                        let results = run_brew_outdated();
+                        send_result(&tx, ScanResult::BrewOutdatedCompleted(results));
+                    });
+                } else {
                     std::thread::spawn(move || {
                         let results = run_brew_outdated();
-                        let _ = tx.send(ScanResult::BrewOutdatedCompleted(results));
+                        send_result(&tx, ScanResult::BrewOutdatedCompleted(results));
                     });
                 }
-                ScanRequest::ExpandNode(path) => {
-                    let children_paths = walker::list_children(&path);
-                    let mut children: Vec<TreeNode> = children_paths
-                        .iter()
-                        .map(|child_path| {
-                            let mut node = TreeNode::new(child_path.clone(), 0, None);
-                            node.last_modified =
-                                child_path.metadata().ok().and_then(|m| m.modified().ok());
-                            node.kind = providers::detect(child_path);
-                            if let Some(semantic) = providers::semantic_name(node.kind, child_path)
-                            {
-                                node.name = semantic;
-                            }
-                            node
-                        })
-                        .collect();
-
-                    let mut deferred: Vec<PathBuf> = Vec::new();
-                    for (i, child_path) in children_paths.iter().enumerate() {
-                        if let Some(size) = walker::quick_size(child_path) {
-                            children[i].size = size;
-                        } else {
-                            deferred.push(child_path.clone());
+            }
+            ScanRequest::ExpandNode(path) => {
+                let children_paths = walker::list_children(&path);
+                let mut children: Vec<TreeNode> = children_paths
+                    .iter()
+                    .map(|child_path| {
+                        let mut node = TreeNode::new(child_path.clone(), 0, None);
+                        node.last_modified =
+                            child_path.metadata().ok().and_then(|m| m.modified().ok());
+                        node.kind = providers::detect(child_path);
+                        if let Some(semantic) = providers::semantic_name(node.kind, child_path) {
+                            node.name = semantic;
                         }
+                        node
+                    })
+                    .collect();
+
+                let mut deferred: Vec<PathBuf> = Vec::new();
+                for (i, child_path) in children_paths.iter().enumerate() {
+                    if let Some(size) = walker::quick_size(child_path) {
+                        children[i].size = size;
+                    } else {
+                        deferred.push(child_path.clone());
                     }
+                }
 
-                    let _ = result_tx.send(ScanResult::ChildrenScanned(path.clone(), children));
+                send_result(
+                    &result_tx,
+                    ScanResult::ChildrenScanned(path.clone(), children),
+                );
 
+                if let Some(ref pool) = pool {
+                    for child_path in deferred {
+                        let tx = result_tx.clone();
+                        pool.spawn(move || {
+                            let size = walker::dir_size(&child_path);
+                            send_result(&tx, ScanResult::SizeUpdated(child_path, size));
+                        });
+                    }
+                } else {
                     for child_path in deferred {
                         let tx = result_tx.clone();
                         std::thread::spawn(move || {
                             let size = walker::dir_size(&child_path);
-                            let _ = tx.send(ScanResult::SizeUpdated(child_path, size));
+                            send_result(&tx, ScanResult::SizeUpdated(child_path, size));
                         });
                     }
                 }
             }
         }
-    });
-
-    request_tx
+    }
 }
 
 fn run_brew_outdated()
@@ -211,4 +329,17 @@ fn run_brew_outdated()
         return std::collections::HashMap::new();
     };
     crate::providers::homebrew::parse_brew_outdated(stdout)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn send_result_logs_on_dropped_receiver() {
+        let (tx, rx) = mpsc::channel::<ScanResult>();
+        drop(rx); // drop receiver
+        // Should log, not panic
+        send_result(&tx, ScanResult::RootsScanned(vec![]));
+    }
 }

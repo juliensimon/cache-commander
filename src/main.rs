@@ -19,6 +19,8 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use std::io;
 use std::panic;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -45,9 +47,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Scanner channels
+    // Scanner channels — shutdown flag coordinates graceful exit.
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = scanner::start(result_tx);
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let scan_tx = scanner::start(result_tx, Some(Arc::clone(&shutdown)));
 
     // Background update-check channel
     let update_rx = updater::start(&config);
@@ -64,7 +67,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Cleanup
+    // Cleanup — signal scanner shutdown, then tear down terminal.
+    shutdown.store(true, Ordering::Relaxed);
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
 

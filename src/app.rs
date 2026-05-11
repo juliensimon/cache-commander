@@ -1030,20 +1030,9 @@ fn copy_to_clipboard(text: &str) -> bool {
 }
 
 fn find_subtree_end(nodes: &[crate::tree::node::TreeNode], idx: usize) -> usize {
+    let target_depth = nodes[idx].depth;
     let mut end = idx + 1;
-    while end < nodes.len() {
-        let mut current = end;
-        let mut is_descendant = false;
-        while let Some(parent) = nodes[current].parent {
-            if parent == idx {
-                is_descendant = true;
-                break;
-            }
-            current = parent;
-        }
-        if !is_descendant {
-            break;
-        }
+    while end < nodes.len() && nodes[end].depth > target_depth {
         end += 1;
     }
     end

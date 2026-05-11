@@ -52,112 +52,109 @@ pub fn semantic_name(path: &Path) -> Option<String> {
 pub fn extract_manifest_metadata(json: &str) -> Vec<MetadataField> {
     let mut fields = Vec::new();
 
-    let manifests_pos = match json.find("\"manifests\"") {
-        Some(p) => p,
-        None => return fields,
+    #[derive(serde::Deserialize)]
+    struct Manifest {
+        manifests: Vec<ManifestEntry>,
+    }
+    #[derive(serde::Deserialize)]
+    struct ManifestEntry {
+        platform: Option<Platform>,
+        annotations: Option<Annotations>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Platform {
+        architecture: Option<String>,
+        os: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Annotations {
+        #[serde(rename = "sh.brew.license")]
+        license: Option<String>,
+        #[serde(rename = "sh.brew.bottle.installed_size")]
+        installed_size: Option<String>,
+        #[serde(rename = "sh.brew.tab")]
+        tab: Option<String>,
+    }
+
+    let manifests: Manifest = match serde_json::from_str(json) {
+        Ok(m) => m,
+        Err(_) => return fields,
     };
-    let rest = &json[manifests_pos..];
 
-    if let Some(arch) = extract_json_string_field(rest, "architecture") {
-        let os = extract_json_string_field(rest, "os").unwrap_or_default();
-        if !os.is_empty() {
-            fields.push(MetadataField {
-                label: "Arch".to_string(),
-                value: format!("{arch} {os}"),
-            });
-        } else {
-            fields.push(MetadataField {
-                label: "Arch".to_string(),
-                value: arch,
-            });
+    if let Some(entry) = manifests.manifests.first() {
+        // Architecture and OS
+        if let Some(platform) = &entry.platform
+            && let Some(arch) = &platform.architecture
+        {
+            let os = platform.os.clone().unwrap_or_default();
+            if !os.is_empty() {
+                fields.push(MetadataField {
+                    label: "Arch".to_string(),
+                    value: format!("{arch} {os}"),
+                });
+            } else {
+                fields.push(MetadataField {
+                    label: "Arch".to_string(),
+                    value: arch.clone(),
+                });
+            }
         }
-    }
 
-    if let Some(license) = extract_json_string_field(rest, "sh.brew.license") {
-        fields.push(MetadataField {
-            label: "License".to_string(),
-            value: license,
-        });
-    }
+        // Annotations
+        if let Some(annotations) = &entry.annotations {
+            if let Some(license) = &annotations.license {
+                fields.push(MetadataField {
+                    label: "License".to_string(),
+                    value: license.clone(),
+                });
+            }
 
-    if let Some(size_str) = extract_json_string_field(rest, "sh.brew.bottle.installed_size")
-        && let Ok(bytes) = size_str.parse::<u64>()
-    {
-        fields.push(MetadataField {
-            label: "Installed".to_string(),
-            value: format_bytes(bytes),
-        });
-    }
+            if let Some(size_str) = &annotations.installed_size
+                && let Ok(bytes) = size_str.parse::<u64>()
+            {
+                fields.push(MetadataField {
+                    label: "Installed".to_string(),
+                    value: format_bytes(bytes),
+                });
+            }
 
-    if let Some(tab_str) = extract_json_string_field(rest, "sh.brew.tab") {
-        let tab = tab_str.replace("\\\"", "\"").replace("\\\\", "\\");
-        if let Some(deps_info) = parse_runtime_deps(&tab) {
-            fields.push(MetadataField {
-                label: "Deps".to_string(),
-                value: deps_info,
-            });
+            if let Some(tab_str) = &annotations.tab
+                && let Some(deps_info) = parse_runtime_deps(tab_str)
+            {
+                fields.push(MetadataField {
+                    label: "Deps".to_string(),
+                    value: deps_info,
+                });
+            }
         }
     }
 
     fields
 }
 
-fn extract_json_string_field(json: &str, key: &str) -> Option<String> {
-    let pattern = format!("\"{}\"", key);
-    let pos = json.find(&pattern)?;
-    let after_key = &json[pos + pattern.len()..];
-    let after_colon = after_key.find(':').map(|p| &after_key[p + 1..])?;
-    let trimmed = after_colon.trim_start();
-    if let Some(content) = trimmed.strip_prefix('"') {
-        let mut end = 0;
-        let bytes = content.as_bytes();
-        while end < bytes.len() {
-            if bytes[end] == b'"' && (end == 0 || bytes[end - 1] != b'\\') {
-                break;
-            }
-            end += 1;
-        }
-        if end < bytes.len() {
-            return Some(content[..end].to_string());
-        }
-    }
-    None
-}
-
 fn parse_runtime_deps(tab_json: &str) -> Option<String> {
-    let deps_pos = tab_json.find("\"runtime_dependencies\"")?;
-    let rest = &tab_json[deps_pos..];
-    let arr_start = rest.find('[')?;
-    // Use bracket-depth counting to find matching close bracket
-    let arr_bytes = &rest.as_bytes()[arr_start..];
-    let mut depth = 0usize;
-    let mut arr_end = None;
-    for (i, &b) in arr_bytes.iter().enumerate() {
-        match b {
-            b'[' => depth += 1,
-            b']' => {
-                depth -= 1;
-                if depth == 0 {
-                    arr_end = Some(arr_start + i);
-                    break;
-                }
-            }
-            _ => {}
-        }
+    #[derive(serde::Deserialize)]
+    struct Tab {
+        #[serde(rename = "runtime_dependencies")]
+        runtime_dependencies: Option<Vec<RuntimeDep>>,
     }
-    let arr_end = arr_end?;
-    let arr_content = &rest[arr_start + 1..arr_end];
-
-    if arr_content.trim().is_empty() {
-        return Some("0".to_string());
+    #[derive(serde::Deserialize)]
+    struct RuntimeDep {
+        #[serde(rename = "full_name")]
+        _full_name: Option<String>,
+        #[serde(rename = "declared_directly")]
+        declared_directly: Option<bool>,
     }
-
-    let total = arr_content.matches("\"full_name\"").count();
-    let direct = arr_content.matches("\"declared_directly\":true").count();
-
+    let tab: Tab = serde_json::from_str(tab_json).ok()?;
+    let deps = tab.runtime_dependencies?;
+    let total = deps.len();
     if total == 0 {
         return Some("0".to_string());
     }
+    let direct = deps
+        .iter()
+        .filter(|d| d.declared_directly == Some(true))
+        .count();
     if direct > 0 && direct < total {
         Some(format!("{total} ({direct} direct)"))
     } else {
@@ -195,7 +192,7 @@ pub fn metadata(path: &Path) -> Vec<MetadataField> {
                 value: "Downloaded package bottles (.tar.gz)".to_string(),
             });
             if let Ok(entries) = std::fs::read_dir(path) {
-                let count = entries.filter_map(|e| e.ok()).count();
+                let count = entries.filter(|e| e.is_ok()).count();
                 fields.push(MetadataField {
                     label: "Bottles".to_string(),
                     value: count.to_string(),
@@ -248,100 +245,49 @@ pub struct BrewOutdatedEntry {
 
 /// Parse the JSON output of `brew outdated --json=v2` into a map of formula name → outdated info.
 pub fn parse_brew_outdated(json: &str) -> std::collections::HashMap<String, BrewOutdatedEntry> {
-    let mut results = std::collections::HashMap::new();
-
-    // Find the "formulae" array
-    let formulae_pos = match json.find("\"formulae\"") {
-        Some(p) => p,
-        None => return results,
-    };
-    let rest = &json[formulae_pos..];
-
-    // Find array bounds — count brackets to find the matching close bracket
-    let arr_start = match rest.find('[') {
-        Some(p) => p,
-        None => return results,
-    };
-    let arr_bytes = &rest.as_bytes()[arr_start..];
-    let mut depth = 0usize;
-    let mut arr_end = None;
-    for (i, &b) in arr_bytes.iter().enumerate() {
-        match b {
-            b'[' => depth += 1,
-            b']' => {
-                depth -= 1;
-                if depth == 0 {
-                    arr_end = Some(arr_start + i);
-                    break;
-                }
-            }
-            _ => {}
-        }
+    #[derive(serde::Deserialize)]
+    struct BrewOutdatedJson {
+        formulae: Vec<BrewFormula>,
     }
-    let arr_end = match arr_end {
-        Some(p) => p,
-        None => return results,
+    #[derive(serde::Deserialize)]
+    struct BrewFormula {
+        name: String,
+        #[serde(rename = "current_version")]
+        current_version: Option<String>,
+        #[serde(rename = "installed_versions")]
+        installed_versions: Option<Vec<String>>,
+        pinned: bool,
+    }
+
+    let parsed: BrewOutdatedJson = match serde_json::from_str(json) {
+        Ok(p) => p,
+        Err(_) => return Default::default(),
     };
-    let arr_content = &rest[arr_start + 1..arr_end];
 
-    // Split by objects — find each {"name": ...} block
-    // We'll iterate by finding "name" keys
-    let mut search_from = 0;
-    while let Some(name_pos) = arr_content[search_from..].find("\"name\"") {
-        let abs_pos = search_from + name_pos;
-        let entry_rest = &arr_content[abs_pos..];
+    let mut results = std::collections::HashMap::new();
+    for formula in parsed.formulae {
+        let installed = formula
+            .installed_versions
+            .as_ref()
+            .and_then(|v| v.first().cloned())
+            .unwrap_or_default();
+        let current = formula.current_version.unwrap_or_default();
 
-        let name = match extract_json_string_field(entry_rest, "name") {
-            Some(n) => n,
-            None => {
-                search_from = abs_pos + 6;
-                continue;
-            }
+        let entry = BrewOutdatedEntry {
+            installed,
+            current,
+            pinned: formula.pinned,
         };
-
-        let current = extract_json_string_field(entry_rest, "current_version").unwrap_or_default();
-
-        // installed_versions is an array — grab the first string
-        let installed =
-            extract_first_array_string(entry_rest, "installed_versions").unwrap_or_default();
-
-        // pinned is a boolean
-        let pinned =
-            entry_rest.contains("\"pinned\":true") || entry_rest.contains("\"pinned\": true");
-
-        if !name.is_empty() && !current.is_empty() {
-            let entry = BrewOutdatedEntry {
-                installed,
-                current,
-                pinned,
-            };
-            // Also insert under short name for tap-qualified names like "user/tap/formula"
-            if let Some(short) = name.rsplit('/').next()
-                && short != name
-            {
-                results.insert(short.to_string(), entry.clone());
-            }
-            results.insert(name, entry);
+        // Also insert under short name for tap-qualified names like "user/tap/formula"
+        if let Some(short) = formula.name.rsplit('/').next()
+            && short != formula.name
+        {
+            results.insert(short.to_string(), entry.clone());
         }
-
-        search_from = abs_pos + 6;
+        results.insert(formula.name, entry);
     }
 
     results
-}
-
-/// Extract the first string from a JSON array field like "key": ["value1", "value2"]
-fn extract_first_array_string(json: &str, key: &str) -> Option<String> {
-    let pattern = format!("\"{}\"", key);
-    let pos = json.find(&pattern)?;
-    let after_key = &json[pos + pattern.len()..];
-    let arr_start = after_key.find('[')?;
-    let arr_content = &after_key[arr_start + 1..];
-    // Find first quoted string
-    let quote_start = arr_content.find('"')?;
-    let inner = &arr_content[quote_start + 1..];
-    let quote_end = inner.find('"')?;
-    Some(inner[..quote_end].to_string())
 }
 
 #[cfg(test)]

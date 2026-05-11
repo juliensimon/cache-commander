@@ -32,13 +32,16 @@ pub fn parse_response(json: &str) -> Result<OsvResponse, serde_json::Error> {
     serde_json::from_str(json)
 }
 
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+
 pub fn build_query(packages: &[crate::providers::PackageId]) -> String {
     let queries: Vec<serde_json::Value> = packages
         .iter()
         .map(|p| {
+            let encoded_name = utf8_percent_encode(&p.name, NON_ALPHANUMERIC).to_string();
             serde_json::json!({
                 "package": {
-                    "name": p.name,
+                    "name": encoded_name,
                     "version": p.version,
                     "ecosystem": p.ecosystem,
                 }

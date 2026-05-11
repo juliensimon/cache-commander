@@ -109,14 +109,27 @@ pub fn parse_go_proxy_list(body: &str) -> Option<String> {
     pick(all)
 }
 
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+
 /// Build the registry URL for a given package, or `None` if the ecosystem is unsupported.
 pub fn build_registry_url(pkg: &crate::providers::PackageId) -> Option<String> {
     match pkg.ecosystem {
-        "PyPI" => Some(format!("https://pypi.org/pypi/{}/json", pkg.name)),
-        "crates.io" => Some(format!("https://crates.io/api/v1/crates/{}", pkg.name)),
-        "npm" => Some(format!("https://registry.npmjs.org/{}/latest", pkg.name)),
+        "PyPI" => {
+            let encoded = utf8_percent_encode(&pkg.name, NON_ALPHANUMERIC);
+            Some(format!("https://pypi.org/pypi/{}/json", encoded))
+        }
+        "crates.io" => {
+            let encoded = utf8_percent_encode(&pkg.name, NON_ALPHANUMERIC);
+            Some(format!("https://crates.io/api/v1/crates/{}", encoded))
+        }
+        "npm" => {
+            let encoded = utf8_percent_encode(&pkg.name, NON_ALPHANUMERIC);
+            Some(format!("https://registry.npmjs.org/{}/latest", encoded))
+        }
         "Maven" => {
             // pkg.name is `group:artifact`; group dots become path slashes.
+            // Maven artifact IDs commonly contain hyphens which are valid
+            // unencoded in Maven Central URLs.
             let (group, artifact) = pkg.name.split_once(':')?;
             let group_path = group.replace('.', "/");
             Some(format!(

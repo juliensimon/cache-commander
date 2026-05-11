@@ -592,9 +592,11 @@ impl CcmdMcp {
         &self,
         input: Parameters<tools::PreviewDeleteInput>,
     ) -> Result<String, String> {
+        #[allow(clippy::unnecessary_filter_map)]
         let paths: Vec<PathBuf> = input.0.paths.iter().map(PathBuf::from).collect();
         let roots = self.roots.clone();
 
+        #[allow(clippy::unnecessary_filter_map)]
         let result = tokio::task::spawn_blocking(move || {
             let mut total_deletable: u64 = 0;
             let mut deletable_count = 0usize;
@@ -602,10 +604,10 @@ impl CcmdMcp {
             let mut rejected_count = 0usize;
             let items: Vec<PreviewItem> = paths
                 .iter()
-                .map(|path| {
+                .filter_map(|path| {
                     if !path.exists() {
                         rejected_count += 1;
-                        return PreviewItem {
+                        return Some(PreviewItem {
                             path: path.to_string_lossy().to_string(),
                             name: path
                                 .file_name()
@@ -617,11 +619,15 @@ impl CcmdMcp {
                             safety_level: "unknown".to_string(),
                             would_delete: false,
                             reason: Some("Path not found".to_string()),
-                        };
+                        });
                     }
-                    if !is_under_roots(path, &roots) {
+                    // H6: resolve the canonical path once, and use it for the
+                    // safety check and size calculation. This closes the
+                    // TOCTOU window where a racing symlink swap could escape
+                    // the root between the check and the actual delete.
+                    let Some(canonical) = canonical_under_roots(path, &roots) else {
                         rejected_count += 1;
-                        return PreviewItem {
+                        return Some(PreviewItem {
                             path: path.to_string_lossy().to_string(),
                             name: path
                                 .file_name()
@@ -635,13 +641,14 @@ impl CcmdMcp {
                             reason: Some(
                                 "Path is not inside any configured cache root".to_string(),
                             ),
-                        };
-                    }
-                    let kind = providers::detect(path);
-                    let safety = providers::safety(kind, path);
-                    let size = walker::dir_size(path);
-                    let name = providers::semantic_name(kind, path).unwrap_or_else(|| {
-                        path.file_name()
+                        });
+                    };
+                    let kind = providers::detect(&canonical);
+                    let safety = providers::safety(kind, &canonical);
+                    let size = walker::dir_size(&canonical);
+                    let name = providers::semantic_name(kind, &canonical).unwrap_or_else(|| {
+                        canonical
+                            .file_name()
                             .unwrap_or_default()
                             .to_string_lossy()
                             .to_string()
@@ -662,15 +669,15 @@ impl CcmdMcp {
                             (false, Some(reason))
                         }
                     };
-                    PreviewItem {
-                        path: path.to_string_lossy().to_string(),
+                    Some(PreviewItem {
+                        path: canonical.to_string_lossy().to_string(),
                         name,
                         size: format_size(size, BINARY),
                         size_bytes: size,
                         safety_level: safety.label().to_string(),
                         would_delete,
                         reason,
-                    }
+                    })
                 })
                 .collect();
             PreviewResult {

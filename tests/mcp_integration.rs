@@ -273,7 +273,9 @@ fn start_server(
 }
 
 /// Send a tools/call request and return the parsed JSON content from the
-/// response's `result.content[0].text`.
+/// response's `result.content[0].text`.  Handles both JSON-object responses
+/// (normal tool result) and plain-string responses (error strings from the
+/// server, e.g. "No package found…" / "Path not found…" / "Path is not inside…").
 fn call_tool(
     stdin: &mut impl Write,
     rx: &mpsc::Receiver<String>,
@@ -295,8 +297,9 @@ fn call_tool(
     let text = resp["result"]["content"][0]["text"]
         .as_str()
         .unwrap_or_else(|| panic!("No text in tool response: {resp}"));
-    serde_json::from_str(text)
-        .unwrap_or_else(|e| panic!("Failed to parse tool response as JSON: {e}\nraw: {text}"))
+    // Try JSON first (normal object response). Fall back to treating the
+    // plain string as a JSON string for error-path tests.
+    serde_json::from_str(text).unwrap_or_else(|_| serde_json::json!(text))
 }
 
 // ---------------------------------------------------------------------------
@@ -539,7 +542,97 @@ fn mcp_test_get_package_details_by_name() {
 }
 
 // ---------------------------------------------------------------------------
-// 8. preview_delete
+// 8a. get_package_details — name not found
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mcp_test_get_package_details_missing_name() {
+    let tmp = setup_test_env();
+    let (mut child, mut stdin, rx) = start_server(tmp.path());
+
+    let result = call_tool(
+        &mut stdin,
+        &rx,
+        10,
+        "get_package_details",
+        serde_json::json!({"name": "nonexistent_pkg_xyz_12345", "ecosystem": "npm"}),
+    );
+
+    let msg = result.as_str().unwrap_or("");
+    assert!(
+        msg.contains("No package found matching name"),
+        "Expected 'No package found matching name' error, got: {msg}"
+    );
+    assert!(
+        msg.contains("nonexistent_pkg_xyz_12345"),
+        "Error message should contain the missing name: {msg}"
+    );
+
+    drop(stdin);
+    let _ = child.wait();
+}
+
+// ---------------------------------------------------------------------------
+// 8b. get_package_details — path does not exist
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mcp_test_get_package_details_nonexistent_path() {
+    let tmp = setup_test_env();
+    let phantom = tmp.path().join("this/path/does/not/exist/deadbeef.bin");
+    assert!(!phantom.exists(), "Phantom path should not exist");
+    let (mut child, mut stdin, rx) = start_server(tmp.path());
+
+    let result = call_tool(
+        &mut stdin,
+        &rx,
+        10,
+        "get_package_details",
+        serde_json::json!({"path": phantom.to_string_lossy()}),
+    );
+
+    let msg = result.as_str().unwrap_or("");
+    assert!(
+        msg.contains("Path not found"),
+        "Expected 'Path not found' error, got: {msg}"
+    );
+
+    drop(stdin);
+    let _ = child.wait();
+}
+
+// ---------------------------------------------------------------------------
+// 8c. get_package_details — path outside configured root
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mcp_test_get_package_details_path_outside_root() {
+    let tmp = setup_test_env();
+    let outside = tempfile::tempdir().unwrap();
+    let rogue = outside.path().join("rogue_package");
+    std::fs::create_dir_all(&rogue).unwrap();
+    let (mut child, mut stdin, rx) = start_server(tmp.path());
+
+    let result = call_tool(
+        &mut stdin,
+        &rx,
+        10,
+        "get_package_details",
+        serde_json::json!({"path": rogue.to_string_lossy()}),
+    );
+
+    let msg = result.as_str().unwrap_or("");
+    assert!(
+        msg.contains("Path is not inside any configured cache root"),
+        "Expected 'Path is not inside any configured cache root' error, got: {msg}"
+    );
+
+    drop(stdin);
+    let _ = child.wait();
+}
+
+// ---------------------------------------------------------------------------
+// 9. preview_delete
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -574,7 +667,7 @@ fn mcp_test_preview_delete() {
 }
 
 // ---------------------------------------------------------------------------
-// 9. delete_packages
+// 10. delete_packages
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -610,7 +703,7 @@ fn mcp_test_delete_packages() {
 }
 
 // ---------------------------------------------------------------------------
-// 10. delete_packages — path outside root rejected
+// 11. delete_packages — path outside root rejected
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -658,7 +751,7 @@ fn mcp_test_delete_packages_outside_root_rejected() {
 }
 
 // ---------------------------------------------------------------------------
-// 11. empty search returns JSON (not plain string)
+// 12. empty search returns JSON (not plain string)
 // ---------------------------------------------------------------------------
 
 #[test]

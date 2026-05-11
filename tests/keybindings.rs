@@ -73,7 +73,7 @@ fn test_app() -> App {
         ..Default::default()
     };
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = scanner::start(result_tx);
+    let scan_tx = scanner::start(result_tx, None);
     let (_update_tx, update_rx) = mpsc::channel::<ccmd::updater::UpdateMsg>();
     let mut app = App::new(config, result_rx, scan_tx, update_rx);
 
@@ -258,7 +258,7 @@ fn key_d_without_confirm_deletes_immediately() {
         ..Default::default()
     };
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = scanner::start(result_tx);
+    let scan_tx = scanner::start(result_tx, None);
     let (_update_tx, update_rx) = mpsc::channel::<ccmd::updater::UpdateMsg>();
     let mut app = App::new(config, result_rx, scan_tx, update_rx);
 
@@ -311,7 +311,7 @@ fn delete_mode_y_confirms() {
         ..Default::default()
     };
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = scanner::start(result_tx);
+    let scan_tx = scanner::start(result_tx, None);
     let (_update_tx, update_rx) = mpsc::channel::<ccmd::updater::UpdateMsg>();
     let mut app = App::new(config, result_rx, scan_tx, update_rx);
 
@@ -394,7 +394,7 @@ fn bulk_delete_multiple_marked_items() {
         ..Default::default()
     };
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = scanner::start(result_tx);
+    let scan_tx = scanner::start(result_tx, None);
     let (_update_tx, update_rx) = mpsc::channel::<ccmd::updater::UpdateMsg>();
     let mut app = App::new(config, result_rx, scan_tx, update_rx);
 
@@ -470,7 +470,7 @@ fn bulk_delete_with_confirm_dialog() {
         ..Default::default()
     };
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = scanner::start(result_tx);
+    let scan_tx = scanner::start(result_tx, None);
     let (_update_tx, update_rx) = mpsc::channel::<ccmd::updater::UpdateMsg>();
     let mut app = App::new(config, result_rx, scan_tx, update_rx);
 
@@ -535,7 +535,7 @@ fn delete_uses_paths_not_stale_indices() {
         ..Default::default()
     };
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = scanner::start(result_tx);
+    let scan_tx = scanner::start(result_tx, None);
     let (_update_tx, update_rx) = mpsc::channel::<ccmd::updater::UpdateMsg>();
     let mut app = App::new(config, result_rx, scan_tx, update_rx);
 
@@ -901,7 +901,7 @@ fn vuln_propagates_to_ancestors() {
         ..Default::default()
     };
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = scanner::start(result_tx);
+    let scan_tx = scanner::start(result_tx, None);
     let (_update_tx, update_rx) = mpsc::channel::<ccmd::updater::UpdateMsg>();
     let mut app = App::new(config, result_rx, scan_tx, update_rx);
 
@@ -948,7 +948,7 @@ fn outdated_propagates_to_ancestors() {
         ..Default::default()
     };
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = scanner::start(result_tx);
+    let scan_tx = scanner::start(result_tx, None);
     let (_update_tx, update_rx) = mpsc::channel::<ccmd::updater::UpdateMsg>();
     let mut app = App::new(config, result_rx, scan_tx, update_rx);
 
@@ -1193,7 +1193,7 @@ fn full_workflow_filter_mark_delete() {
         ..Default::default()
     };
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = scanner::start(result_tx);
+    let scan_tx = scanner::start(result_tx, None);
     let (_update_tx, update_rx) = mpsc::channel::<ccmd::updater::UpdateMsg>();
     let mut app = App::new(config, result_rx, scan_tx, update_rx);
 
@@ -1640,7 +1640,7 @@ fn delete_while_filter_recomputes_dimmed() {
         ..Default::default()
     };
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = scanner::start(result_tx);
+    let scan_tx = scanner::start(result_tx, None);
     let (_update_tx, update_rx) = mpsc::channel::<ccmd::updater::UpdateMsg>();
     let mut app = App::new(config, result_rx, scan_tx, update_rx);
 
