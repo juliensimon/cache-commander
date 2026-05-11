@@ -27,6 +27,12 @@ fn is_available(cmd: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn allow_live_registry_tests() -> bool {
+    std::env::var("CCMD_E2E_LIVE_REGISTRY")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
 /// How long any single `mvn` / `gradle` invocation is allowed to run before we
 /// kill it. A stalled Maven Central download or a paused Gradle daemon should
 /// not hang the whole CI job indefinitely.
@@ -231,6 +237,13 @@ fn e2e_maven_discovery_and_vuln_scan() {
         names
     );
 
+    if !allow_live_registry_tests() {
+        eprintln!(
+            "SKIP: live OSV/Maven Central assertions disabled; set CCMD_E2E_LIVE_REGISTRY=1"
+        );
+        return;
+    }
+
     // --- OSV vulnerability scan (network call to osv.dev) ---
     let vuln_results = ccmd::security::scan_vulns(&packages);
     assert_vuln_reported(&vuln_results, "log4j-core", "Log4Shell");
@@ -331,6 +344,11 @@ fn e2e_gradle_discovery_and_vuln_scan() {
         "expected Text4Shell PackageId from Gradle cache; got: {:?}",
         names
     );
+
+    if !allow_live_registry_tests() {
+        eprintln!("SKIP: live OSV assertions disabled; set CCMD_E2E_LIVE_REGISTRY=1");
+        return;
+    }
 
     // --- OSV vulnerability scan ---
     // (Maven Central registry-based version-check is covered by the Maven test;
