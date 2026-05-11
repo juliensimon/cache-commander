@@ -36,6 +36,11 @@ pub fn build_query(packages: &[crate::providers::PackageId]) -> String {
     let queries: Vec<serde_json::Value> = packages
         .iter()
         .map(|p| {
+            // Package name goes into the JSON body, not a URL path —
+            // serde_json escapes it for JSON. Percent-encoding here would
+            // make OSV look up the literal encoded string (e.g. Maven
+            // coordinates like `org.apache.logging.log4j:log4j-core` would
+            // become `org%2Eapache%2E…` and never match).
             serde_json::json!({
                 "package": {
                     "name": p.name,
@@ -373,6 +378,49 @@ mod tests {
         let query = build_query(&packages);
         assert!(query.contains("\"name\":\"requests\""));
         assert!(query.contains("\"ecosystem\":\"PyPI\""));
+    }
+
+    #[test]
+    fn build_query_does_not_url_encode_names() {
+        // Regression guard: package names go into the JSON body and must
+        // not be percent-encoded. A Maven coordinate like
+        // `org.apache.logging.log4j:log4j-core` previously got encoded to
+        // `org%2Eapache%2E…`, which OSV looked up verbatim and never
+        // matched (Log4Shell E2E tests went green-but-empty).
+        let packages = vec![
+            crate::providers::PackageId {
+                ecosystem: "Maven",
+                name: "org.apache.logging.log4j:log4j-core".to_string(),
+                version: "2.14.1".to_string(),
+            },
+            crate::providers::PackageId {
+                ecosystem: "PyPI",
+                name: "python-dateutil".to_string(),
+                version: "2.9.0".to_string(),
+            },
+            crate::providers::PackageId {
+                ecosystem: "npm",
+                name: "@types/node".to_string(),
+                version: "20.0.0".to_string(),
+            },
+        ];
+        let query = build_query(&packages);
+        assert!(
+            query.contains("\"name\":\"org.apache.logging.log4j:log4j-core\""),
+            "Maven coord must appear unencoded in body, got: {query}"
+        );
+        assert!(
+            query.contains("\"name\":\"python-dateutil\""),
+            "PyPI hyphenated name must appear unencoded, got: {query}"
+        );
+        assert!(
+            query.contains("\"name\":\"@types/node\""),
+            "npm scoped name must appear unencoded, got: {query}"
+        );
+        assert!(
+            !query.contains('%'),
+            "no percent-encoding should appear in JSON body, got: {query}"
+        );
     }
 
     #[test]

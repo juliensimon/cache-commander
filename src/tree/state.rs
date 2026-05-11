@@ -98,13 +98,19 @@ impl TreeState {
         if node.parent.is_none() {
             return true;
         }
-        // Walk up to root — all ancestors must be expanded
+        // Walk up to root — all ancestors must be expanded.
+        // Use depth to bound the walk: a node at depth D has at most D ancestors.
         let mut current = idx;
-        while let Some(parent) = self.nodes[current].parent {
-            if !self.expanded.contains(&parent) {
-                return false;
+        let max_steps = node.depth as usize + 1;
+        for _ in 0..max_steps {
+            if let Some(parent) = self.nodes[current].parent {
+                if !self.expanded.contains(&parent) {
+                    return false;
+                }
+                current = parent;
+            } else {
+                break;
             }
-            current = parent;
         }
         // Apply filter (case-insensitive substring match)
         if !filter.is_empty() {
@@ -341,21 +347,12 @@ impl TreeState {
     }
 
     fn find_subtree_end(&self, idx: usize) -> usize {
+        // Use depth-based fast path: in DFS order, all descendants of a node
+        // have depth > node.depth. Once we see depth <= node.depth, we've
+        // exited the subtree. This avoids walking parent chains for every node.
+        let target_depth = self.nodes[idx].depth;
         let mut end = idx + 1;
-        while end < self.nodes.len() {
-            // Check if this node is a descendant of idx
-            let mut is_descendant = false;
-            let mut current = end;
-            while let Some(parent) = self.nodes[current].parent {
-                if parent == idx {
-                    is_descendant = true;
-                    break;
-                }
-                current = parent;
-            }
-            if !is_descendant {
-                break;
-            }
+        while end < self.nodes.len() && self.nodes[end].depth > target_depth {
             end += 1;
         }
         end
@@ -578,26 +575,21 @@ impl TreeState {
                 }
             }
 
-            // Adjust expanded/marked sets
-            let mut new_expanded = HashSet::new();
-            for &e in &self.expanded {
-                if e < idx {
-                    new_expanded.insert(e);
-                } else if e >= end {
-                    new_expanded.insert(e - count);
-                }
-            }
-            self.expanded = new_expanded;
-
-            let mut new_marked = HashSet::new();
-            for &m in &self.marked {
-                if m < idx {
-                    new_marked.insert(m);
-                } else if m >= end {
-                    new_marked.insert(m - count);
-                }
-            }
-            self.marked = new_marked;
+            // Adjust expanded/marked sets in one pass each
+            let removed_range = idx..end;
+            let shift = count;
+            self.expanded = self
+                .expanded
+                .iter()
+                .filter(|&&e| !removed_range.contains(&e))
+                .map(|&e| if e >= end { e - shift } else { e })
+                .collect();
+            self.marked = self
+                .marked
+                .iter()
+                .filter(|&&m| !removed_range.contains(&m))
+                .map(|&m| if m >= end { m - shift } else { m })
+                .collect();
         }
 
         // Clear dimmed — will be recomputed by caller if filter is active
