@@ -993,7 +993,7 @@ fn scanner_expand_bun_cache_shows_semantic_names() {
             // so semantic_name returns None and the raw scope name is used.
             // Their actual packages (@types/node, @babel/core) are nested inside.
             assert!(
-                names.iter().any(|n| *n == "@types"),
+                names.contains(&"@types"),
                 "Should show '@types' scope dir: {:?}",
                 names
             );

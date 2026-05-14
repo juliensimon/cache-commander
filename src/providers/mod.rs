@@ -11,6 +11,7 @@ pub mod maven;
 pub mod npm;
 pub mod pip;
 pub mod pnpm;
+pub mod poetry;
 pub mod pre_commit;
 pub mod prisma;
 pub mod swiftpm;
@@ -66,6 +67,7 @@ pub fn detect(path: &Path) -> CacheKind {
     match name.as_str() {
         "huggingface" => return CacheKind::HuggingFace,
         "pip" => return CacheKind::Pip,
+        "pypoetry" => return CacheKind::Poetry,
         "uv" => return CacheKind::Uv,
         "Homebrew" => return CacheKind::Homebrew,
         "pre-commit" => return CacheKind::PreCommit,
@@ -125,6 +127,7 @@ pub fn detect(path: &Path) -> CacheKind {
             ".bun" => return CacheKind::Bun,
             "huggingface" => return CacheKind::HuggingFace,
             "pip" => return CacheKind::Pip,
+            "pypoetry" => return CacheKind::Poetry,
             "uv" => return CacheKind::Uv,
             "Homebrew" => return CacheKind::Homebrew,
             "pre-commit" => return CacheKind::PreCommit,
@@ -172,6 +175,7 @@ pub fn semantic_name(kind: CacheKind, path: &Path) -> Option<String> {
     match kind {
         CacheKind::HuggingFace => huggingface::semantic_name(path),
         CacheKind::Pip => pip::semantic_name(path),
+        CacheKind::Poetry => poetry::semantic_name(path),
         CacheKind::Uv => uv::semantic_name(path),
         CacheKind::Npm => npm::semantic_name(path),
         CacheKind::Homebrew => homebrew::semantic_name(path),
@@ -199,6 +203,7 @@ pub fn metadata(kind: CacheKind, path: &Path) -> Vec<MetadataField> {
     match kind {
         CacheKind::HuggingFace => huggingface::metadata(path),
         CacheKind::Pip => pip::metadata(path),
+        CacheKind::Poetry => poetry::metadata(path),
         CacheKind::Uv => uv::metadata(path),
         CacheKind::Npm => npm::metadata(path),
         CacheKind::Homebrew => homebrew::metadata(path),
@@ -232,6 +237,7 @@ pub fn package_id(kind: CacheKind, path: &Path) -> Option<PackageId> {
     match kind {
         CacheKind::Uv => uv::package_id(path),
         CacheKind::Pip => pip::package_id(path),
+        CacheKind::Poetry => poetry::package_id(path),
         CacheKind::Npm => npm::package_id(path),
         CacheKind::Cargo => cargo::package_id(path),
         CacheKind::Yarn => yarn::package_id(path),
@@ -268,6 +274,7 @@ pub fn upgrade_command(kind: CacheKind, name: &str, version: &str) -> Option<Str
     }
     match kind {
         CacheKind::Pip => Some(format!("pip install '{name}>={version}'")),
+        CacheKind::Poetry => Some(format!("poetry add '{name}>={version}'")),
         CacheKind::Uv => Some(format!("uv pip install '{name}>={version}'")),
         CacheKind::Npm => Some(format!("npm install {name}@{version}")),
         CacheKind::Cargo => Some(format!("cargo update -p {name}")),
@@ -325,9 +332,30 @@ fn has_adjacent_components(path: &Path, first: &str, second: &str) -> bool {
         .any(|w| w[0] == first && w[1] == second)
 }
 
+/// Safety for Poetry cache paths under `pypoetry/` (issue #21).
+fn poetry_safety(path: &Path) -> SafetyLevel {
+    let comps: Vec<&std::ffi::OsStr> = path.components().map(|c| c.as_os_str()).collect();
+    let Some(pi) = comps.iter().position(|&c| c == "pypoetry") else {
+        return SafetyLevel::Safe;
+    };
+    if comps.iter().skip(pi + 1).any(|&c| c == "virtualenvs") {
+        return SafetyLevel::Caution;
+    }
+    if comps.iter().skip(pi + 1).any(|&c| c == "artifacts") {
+        return SafetyLevel::Safe;
+    }
+    for i in (pi + 1)..comps.len().saturating_sub(1) {
+        if comps[i] == "cache" && comps[i + 1] == "repositories" {
+            return SafetyLevel::Safe;
+        }
+    }
+    SafetyLevel::Caution
+}
+
 /// Get safety level for deletion.
 pub fn safety(kind: CacheKind, path: &Path) -> SafetyLevel {
     match kind {
+        CacheKind::Poetry => poetry_safety(path),
         CacheKind::Pnpm => {
             if path.to_string_lossy().contains("node_modules/.pnpm") {
                 SafetyLevel::Caution
@@ -468,6 +496,52 @@ mod tests {
         assert_eq!(
             detect(&PathBuf::from("/home/user/.cache/uv")),
             CacheKind::Uv
+        );
+    }
+
+    #[test]
+    fn detect_pypoetry_xdg_cache() {
+        assert_eq!(
+            detect(&PathBuf::from("/home/user/.cache/pypoetry")),
+            CacheKind::Poetry
+        );
+    }
+
+    #[test]
+    fn detect_pypoetry_macos_library_caches() {
+        assert_eq!(
+            detect(&PathBuf::from("/Users/me/Library/Caches/pypoetry")),
+            CacheKind::Poetry
+        );
+    }
+
+    #[test]
+    fn detect_pypoetry_artifacts_subdir() {
+        assert_eq!(
+            detect(&PathBuf::from(
+                "/home/user/.cache/pypoetry/artifacts/ab/cd/pkg-1.0.0-py3-none-any.whl"
+            )),
+            CacheKind::Poetry
+        );
+    }
+
+    #[test]
+    fn detect_pypoetry_virtualenvs_subdir() {
+        assert_eq!(
+            detect(&PathBuf::from(
+                "/Users/me/Library/Caches/pypoetry/virtualenvs/myproj-sOaFvs2V-py3.12"
+            )),
+            CacheKind::Poetry
+        );
+    }
+
+    #[test]
+    fn detect_pypoetry_cache_repositories() {
+        assert_eq!(
+            detect(&PathBuf::from(
+                "/home/user/.cache/pypoetry/cache/repositories/pypi"
+            )),
+            CacheKind::Poetry
         );
     }
 
@@ -728,6 +802,50 @@ mod tests {
     }
 
     #[test]
+    fn safety_poetry_virtualenvs_is_caution() {
+        assert_eq!(
+            safety(
+                CacheKind::Poetry,
+                &PathBuf::from("/Users/me/Library/Caches/pypoetry/virtualenvs/foo-py3.12")
+            ),
+            SafetyLevel::Caution
+        );
+    }
+
+    #[test]
+    fn safety_poetry_artifacts_is_safe() {
+        assert_eq!(
+            safety(
+                CacheKind::Poetry,
+                &PathBuf::from("/home/user/.cache/pypoetry/artifacts/ab/wheel.whl")
+            ),
+            SafetyLevel::Safe
+        );
+    }
+
+    #[test]
+    fn safety_poetry_cache_repositories_is_safe() {
+        assert_eq!(
+            safety(
+                CacheKind::Poetry,
+                &PathBuf::from("/home/user/.cache/pypoetry/cache/repositories/pypi")
+            ),
+            SafetyLevel::Safe
+        );
+    }
+
+    #[test]
+    fn safety_poetry_virtualenvs_suffix_is_not_virtualenvs_bucket() {
+        assert_eq!(
+            safety(
+                CacheKind::Poetry,
+                &PathBuf::from("/home/user/.cache/pypoetry/virtualenvs-backup/old")
+            ),
+            SafetyLevel::Caution
+        );
+    }
+
+    #[test]
     fn safety_pnpm_virtual_store_is_caution() {
         assert_eq!(
             safety(
@@ -802,6 +920,14 @@ mod tests {
         assert_eq!(
             upgrade_command(CacheKind::Uv, "flask", "3.1.0"),
             Some("uv pip install 'flask>=3.1.0'".to_string())
+        );
+    }
+
+    #[test]
+    fn upgrade_command_poetry() {
+        assert_eq!(
+            upgrade_command(CacheKind::Poetry, "requests", "2.32.0"),
+            Some("poetry add 'requests>=2.32.0'".to_string())
         );
     }
 
@@ -1431,6 +1557,7 @@ mod tests {
         let all = [
             CacheKind::HuggingFace,
             CacheKind::Pip,
+            CacheKind::Poetry,
             CacheKind::Uv,
             CacheKind::Npm,
             CacheKind::Homebrew,
@@ -1448,6 +1575,7 @@ mod tests {
             CacheKind::Gradle,
             CacheKind::SwiftPm,
             CacheKind::Xcode,
+            CacheKind::Go,
             CacheKind::Unknown,
         ];
         for kind in &all {
