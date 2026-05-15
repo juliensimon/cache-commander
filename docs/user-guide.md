@@ -131,7 +131,7 @@ When you select an item, the right panel shows:
 Press **`V`** to scan all cached packages against the [OSV.dev](https://osv.dev) vulnerability database. Press **`v`** (lowercase) to scan only the selected item and its children.
 
 Participating providers (cover all package-manager ecosystems supported by OSV):
-- **pip**, **uv** → OSV `PyPI`
+- **pip**, **uv**, **Poetry** → OSV `PyPI`
 - **npm**, **Yarn**, **pnpm**, **Bun** → OSV `npm`
 - **Cargo** → OSV `crates.io`
 - **Maven**, **Gradle** → OSV `Maven`
@@ -152,7 +152,7 @@ Results appear as `⚠` icons in the tree and detailed CVE info in the right pan
 Press **`O`** to check all packages against their registries; **`o`** for just the selected item.
 
 Registries queried:
-- **pip**, **uv** → PyPI JSON API
+- **pip**, **uv**, **Poetry** → PyPI JSON API
 - **npm**, **Yarn**, **pnpm**, **Bun** → npm registry
 - **Cargo** → crates.io
 - **Maven**, **Gradle** → Maven Central (`maven-metadata.xml`, prefers `<release>` over `<latest>` to avoid SNAPSHOTs)
@@ -264,6 +264,7 @@ When viewing a vulnerable or outdated package, press **`c`** to copy the upgrade
 Shell commands:
 - **pip** → `pip install 'requests>=2.32.0'`
 - **uv** → `uv pip install 'requests>=2.32.0'`
+- **Poetry** → `poetry add 'requests>=2.32.0'`
 - **npm** → `npm install express@4.19.0`
 - **Yarn** → `yarn add express@4.19.0`
 - **pnpm** → `pnpm add express@4.19.0`

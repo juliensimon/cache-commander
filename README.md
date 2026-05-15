@@ -79,7 +79,7 @@ ccmd --root ~/.cache/huggingface  # scan a specific directory
 ### Browse and Understand
 
 - **Two-pane TUI** — navigable tree on the left, details on the right
-- **20 cache providers** — semantic names instead of hash directories
+- **21 cache providers** — semantic names instead of hash directories
 - **Safety levels** — green (safe to delete), yellow (may cause rebuilds), red (contains state)
 - **Sort** by size, name, or last modified
 - **Search** with `/` — case-insensitive filter across the tree
@@ -110,6 +110,7 @@ ccmd --root ~/.cache/huggingface  # scan a specific directory
 | HuggingFace | `~/.cache/huggingface` | Model/dataset names, revisions |
 | pip | `~/.cache/pip` | Wheel packages |
 | uv | `~/.cache/uv` | Package names via dist-info |
+| Poetry | `~/.cache/pypoetry`, `~/Library/Caches/pypoetry` | Wheels and sdists from `artifacts/` |
 | npm | `~/.npm` | npx packages + transitive node_modules deps |
 | Homebrew | `~/Library/Caches/Homebrew` | Bottles, casks |
 | Cargo | `~/.cargo/registry` | Crate names and versions |
@@ -137,6 +138,7 @@ All providers support tree navigation, size display, and deletion. This matrix s
 | HuggingFace | Safe | — | — | — |
 | pip | Safe | OSV `PyPI` | PyPI | `pip install` |
 | uv | Safe | OSV `PyPI` | PyPI | `uv pip install` |
+| Poetry | `artifacts/` + `cache/repositories/` = Safe; `virtualenvs/` = **Caution** | OSV `PyPI` | PyPI | `poetry add` |
 | npm | Safe | OSV `npm` | npm registry | `npm install` |
 | Homebrew | Safe | — | — | — |
 | Cargo | Safe | OSV `crates.io` | crates.io | `cargo update -p` |

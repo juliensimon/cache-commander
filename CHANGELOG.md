@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-05-15
+
+### Added
+- **Poetry provider (#21)**: new `CacheKind::Poetry` covers Poetry's
+  `~/.cache/pypoetry` (Linux) and `~/Library/Caches/pypoetry` (macOS).
+  Parses semantic names from `.whl` and `.tar.gz` filenames under
+  `artifacts/` for OSV `PyPI` scanning and PyPI version checks. Press
+  `c` to copy a `poetry add '<pkg>>=<version>'` upgrade command.
+  `artifacts/` and `cache/repositories/` are Safe; `virtualenvs/` is
+  Caution (re-creating an env takes time). Brings provider count to 21.
+
+### Fixed
+- Bumped `rustls-webpki` to patch RUSTSEC-2026-0104.
+- OSV client: package names are no longer percent-encoded in JSON
+  request bodies (only in URL paths). The previous behavior caused
+  lookup misses for any package whose name contained a character that
+  triggered percent-encoding.
+
+### Tests & infrastructure
+- E2E JVM provider workflow gained a `continue-on-error` knob so a
+  transient Maven Central / Gradle distribution outage no longer fails
+  the nightly run.
+
 ## [0.4.0] — 2026-04-21
 
 ### Added
