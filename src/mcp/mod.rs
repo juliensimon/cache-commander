@@ -38,6 +38,7 @@ fn canonical_ecosystem(s: &str) -> Option<&'static str> {
         "npm" | "npx" | "node" | "nodejs" => Some("npm"),
         "pip" | "pypi" | "python" => Some("pip"),
         "uv" => Some("uv"),
+        "poetry" => Some("poetry"),
         "cargo" | "crates" | "crates.io" | "rust" => Some("cargo"),
         "homebrew" | "brew" => Some("homebrew"),
         s if s.contains("huggingface") => Some("huggingface"),
@@ -61,16 +62,15 @@ fn matches_ecosystem(label: &str, filter: &str) -> bool {
     }
     // Try canonical match first (handles both vocabularies)
     if let (Some(cl), Some(cf)) = (canonical_ecosystem(label), canonical_ecosystem(filter)) {
-        // pip and uv are both Python — match either when user says "python" or "pypi"
-        let python_group = |c: &str| c == "pip" || c == "uv";
+        // pip, uv, and Poetry share the PyPI ecosystem for vulnerability data.
+        let python_group = |c: &str| c == "pip" || c == "uv" || c == "poetry";
         if cl == cf {
             return true;
         }
         if python_group(cl) && python_group(cf) {
-            return canonical_ecosystem(filter) == Some("pip")
-                || canonical_ecosystem(filter) == Some("uv");
+            return true;
         }
-        // "python"/"pypi" should match both pip and uv
+        // "python"/"pypi" should match pip, uv, and Poetry caches
         if cf == "pip" && python_group(cl) {
             return true;
         }
@@ -1202,6 +1202,8 @@ mod tests {
         assert!(matches_ecosystem("pip", "pypi"));
         assert!(matches_ecosystem("uv", "python"));
         assert!(matches_ecosystem("uv", "pypi"));
+        assert!(matches_ecosystem("Poetry", "poetry"));
+        assert!(matches_ecosystem("Poetry", "pypi"));
         assert!(matches_ecosystem("Cargo", "rust"));
         assert!(matches_ecosystem("Cargo", "crates"));
         assert!(matches_ecosystem("Homebrew", "brew"));

@@ -5,6 +5,7 @@ use std::time::SystemTime;
 pub enum CacheKind {
     HuggingFace,
     Pip,
+    Poetry,
     Uv,
     Npm,
     Homebrew,
@@ -32,6 +33,7 @@ impl CacheKind {
         match self {
             Self::HuggingFace => "HuggingFace Hub",
             Self::Pip => "pip",
+            Self::Poetry => "Poetry",
             Self::Uv => "uv",
             Self::Npm => "npm",
             Self::Homebrew => "Homebrew",
@@ -58,6 +60,9 @@ impl CacheKind {
         match self {
             Self::HuggingFace => "ML model hub — cached models, datasets, and spaces",
             Self::Pip => "Python package installer — cached wheels and HTTP responses",
+            Self::Poetry => {
+                "Poetry — cached wheels, sdists, repository metadata, and managed virtualenvs"
+            }
             Self::Uv => "Fast Python package manager — cached archives and built wheels",
             Self::Npm => "Node.js package manager — content-addressable package cache",
             Self::Homebrew => "macOS package manager — downloaded bottles and cask installers",
@@ -88,6 +93,7 @@ impl CacheKind {
         match self {
             Self::HuggingFace => "https://huggingface.co",
             Self::Pip => "https://pip.pypa.io",
+            Self::Poetry => "https://python-poetry.org",
             Self::Uv => "https://github.com/astral-sh/uv",
             Self::Npm => "https://www.npmjs.com",
             Self::Homebrew => "https://brew.sh",
@@ -209,6 +215,7 @@ mod tests {
         let kinds = [
             CacheKind::HuggingFace,
             CacheKind::Pip,
+            CacheKind::Poetry,
             CacheKind::Uv,
             CacheKind::Npm,
             CacheKind::Homebrew,
@@ -245,6 +252,7 @@ mod tests {
         let all = [
             CacheKind::HuggingFace,
             CacheKind::Pip,
+            CacheKind::Poetry,
             CacheKind::Uv,
             CacheKind::Npm,
             CacheKind::Homebrew,

@@ -342,4 +342,24 @@ mod tests {
         // Should log, not panic
         send_result(&tx, ScanResult::RootsScanned(vec![]));
     }
+
+    #[test]
+    fn discover_packages_dedup_poetry_same_wheel_two_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("pypoetry").join("artifacts");
+        let p1 = base.join("aa").join("11");
+        let p2 = base.join("bb").join("22");
+        std::fs::create_dir_all(&p1).unwrap();
+        std::fs::create_dir_all(&p2).unwrap();
+        let w = "requests-2.31.0-py3-none-any.whl";
+        std::fs::write(p1.join(w), "").unwrap();
+        std::fs::write(p2.join(w), "").unwrap();
+        let roots = vec![tmp.path().to_path_buf()];
+        let packs = discover_packages(&roots);
+        assert_eq!(
+            packs.len(),
+            1,
+            "same PyPI (name, version) from two artifact paths should dedup: {packs:?}"
+        );
+    }
 }
