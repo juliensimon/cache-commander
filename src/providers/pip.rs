@@ -5,8 +5,8 @@ pub fn semantic_name(path: &Path) -> Option<String> {
     let name = path.file_name()?.to_string_lossy().to_string();
 
     // pip cache uses directories like "wheels/xx/yy/hash/package-version-*.whl"
-    // or "http/hash" for HTTP responses
-    if name == "wheels" || name == "http" || name == "selfcheck" {
+    // or "http-v2/hash" for HTTP responses ("http" before pip 23.3)
+    if name == "wheels" || name == "http" || name == "http-v2" || name == "selfcheck" {
         return None; // Keep directory names as-is
     }
 
@@ -59,7 +59,7 @@ pub fn metadata(path: &Path) -> Vec<MetadataField> {
                 });
             }
         }
-        "http" => {
+        "http" | "http-v2" => {
             fields.push(MetadataField {
                 label: "Contents".to_string(),
                 value: "HTTP response cache".to_string(),
@@ -127,6 +127,14 @@ mod tests {
     #[test]
     fn metadata_http_dir() {
         let fields = metadata(&PathBuf::from("/cache/pip/http"));
+        assert_eq!(fields.len(), 1);
+        assert!(fields[0].value.contains("HTTP"));
+    }
+
+    #[test]
+    fn metadata_http_v2_dir() {
+        // pip >= 23.3 stores HTTP responses under http-v2.
+        let fields = metadata(&PathBuf::from("/cache/pip/http-v2"));
         assert_eq!(fields.len(), 1);
         assert!(fields[0].value.contains("HTTP"));
     }

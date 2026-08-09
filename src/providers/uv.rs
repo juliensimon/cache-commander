@@ -4,16 +4,21 @@ use std::path::Path;
 pub fn semantic_name(path: &Path) -> Option<String> {
     let name = path.file_name()?.to_string_lossy().to_string();
 
+    // uv treats its bucket layout as an implementation detail and bumps the
+    // version suffix often (wheels-v6, sdists-v9, simple-v24, ...), so match
+    // on prefix only — never on exact versioned names.
     match name.as_str() {
-        "archive-v0" => Some("Package Archives".to_string()),
-        "simple-v20" => Some("Package Index Cache".to_string()),
-        "wheels-v6" => Some("Built Wheels".to_string()),
-        "interpreter-v4" => Some("Interpreter Cache".to_string()),
-        "sdists-v7" => Some("Source Distributions".to_string()),
-        "builds-v0" => Some("Build Cache".to_string()),
         _ if name.starts_with("archive-") => Some("Package Archives".to_string()),
-        _ if name.starts_with("simple-") => Some("Package Index".to_string()),
+        _ if name.starts_with("simple-") => Some("Package Index Cache".to_string()),
         _ if name.starts_with("wheels-") => Some("Built Wheels".to_string()),
+        _ if name.starts_with("interpreter-") => Some("Interpreter Cache".to_string()),
+        _ if name.starts_with("sdists-") => Some("Source Distributions".to_string()),
+        _ if name.starts_with("builds-") => Some("Build Cache".to_string()),
+        _ if name.starts_with("environments-") => Some("Cached Environments".to_string()),
+        _ if name.starts_with("python-") => Some("Python Downloads".to_string()),
+        _ if name.starts_with("binaries-") => Some("Tool Binaries".to_string()),
+        _ if name.starts_with("git-") => Some("Git Repositories".to_string()),
+        _ if name.starts_with("flat-index-") => Some("Flat Index Cache".to_string()),
         _ if name.starts_with(".tmp") => Some("[tmp] build artifact".to_string()),
         _ => {
             // Hash directories inside archive-v0: try to identify by dist-info
@@ -114,6 +119,11 @@ pub fn metadata(path: &Path) -> Vec<MetadataField> {
             label: "Contents".to_string(),
             value: "Pre-built wheel cache".to_string(),
         });
+    } else if name.starts_with("sdists") {
+        fields.push(MetadataField {
+            label: "Contents".to_string(),
+            value: "Source distribution cache".to_string(),
+        });
     }
 
     fields
@@ -152,6 +162,33 @@ mod tests {
     fn semantic_name_future_archive_version() {
         let path = PathBuf::from("/cache/uv/archive-v5");
         assert_eq!(semantic_name(&path), Some("Package Archives".into()));
+    }
+
+    #[test]
+    fn semantic_name_current_bucket_versions() {
+        // uv 0.12.x buckets — prefix matching must survive version bumps.
+        let cases = [
+            ("sdists-v9", "Source Distributions"),
+            ("simple-v24", "Package Index Cache"),
+            ("wheels-v6", "Built Wheels"),
+            ("interpreter-v4", "Interpreter Cache"),
+            ("environments-v2", "Cached Environments"),
+            ("python-v0", "Python Downloads"),
+            ("binaries-v0", "Tool Binaries"),
+            ("git-v0", "Git Repositories"),
+            ("flat-index-v4", "Flat Index Cache"),
+        ];
+        for (dir, label) in cases {
+            let path = PathBuf::from(format!("/cache/uv/{dir}"));
+            assert_eq!(semantic_name(&path), Some(label.into()), "{dir}");
+        }
+    }
+
+    #[test]
+    fn metadata_sdists_dir() {
+        let fields = metadata(&PathBuf::from("/cache/uv/sdists-v9"));
+        assert_eq!(fields.len(), 1);
+        assert!(fields[0].value.contains("Source distribution"));
     }
 
     #[test]
