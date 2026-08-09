@@ -5,6 +5,10 @@
 ignore = [
     # Transitive dep via ratatui — no direct usage. Revisit: 2026-10-01
     { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained but only used transitively via ratatui; revisit 2026-10-01" },
+    # Vulnerable code path (Streamable HTTP server transport) is not compiled:
+    # ccmd enables only the stdio transport (transport-io feature). Fix requires
+    # rmcp >= 1.4, a major API migration tracked in issue #45. Revisit: 2026-11-01
+    { id = "RUSTSEC-2026-0189", reason = "rmcp DNS rebinding is in the Streamable HTTP transport, which ccmd does not enable (stdio only); upgrade tracked in #45; revisit 2026-11-01" },
 ]
 
 [licenses]
