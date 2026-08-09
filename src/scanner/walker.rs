@@ -35,10 +35,7 @@ pub fn quick_size(path: &Path) -> Option<u64> {
             total += p.metadata().map(|m| m.len()).unwrap_or(0);
         } else if p.is_dir() {
             // Recurse but only if shallow
-            match quick_size(&p) {
-                Some(s) => total += s,
-                None => return None,
-            }
+            total += quick_size(&p)?;
         }
     }
     Some(total)
