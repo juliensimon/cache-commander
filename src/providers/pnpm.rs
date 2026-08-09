@@ -106,9 +106,9 @@ pub fn semantic_name(path: &Path) -> Option<String> {
             return Some("Package Index".to_string());
         }
         // pnpm 11 (store v11): the JSON index dir was replaced by a single
-        // SQLite database (plus WAL/SHM sidecars).
-        // ponytail: label only — package IDs from index.db need SQLite+MessagePack, see issue #39
-        if name.starts_with("index.db") {
+        // SQLite database plus its WAL/SHM sidecars. Labeling only —
+        // extracting package IDs from index.db is tracked in issue #39.
+        if matches!(name.as_str(), "index.db" | "index.db-wal" | "index.db-shm") {
             return Some("Package Index (SQLite)".to_string());
         }
     }
