@@ -101,6 +101,7 @@ mod tests {
     fn semantic_name_returns_none_for_toplevel_dirs() {
         assert_eq!(semantic_name(&PathBuf::from("/cache/pip/wheels")), None);
         assert_eq!(semantic_name(&PathBuf::from("/cache/pip/http")), None);
+        assert_eq!(semantic_name(&PathBuf::from("/cache/pip/http-v2")), None);
         assert_eq!(semantic_name(&PathBuf::from("/cache/pip/selfcheck")), None);
     }
 
