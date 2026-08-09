@@ -105,6 +105,12 @@ pub fn semantic_name(path: &Path) -> Option<String> {
         if name == "index" {
             return Some("Package Index".to_string());
         }
+        // pnpm 11 (store v11): the JSON index dir was replaced by a single
+        // SQLite database (plus WAL/SHM sidecars).
+        // ponytail: label only — package IDs from index.db need SQLite+MessagePack, see issue #39
+        if name.starts_with("index.db") {
+            return Some("Package Index (SQLite)".to_string());
+        }
     }
 
     // Index files: {hash}-name@version.json → "name version"
@@ -253,6 +259,20 @@ pub fn metadata(path: &Path) -> Vec<MetadataField> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    // --- pnpm 11 SQLite index ---
+
+    #[test]
+    fn semantic_name_v11_sqlite_index() {
+        for f in ["index.db", "index.db-wal", "index.db-shm"] {
+            let path = PathBuf::from(format!("/home/u/.local/share/pnpm/store/v11/{f}"));
+            assert_eq!(
+                semantic_name(&path),
+                Some("Package Index (SQLite)".into()),
+                "{f}"
+            );
+        }
+    }
 
     // --- Detection ---
 
