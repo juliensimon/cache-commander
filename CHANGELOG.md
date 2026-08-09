@@ -2,6 +2,42 @@
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-08-09
+
+Provider-layout refresh: an audit of all 21 providers against the latest
+package-manager releases (#35–#38) found four stale assumptions, fixed here.
+
+### Fixed
+- **Xcode (#35)**: Xcode 26 renamed the DerivedData `Info.plist` key from
+  `WORKSPACE_PATH` to `WorkspacePath`, so the Workspace safety cue never
+  appeared on modern Xcode. The modern key is now tried first with a
+  legacy fallback.
+- **uv (#36)**: cache buckets are matched by prefix instead of exact
+  versioned names (uv had moved to `sdists-v9` / `simple-v24`, leaving
+  those buckets unlabeled), and the newer `environments-` / `python-` /
+  `binaries-` / `git-` / `flat-index-` buckets get labels.
+- **pip (#37)**: the `http-v2` HTTP cache directory (pip ≥ 23.3) is now
+  recognized alongside the legacy `http`.
+- **pnpm (#38)**: pnpm 11 (store v11) replaced the per-package JSON index
+  with a SQLite `index.db`; it and its WAL/SHM sidecars are now labeled
+  "Package Index (SQLite)". Reading package identities out of the SQLite
+  index for OSV scanning is tracked in #39.
+- CI: new clippy `question_mark` lint in `scanner/walker.rs`; bumped
+  `crossbeam-epoch` to 0.9.20 (RUSTSEC-2026-0204); documented deny.toml
+  ignore for RUSTSEC-2026-0189 (rmcp Streamable HTTP transport, which
+  ccmd does not compile — stdio only; upgrade tracked in #45).
+
+### Tests & infrastructure
+- New replayable TUI smoke test (`scripts/tui-smoke-test.sh`): drives the
+  real binary in tmux against a fabricated cache fixture, 16 assertions
+  covering the provider fixes above. Requires tmux; not wired into CI.
+
+### Docs
+- Freshness pass: version-check registry lists now include Maven Central
+  and proxy.golang.org; default cache roots described accurately; pip/uv/
+  pnpm locations updated; pnpm 11 limitation footnote; `--no-update-check`
+  documented.
+
 ## [0.4.1] — 2026-05-15
 
 ### Added
