@@ -125,7 +125,7 @@ assert_pane() { # assert_pane <description> <expected substring>
 # Navigation below never assumes exact rows — it walks down to the node it
 # wants — but section order must follow the on-screen order top to bottom.
 tmux new-session -d -s "$SESSION" -x 200 -y 50 \
-    "$BIN --no-update-check --sort name --root '$FIXTURE/caches' --root '$FIXTURE/.pnpm-store' --root '$FIXTURE/Xcode/DerivedData'"
+    "'$BIN' --no-update-check --sort name --root '$FIXTURE/caches' --root '$FIXTURE/.pnpm-store' --root '$FIXTURE/Xcode/DerivedData'"
 sleep 3
 
 assert_pane "app launched with 3 roots" "3 roots"
