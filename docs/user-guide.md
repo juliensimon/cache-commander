@@ -35,16 +35,16 @@ cargo build --release
 Pre-release versions (`rc`, `beta`) are available for early testing but not served by default install methods.
 
 ```bash
-# From crates.io — explicit version required
-cargo install ccmd@0.3.1
+# From crates.io — explicit version required (substitute the version you want)
+cargo install ccmd@<version>
 
 # From GitHub Releases — download the tagged prerelease
-curl -LO https://github.com/juliensimon/cache-commander/releases/download/v0.3.1/ccmd-aarch64-apple-darwin.tar.gz
+curl -LO https://github.com/juliensimon/cache-commander/releases/download/v<version>/ccmd-aarch64-apple-darwin.tar.gz
 tar xzf ccmd-aarch64-apple-darwin.tar.gz
 sudo mv ccmd /usr/local/bin/
 
 # Linux .deb
-curl -LO https://github.com/juliensimon/cache-commander/releases/download/v0.3.1/ccmd-x86_64-unknown-linux-gnu.deb
+curl -LO https://github.com/juliensimon/cache-commander/releases/download/v<version>/ccmd-x86_64-unknown-linux-gnu.deb
 sudo dpkg -i ccmd-x86_64-unknown-linux-gnu.deb
 
 # From source
@@ -61,7 +61,7 @@ Launch `ccmd` with no arguments to scan your default cache locations:
 ccmd
 ```
 
-On macOS, this scans `~/.cache`, `~/Library/Caches`, `~/.npm`, and `~/.cargo/registry` (if they exist). On Linux, it scans `~/.cache`.
+This scans `~/.cache` (plus `~/Library/Caches` on macOS) and, where they exist, `~/.npm`, `~/.cargo/registry`, `~/.m2/repository`, `~/.gradle/caches`, the probed Yarn/pnpm/Bun/Go cache locations, and (on macOS) the Xcode cache directories.
 
 You'll see a two-pane interface: a navigable tree on the left and a detail panel on the right.
 
@@ -321,6 +321,7 @@ enabled = false
 | `--no-confirm` | Skip delete confirmation |
 | `--vulncheck` | Scan for CVEs on startup |
 | `--versioncheck` | Check for outdated packages on startup |
+| `--no-update-check` | Disable the startup check for ccmd updates |
 
 CLI flags override config file values. If `--root` is specified, only those roots are scanned (not the defaults).
 

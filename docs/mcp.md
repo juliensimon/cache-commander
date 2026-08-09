@@ -110,7 +110,7 @@ Claude calls `preview_delete` first, shows you what would be removed, then calls
 | `search_packages` | Find packages by name with optional ecosystem filter |
 | `get_package_details` | Full metadata for a specific cache entry (size, provider, safety level) |
 | `scan_vulnerabilities` | Check cached packages for known CVEs via [OSV.dev](https://osv.dev) |
-| `check_outdated` | Compare cached versions against PyPI, crates.io, and npm registries |
+| `check_outdated` | Compare cached versions against PyPI, crates.io, npm, Maven Central, and proxy.golang.org |
 | `preview_delete` | Dry-run showing what would be deleted and how much space would be freed |
 | `delete_packages` | Delete cache entries with safety enforcement |
 
@@ -138,9 +138,9 @@ This prevents accidental deletion of entries that may be shared, actively in use
 
 The MCP server scans the same default cache locations as the TUI:
 
-- `~/.cache` (Linux and macOS)
-- `~/Library/Caches` (macOS)
-- `~/.npm` (if it exists)
-- `~/.cargo/registry` (if it exists)
+- `~/.cache` (Linux and macOS) and `~/Library/Caches` (macOS)
+- `~/.npm`, `~/.cargo/registry`, `~/.m2/repository`, `~/.gradle/caches` (if they exist)
+- Yarn, pnpm, Bun, and Go caches at their probed locations (e.g. `pnpm store path`, `$GOMODCACHE`)
+- Xcode caches on macOS (`DerivedData`, `iOS DeviceSupport`, `CoreSimulator/Caches`)
 
 These can be overridden in `~/.config/ccmd/config.toml` — see the [user guide](user-guide.md) for configuration details.

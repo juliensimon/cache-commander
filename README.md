@@ -87,7 +87,7 @@ ccmd --root ~/.cache/huggingface  # scan a specific directory
 ### Security Scanning
 
 - **Vulnerability scanning** — queries [OSV.dev](https://osv.dev) for known CVEs in cached packages
-- **Version checking** — compares cached versions against PyPI, crates.io, and npm registries
+- **Version checking** — compares cached versions against PyPI, crates.io, npm, Maven Central, and proxy.golang.org
 - **Fix versions** — shows which version resolves each CVE, with upgrade commands
 - **npm supply chain** — scans transitive deps in npx cache, flags packages with install scripts
 - **Filter by status** — dim non-vulnerable items to focus on what matters
@@ -108,8 +108,8 @@ ccmd --root ~/.cache/huggingface  # scan a specific directory
 | Provider | Location | Semantic names |
 |----------|----------|----------------|
 | HuggingFace | `~/.cache/huggingface` | Model/dataset names, revisions |
-| pip | `~/.cache/pip` | Wheel packages |
-| uv | `~/.cache/uv` | Package names via dist-info |
+| pip | `~/.cache/pip`, `~/Library/Caches/pip` | Wheel packages |
+| uv | `~/.cache/uv`, `~/Library/Caches/uv` | Package names via dist-info |
 | Poetry | `~/.cache/pypoetry`, `~/Library/Caches/pypoetry` | Wheels and sdists from `artifacts/` |
 | npm | `~/.npm` | npx packages + transitive node_modules deps |
 | Homebrew | `~/Library/Caches/Homebrew` | Bottles, casks |
@@ -121,7 +121,7 @@ ccmd --root ~/.cache/huggingface  # scan a specific directory
 | Chroma | `~/.cache/chroma` | Embedding models |
 | Prisma | `~/.cache/prisma` | Engine versions |
 | Yarn | `~/.yarn-cache`, `.yarn/cache` | Package names and versions |
-| pnpm | `~/.pnpm-store` | Package names and versions |
+| pnpm | `~/.pnpm-store`, `~/Library/pnpm/store`, `~/.local/share/pnpm/store` (probed via `pnpm store path`) | Package names and versions |
 | Bun | `~/.bun/install/cache` | Package names and versions |
 | Maven | `~/.m2/repository` | `group:artifact version` from layout |
 | Gradle | `~/.gradle/caches` | `group:artifact version` from `files-2.1` layout |
@@ -149,7 +149,7 @@ All providers support tree navigation, size display, and deletion. This matrix s
 | Chroma | Safe | — | — | — |
 | Prisma | Safe | — | — | — |
 | Yarn | Safe; Berry `.yarn/cache/` = **Caution** (zero-install) | OSV `npm` | npm registry | `yarn add` |
-| pnpm | Safe; virtual store (`node_modules/.pnpm/`) = **Caution** | OSV `npm` | npm registry | `pnpm add` |
+| pnpm | Safe; virtual store (`node_modules/.pnpm/`) = **Caution** | OSV `npm` ³ | npm registry ³ | `pnpm add` |
 | Bun | Safe for `install/cache/`; `.bun/bin/*` = **Unsafe** (runtime); else **Caution** | OSV `npm` | npm registry | `bun add` |
 | Maven | Safe | OSV `Maven` | Maven Central | `<dependency>…</dependency>` snippet |
 | Gradle | Safe; `build-cache-*/` + `transforms-*/` = **Caution** | OSV `Maven` | Maven Central | `implementation '…'` line |
@@ -166,6 +166,7 @@ Legend:
 Notes:
 - ¹ **SwiftPM** is intentionally disk-hygiene only in v1. Swift package identity in the on-disk `repositories/` layout requires parsing git refs, which is too brittle; OSV's `SwiftURL` ecosystem has sparse coverage; and Swift package upgrades are project-local (`Package.swift` / `Package.resolved`), not global cache operations. May be reconsidered when OSV coverage improves.
 - ² **Xcode** has no package-manager ecosystem — its caches are build artifacts, not packages. Vulnerability scanning, version checking, and upgrade commands don't apply.
+- ³ **pnpm 11** (store v11) replaced the per-package JSON index with a SQLite `index.db`, which ccmd labels but does not yet read package identities from ([#39](https://github.com/juliensimon/cache-commander/issues/39)). Scanning of v10 stores and of virtual stores (`node_modules/.pnpm/`) is unaffected.
 
 ## Key Bindings
 
