@@ -44,11 +44,13 @@ pub fn semantic_name(path: &Path) -> Option<String> {
     None
 }
 
-/// Read `WORKSPACE_PATH` from `Info.plist` (XML variant).
+/// Read the workspace path from `Info.plist` (XML variant).
+/// Xcode 26+ writes `WorkspacePath`; older Xcode wrote `WORKSPACE_PATH`.
 /// Returns None on any failure (missing file, malformed XML, missing key).
 fn read_workspace_path(dir: &Path) -> Option<String> {
     let content = std::fs::read_to_string(dir.join("Info.plist")).ok()?;
-    extract_plist_string(&content, "WORKSPACE_PATH")
+    extract_plist_string(&content, "WorkspacePath")
+        .or_else(|| extract_plist_string(&content, "WORKSPACE_PATH"))
 }
 
 /// Extract a string value by key from an XML plist body. Avoids a
@@ -133,6 +135,14 @@ mod tests {
     use tempfile::TempDir;
 
     fn make_derived_data_dir(tmp: &TempDir, workspace_path: Option<&str>) -> PathBuf {
+        make_derived_data_dir_with_key(tmp, workspace_path, "WorkspacePath")
+    }
+
+    fn make_derived_data_dir_with_key(
+        tmp: &TempDir,
+        workspace_path: Option<&str>,
+        key: &str,
+    ) -> PathBuf {
         let root = tmp
             .path()
             .join("Library/Developer/Xcode/DerivedData/MyApp-abc123def");
@@ -143,7 +153,7 @@ mod tests {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>WORKSPACE_PATH</key>
+    <key>{key}</key>
     <string>{wp}</string>
 </dict>
 </plist>"#
@@ -160,6 +170,21 @@ mod tests {
         assert_eq!(
             semantic_name(&dir),
             Some("MyApp.xcworkspace (at /Users/j/dev/MyApp/MyApp.xcworkspace)".into())
+        );
+    }
+
+    #[test]
+    fn semantic_name_derived_data_legacy_workspace_path_key() {
+        // Pre-Xcode-26 plists use WORKSPACE_PATH; keep the fallback working.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = make_derived_data_dir_with_key(
+            &tmp,
+            Some("/Users/j/dev/Old/Old.xcworkspace"),
+            "WORKSPACE_PATH",
+        );
+        assert_eq!(
+            semantic_name(&dir),
+            Some("Old.xcworkspace (at /Users/j/dev/Old/Old.xcworkspace)".into())
         );
     }
 
