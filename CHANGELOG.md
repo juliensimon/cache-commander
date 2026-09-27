@@ -12,6 +12,13 @@
   Replaces `lru` 0.12.5 (RUSTSEC-2026-0002, unsound) with 0.18.5 and drops
   the unmaintained `paste` (RUSTSEC-2024-0436), whose `deny.toml` ignore is
   removed. No API changes were needed.
+- **MCP (#45)**: rmcp 0.16 → 3.4.1, fixing RUSTSEC-2026-0189 (DNS rebinding
+  in the Streamable HTTP transport, which ccmd never enabled) and removing its
+  `deny.toml` ignore. The MCP server now negotiates protocol `2025-11-25`
+  with current clients (previously capped at `2025-03-26`); `2024-11-05`
+  clients see an identical handshake. Tool input schemas now express
+  optional fields as standard JSON Schema `["string", "null"]` instead of
+  `nullable: true`; tool names and required fields are unchanged.
 
 ### Fixed
 - **Hugging Face (#52)**: support the shared Xet blob store introduced in
