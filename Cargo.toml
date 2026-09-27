@@ -32,7 +32,7 @@ e2e = []
 mcp = ["dep:rmcp", "dep:tokio", "dep:schemars", "dep:tracing-subscriber"]
 
 [dependencies]
-ratatui = "0.29"
+ratatui = "0.30"
 crossterm = "0.28"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
