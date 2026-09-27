@@ -34,6 +34,9 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
         with:
           toolchain: "1.88"
+          # v2 denies warnings via CARGO_BUILD_WARNINGS, which cargo only
+          # honors from 1.97; keep the v1 behavior explicitly on the MSRV job.
+          rustflags: "-D warnings"
       - run: cargo check --features mcp
 
   test:
