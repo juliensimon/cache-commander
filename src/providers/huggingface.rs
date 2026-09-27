@@ -4,6 +4,11 @@ use std::path::Path;
 pub fn semantic_name(path: &Path) -> Option<String> {
     let name = path.file_name()?.to_string_lossy().to_string();
 
+    // Shared Xet blob store root (huggingface_hub >= 1.32)
+    if name == "blobs" && is_shared_store(path) {
+        return Some("[shared blobs]".to_string());
+    }
+
     // Hub: models--org--name, datasets--org--name, spaces--org--name
     if name.starts_with("models--") {
         let rest = name.strip_prefix("models--")?;
@@ -32,6 +37,16 @@ pub fn semantic_name(path: &Path) -> Option<String> {
 
     // Snapshot hash dirs (inside hub/models--*/snapshots/)
     if is_hex_hash(&name) {
+        // Shared blob: name it after the repo(s) listed in its .refs manifest
+        if let Some(repos) = shared_blob_repos(path) {
+            let first = repos[0]
+                .split_once("] ")
+                .map_or(repos[0].as_str(), |(_, r)| r);
+            return Some(match repos.len() {
+                1 => format!("[shared] {first}"),
+                n => format!("[shared] {first} +{}", n - 1),
+            });
+        }
         // Check if parent is "snapshots" → show short hash
         if let Some(parent) = path.parent() {
             let parent_name = parent
@@ -62,6 +77,56 @@ pub fn semantic_name(path: &Path) -> Option<String> {
 /// Check if a string looks like a hex hash (40+ chars, all hex)
 fn is_hex_hash(s: &str) -> bool {
     s.len() >= 16 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Marker file huggingface_hub writes at the root of the shared blob store.
+const SHARED_STORE_MARKER: &str = ".huggingface-shared-blobs";
+
+fn is_shared_store(dir: &Path) -> bool {
+    dir.join(SHARED_STORE_MARKER).exists()
+}
+
+/// For a blob at `<store>/<prefix>/<hash>`, the repos listed in `<hash>.refs`
+/// (one `models--org--name/blobs/<sha>` line each), as semantic labels.
+fn shared_blob_repos(blob: &Path) -> Option<Vec<String>> {
+    let store = blob.parent()?.parent()?;
+    if !is_shared_store(store) {
+        return None;
+    }
+    let mut refs_name = blob.file_name()?.to_os_string();
+    refs_name.push(".refs");
+    let content = std::fs::read_to_string(blob.with_file_name(refs_name)).ok()?;
+    let mut repos: Vec<String> = Vec::new();
+    for line in content.lines() {
+        let Some(repo_dir) = line.split('/').next().filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        let label = semantic_name(Path::new(repo_dir)).unwrap_or_else(|| repo_dir.to_string());
+        if !repos.contains(&label) {
+            repos.push(label);
+        }
+    }
+    (!repos.is_empty()).then_some(repos)
+}
+
+/// Total size of the shared-store blobs a repo's `blobs/` symlinks point to.
+fn shared_bytes_linked_from(repo_dir: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(repo_dir.join("blobs")) else {
+        return 0;
+    };
+    entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_symlink()))
+        .filter_map(|e| std::fs::canonicalize(e.path()).ok())
+        .filter(|target| {
+            target
+                .parent()
+                .and_then(Path::parent)
+                .is_some_and(is_shared_store)
+        })
+        .filter_map(|target| std::fs::metadata(target).ok())
+        .map(|m| m.len())
+        .sum()
 }
 
 /// Try to identify a blob by checking snapshot dirs for symlinks pointing to it.
@@ -145,6 +210,12 @@ pub fn metadata(path: &Path) -> Vec<MetadataField> {
         });
         return fields;
     } else {
+        if let Some(repos) = shared_blob_repos(path) {
+            fields.push(MetadataField {
+                label: "Referenced by".to_string(),
+                value: repos.join(", "),
+            });
+        }
         return fields;
     };
 
@@ -174,6 +245,17 @@ pub fn metadata(path: &Path) -> Vec<MetadataField> {
         fields.push(MetadataField {
             label: "Files".to_string(),
             value: count.to_string(),
+        });
+    }
+
+    let shared = shared_bytes_linked_from(path);
+    if shared > 0 {
+        fields.push(MetadataField {
+            label: "Shared data".to_string(),
+            value: format!(
+                "{} in hub/blobs (not freed by deleting this entry)",
+                humansize::format_size(shared, humansize::BINARY)
+            ),
         });
     }
 
@@ -368,6 +450,110 @@ mod tests {
         assert!(labels.contains(&"Type"));
         assert!(labels.contains(&"Revisions"));
         assert!(labels.contains(&"Files"));
+    }
+
+    /// Shared Xet blob store (huggingface_hub >= 1.32, #52): big files live once
+    /// in `hub/blobs/<prefix>/<xet>`, repo blobs are symlinks into it, and
+    /// `<xet>.refs` lists the referencing repo blobs.
+    #[cfg(unix)]
+    fn shared_blob_fixture(repos: &[&str]) -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let hub = tmp.path().join("hub");
+        let xet = "786820e8958abcfd7a2084c0d273f629ab8d7cbee560178f49a9cecb715b8041";
+        let prefix = hub.join("blobs/78");
+        std::fs::create_dir_all(&prefix).unwrap();
+        std::fs::write(hub.join("blobs/.huggingface-shared-blobs"), "1\n").unwrap();
+        std::fs::write(prefix.join(xet), vec![0u8; 4096]).unwrap();
+        let mut refs = String::new();
+        for (i, repo) in repos.iter().enumerate() {
+            let sha = format!("951ed3fc1203e6a62467abb2144a96ce7eafca8fa77e3704fdb8635ff3e7f8a{i}");
+            let blobs = hub.join(repo).join("blobs");
+            std::fs::create_dir_all(&blobs).unwrap();
+            std::os::unix::fs::symlink(format!("../../blobs/78/{xet}"), blobs.join(&sha)).unwrap();
+            refs.push_str(&format!("{repo}/blobs/{sha}\n"));
+        }
+        std::fs::write(prefix.join(format!("{xet}.refs")), refs).unwrap();
+        (tmp, hub)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn semantic_name_shared_blob_store_root() {
+        let (_tmp, hub) = shared_blob_fixture(&["models--org--m"]);
+        assert_eq!(
+            semantic_name(&hub.join("blobs")),
+            Some("[shared blobs]".into())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn semantic_name_shared_blob_names_owning_repo() {
+        // Without this the 1.5 GB payload shows as an anonymous `[hash]`.
+        let (_tmp, hub) = shared_blob_fixture(&["models--mlx-community--whisper"]);
+        let blob =
+            hub.join("blobs/78/786820e8958abcfd7a2084c0d273f629ab8d7cbee560178f49a9cecb715b8041");
+        assert_eq!(
+            semantic_name(&blob),
+            Some("[shared] mlx-community/whisper".into())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn semantic_name_shared_blob_counts_extra_repos() {
+        let (_tmp, hub) = shared_blob_fixture(&["models--org--a", "models--org--b"]);
+        let blob =
+            hub.join("blobs/78/786820e8958abcfd7a2084c0d273f629ab8d7cbee560178f49a9cecb715b8041");
+        assert_eq!(semantic_name(&blob), Some("[shared] org/a +1".into()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metadata_model_reports_shared_data_not_freed_on_delete() {
+        // The model dir is tiny on disk; users must learn where the space is
+        // and that deleting the model will not reclaim it.
+        let (_tmp, hub) = shared_blob_fixture(&["models--org--m"]);
+        let fields = metadata(&hub.join("models--org--m"));
+        let shared = fields
+            .iter()
+            .find(|f| f.label == "Shared data")
+            .expect("model linked into the shared store must report it");
+        assert!(shared.value.contains("4 KiB"), "{}", shared.value);
+        assert!(shared.value.contains("not freed"), "{}", shared.value);
+    }
+
+    #[test]
+    fn metadata_model_without_shared_links_has_no_shared_field() {
+        let tmp = tempfile::tempdir().unwrap();
+        let model_dir = tmp.path().join("models--org--name");
+        std::fs::create_dir_all(model_dir.join("blobs")).unwrap();
+        std::fs::write(model_dir.join("blobs/abc123"), "data").unwrap();
+        let fields = metadata(&model_dir);
+        assert!(fields.iter().all(|f| f.label != "Shared data"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metadata_shared_blob_lists_referencing_repos() {
+        let (_tmp, hub) = shared_blob_fixture(&["models--org--a", "datasets--org--d"]);
+        let blob =
+            hub.join("blobs/78/786820e8958abcfd7a2084c0d273f629ab8d7cbee560178f49a9cecb715b8041");
+        let fields = metadata(&blob);
+        let refs = fields
+            .iter()
+            .find(|f| f.label == "Referenced by")
+            .expect("shared blob must list its repos");
+        assert_eq!(refs.value, "[model] org/a, [dataset] org/d");
+    }
+
+    #[test]
+    fn semantic_name_repo_blobs_dir_is_not_shared_store() {
+        // A per-repo `blobs/` (no marker file) must keep its old behavior.
+        let tmp = tempfile::tempdir().unwrap();
+        let blobs = tmp.path().join("models--org--m/blobs");
+        std::fs::create_dir_all(&blobs).unwrap();
+        assert_eq!(semantic_name(&blobs), None);
     }
 
     #[test]

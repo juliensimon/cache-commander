@@ -862,6 +862,39 @@ mod tests {
     use std::os::unix::fs::symlink;
     use tempfile::TempDir;
 
+    // --- walk_roots: Hugging Face shared blob store (#52) ---
+
+    #[test]
+    fn walk_roots_surfaces_hf_shared_blob_store() {
+        // Shared blobs sit at root/huggingface/hub/blobs/<prefix>/<hash>: depth 5,
+        // past collect_nodes' depth cap. Without a typed name on the store root
+        // the payload was invisible to list_caches/search_packages; the
+        // `[shared blobs]` label surfaces it as one sized entry.
+        let dir = TempDir::new().unwrap();
+        let hub = dir.path().join("huggingface/hub");
+        let xet = "786820e8958abcfd7a2084c0d273f629ab8d7cbee560178f49a9cecb715b8041";
+        std::fs::create_dir_all(hub.join("blobs/78")).unwrap();
+        std::fs::create_dir_all(hub.join("models--org--m/blobs")).unwrap();
+        std::fs::write(hub.join("blobs/.huggingface-shared-blobs"), "1\n").unwrap();
+        std::fs::write(hub.join("blobs/78").join(xet), vec![0u8; 8192]).unwrap();
+        symlink(
+            format!("../../blobs/78/{xet}"),
+            hub.join("models--org--m/blobs/951ed3fc1203e6a6"),
+        )
+        .unwrap();
+
+        let mut config = Config::default_for_test();
+        config.roots = vec![dir.path().to_path_buf()];
+        let nodes = CcmdMcp::new(&config).walk_roots();
+
+        let store = nodes
+            .iter()
+            .find(|n| n.name == "[shared blobs]")
+            .expect("shared store must be listed");
+        assert!(store.size >= 8192, "store size {}", store.size);
+        assert!(nodes.iter().any(|n| n.name == "[model] org/m"));
+    }
+
     // --- is_under_roots ---
 
     #[test]

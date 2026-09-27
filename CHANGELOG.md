@@ -9,6 +9,16 @@
   and `rustls-webpki` 0.103.15, plus routine patch/minor bumps. MSRV
   unchanged (1.88).
 
+### Fixed
+- **Hugging Face (#52)**: support the shared Xet blob store introduced in
+  huggingface_hub 1.32. Large files now live once in `hub/blobs/<prefix>/`
+  with per-repo symlinks, so model directories looked nearly empty and the
+  real payload showed as an anonymous `[hash]`. The store root is labeled
+  `[shared blobs]`, each shared blob is named after the repo(s) in its
+  `.refs` manifest, model details show the shared data they link to (and
+  that deleting the model does not free it), and shared-blob details list
+  the referencing repos.
+
 ## [0.4.2] — 2026-08-09
 
 Provider-layout refresh: an audit of all 21 providers against the latest
