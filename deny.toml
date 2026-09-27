@@ -1,3 +1,8 @@
+[graph]
+# Audit the dependency tree we actually ship: release binaries are built with
+# `--features mcp`, and `default = []` would otherwise hide rmcp/tokio (#51).
+all-features = true
+
 [advisories]
 # L6: Every ignore entry must carry a revisit date so stale ignores don't
 # silently persist. When the date is reached, review upstream progress and

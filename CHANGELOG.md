@@ -19,6 +19,13 @@
   that deleting the model does not free it), and shared-blob details list
   the referencing repos.
 
+### CI
+- **CI hygiene (#51)**: node20 actions moved to their node24 majors and
+  SHA-pinned (`setup-java` and `setup-gradle` were floating on `@v4`);
+  `cargo deny` now audits all features, so the `mcp` dependency tree that
+  ships in release binaries is covered; Dependabot added for GitHub Actions
+  and Cargo (weekly, minor/patch grouped).
+
 ## [0.4.2] — 2026-08-09
 
 Provider-layout refresh: an audit of all 21 providers against the latest
