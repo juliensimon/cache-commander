@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.4.3] — 2026-09-27
+
+Maintenance release: every known advisory fixed rather than ignored
+(`deny.toml` ignore list is now empty), Hugging Face shared-blob support,
+and a CI refresh. pnpm 11 `index.db` package scanning (#39) moves to 0.4.4.
+
 ### Security
 - **Dependencies (#49)**: `cargo update` within existing semver ranges,
   pulling `rustls` 0.23.37 → 0.23.45 (RUSTSEC-2026-0285: TLS 1.3 handshake
@@ -36,6 +42,12 @@
   `cargo deny` now audits all features, so the `mcp` dependency tree that
   ships in release binaries is covered; Dependabot added for GitHub Actions
   and Cargo (weekly, minor/patch grouped).
+- **Dependabot follow-ups (#62, #63, #64, #67)**: cargo-deny-action 2.1.1,
+  install-action 2.87.20, attest-build-provenance 4.2.2, codecov-action
+  7.1.1 (pin comment corrected in #67), and setup-rust-toolchain 2.0.0.
+  v2 denies warnings via `CARGO_BUILD_WARNINGS`, which cargo only honors
+  from 1.97, so the MSRV (1.88) job now sets `rustflags: "-D warnings"`
+  explicitly to keep failing on warnings.
 
 ## [0.4.2] — 2026-08-09
 
