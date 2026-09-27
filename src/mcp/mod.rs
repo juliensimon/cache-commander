@@ -13,7 +13,7 @@ use rmcp::ServerHandler;
 use rmcp::ServiceExt;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
+use rmcp::model::{Implementation, ServerCapabilities, ServerConfig};
 use rmcp::serde_json;
 use rmcp::tool;
 use rmcp::tool_handler;
@@ -805,33 +805,23 @@ impl CcmdMcp {
     }
 }
 
-#[tool_handler]
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for CcmdMcp {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: Default::default(),
-            capabilities: ServerCapabilities {
-                tools: Some(Default::default()),
-                ..Default::default()
-            },
-            server_info: Implementation {
-                name: "Cache Commander".to_string(),
-                title: Some("Cache Commander".to_string()),
-                version: env!("CARGO_PKG_VERSION").to_string(),
-                description: Some(
-                    "Cache Commander MCP server. Browse developer caches, scan for \
-                     vulnerabilities, check for outdated packages, and safely clean up \
-                     disk space."
-                        .to_string(),
-                ),
-                ..Default::default()
-            },
-            instructions: Some(
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(
+                Implementation::new("Cache Commander", env!("CARGO_PKG_VERSION"))
+                    .with_title("Cache Commander")
+                    .with_description(
+                        "Cache Commander MCP server. Browse developer caches, scan for \
+                         vulnerabilities, check for outdated packages, and safely clean up \
+                         disk space.",
+                    ),
+            )
+            .with_instructions(
                 "Use list_caches or get_summary to start, then scan_vulnerabilities or \
-                 check_outdated for security analysis, and delete_packages for cleanup."
-                    .to_string(),
-            ),
-        }
+                 check_outdated for security analysis, and delete_packages for cleanup.",
+            )
     }
 }
 
