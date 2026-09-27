@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Security
+- **Dependencies (#49)**: `cargo update` within existing semver ranges,
+  pulling `rustls` 0.23.37 → 0.23.45 (RUSTSEC-2026-0285: TLS 1.3 handshake
+  messages accepted across encryption-level boundaries, reached via `ureq`)
+  and `rustls-webpki` 0.103.15, plus routine patch/minor bumps. MSRV
+  unchanged (1.88).
+
 ## [0.4.2] — 2026-08-09
 
 Provider-layout refresh: an audit of all 21 providers against the latest
