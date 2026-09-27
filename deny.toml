@@ -8,8 +8,6 @@ all-features = true
 # silently persist. When the date is reached, review upstream progress and
 # either remove the ignore or extend the date with a fresh review.
 ignore = [
-    # Transitive dep via ratatui — no direct usage. Revisit: 2026-10-01
-    { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained but only used transitively via ratatui; revisit 2026-10-01" },
     # Vulnerable code path (Streamable HTTP server transport) is not compiled:
     # ccmd enables only the stdio transport (transport-io feature). Fix requires
     # rmcp >= 1.4, a major API migration tracked in issue #45. Revisit: 2026-11-01

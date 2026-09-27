@@ -8,6 +8,10 @@
   messages accepted across encryption-level boundaries, reached via `ureq`)
   and `rustls-webpki` 0.103.15, plus routine patch/minor bumps. MSRV
   unchanged (1.88).
+- **TUI stack (#55)**: ratatui 0.29 → 0.30 and crossterm 0.28 → 0.29.
+  Replaces `lru` 0.12.5 (RUSTSEC-2026-0002, unsound) with 0.18.5 and drops
+  the unmaintained `paste` (RUSTSEC-2024-0436), whose `deny.toml` ignore is
+  removed. No API changes were needed.
 
 ### Fixed
 - **Hugging Face (#52)**: support the shared Xet blob store introduced in
