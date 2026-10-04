@@ -87,7 +87,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
         with:
           components: llvm-tools-preview
-      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
         with:
           tool: cargo-llvm-cov
       - name: Generate lcov report
@@ -166,7 +166,7 @@ jobs:
       - name: Install Gradle
         # Ubuntu's apt gradle (4.4.1, 2017) is too old to support modern DSL.
         # setup-gradle provides a maintained Gradle on PATH.
-        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
 
       - name: Run JVM E2E tests
         run: cargo test --features e2e --test e2e_jvm_providers -- --test-threads=1
