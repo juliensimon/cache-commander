@@ -137,7 +137,7 @@ All providers support tree navigation, size display, and deletion. This matrix s
 |----------|----------------------|---------------------|--------------------------|--------------------|
 | HuggingFace | Safe | — | — | — |
 | pip | Safe | OSV `PyPI` | PyPI | `pip install` |
-| uv | Safe | OSV `PyPI` | PyPI | `uv pip install` |
+| uv | Safe ⁴ | OSV `PyPI` | PyPI | `uv pip install` |
 | Poetry | `artifacts/` + `cache/repositories/` = Safe; `virtualenvs/` = **Caution** | OSV `PyPI` | PyPI | `poetry add` |
 | npm | Safe | OSV `npm` | npm registry | `npm install` |
 | Homebrew | Safe | — | — | — |
@@ -167,6 +167,7 @@ Notes:
 - ¹ **SwiftPM** is intentionally disk-hygiene only in v1. Swift package identity in the on-disk `repositories/` layout requires parsing git refs, which is too brittle; OSV's `SwiftURL` ecosystem has sparse coverage; and Swift package upgrades are project-local (`Package.swift` / `Package.resolved`), not global cache operations. May be reconsidered when OSV coverage improves.
 - ² **Xcode** has no package-manager ecosystem — its caches are build artifacts, not packages. Vulnerability scanning, version checking, and upgrade commands don't apply.
 - ³ **pnpm 11** (store v11) replaced the per-package JSON index with a SQLite `index.db`, which ccmd labels but does not yet read package identities from ([#39](https://github.com/juliensimon/cache-commander/issues/39)). Scanning of v10 stores and of virtual stores (`node_modules/.pnpm/`) is unaffected.
+- ⁴ **uv** is Safe with the default link modes (`clone` on macOS/Linux, `hardlink` on Windows), where environments keep working after the cache is deleted. With the opt-in [`link-mode = symlink`](https://docs.astral.sh/uv/reference/settings/#link-mode), which uv itself discourages, environments point into the cache and deleting it breaks their installed packages. ccmd does not detect the link mode and reports Safe either way.
 
 ## Key Bindings
 
