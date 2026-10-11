@@ -87,7 +87,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
         with:
           components: llvm-tools-preview
-      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2
         with:
           tool: cargo-llvm-cov
       - name: Generate lcov report
@@ -102,13 +102,13 @@ jobs:
             --ignore-filename-regex '(tests/|target/)' \
             --summary-only | tee coverage-summary.txt
       - name: Upload lcov artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: lcov
           path: lcov.info
           if-no-files-found: error
       - name: Upload summary artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-summary
           path: coverage-summary.txt
@@ -166,7 +166,7 @@ jobs:
       - name: Install Gradle
         # Ubuntu's apt gradle (4.4.1, 2017) is too old to support modern DSL.
         # setup-gradle provides a maintained Gradle on PATH.
-        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
 
       - name: Run JVM E2E tests
         run: cargo test --features e2e --test e2e_jvm_providers -- --test-threads=1
