@@ -39,7 +39,7 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 jwalk = "0.8"
 rayon = "1"
-directories = "5"
+directories = "6"
 humansize = "2"
 chrono = "0.4"
 ureq = "2"
