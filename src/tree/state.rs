@@ -370,9 +370,9 @@ impl TreeState {
         // Find direct children and their subtree ranges using depth boundaries.
         // A child's subtree = [child_idx .. next sibling or end of parent's subtree)
         let mut child_starts: Vec<usize> = Vec::new();
-        for i in subtree_start..subtree_end {
-            if self.nodes[i].depth == child_depth {
-                child_starts.push(i);
+        for (offset, node) in self.nodes[subtree_start..subtree_end].iter().enumerate() {
+            if node.depth == child_depth {
+                child_starts.push(subtree_start + offset);
             }
         }
 
