@@ -70,21 +70,23 @@ pub fn query_osv_at(
     packages: &[crate::providers::PackageId],
 ) -> Result<OsvResponse, String> {
     let body = build_query(packages);
-    let resp = ureq::agent()
-        .post(url)
-        .timeout(std::time::Duration::from_secs(30))
-        .set("Content-Type", "application/json")
-        .set(
+    let mut resp = ureq::post(url)
+        .config()
+        .timeout_global(Some(std::time::Duration::from_secs(30)))
+        .build()
+        .header("Content-Type", "application/json")
+        .header(
             "User-Agent",
             &format!(
                 "ccmd/{} (https://github.com/juliensimon/cache-commander)",
                 env!("CARGO_PKG_VERSION")
             ),
         )
-        .send_string(&body)
+        .send(&body)
         .map_err(|e| format!("OSV request failed: {e}"))?;
     let text = resp
-        .into_string()
+        .body_mut()
+        .read_to_string()
         .map_err(|e| format!("OSV read failed: {e}"))?;
     parse_response(&text).map_err(|e| format!("OSV parse failed: {e}"))
 }
@@ -309,10 +311,11 @@ pub fn fetch_vuln_detail(vuln_id: &str) -> Result<OsvVulnDetail, String> {
 /// Fetch a single OSV vuln detail from a configurable URL — enables
 /// HTTP-level tests (M2).
 pub fn fetch_vuln_detail_at(url: &str) -> Result<OsvVulnDetail, String> {
-    let resp = ureq::agent()
-        .get(url)
-        .timeout(std::time::Duration::from_secs(15))
-        .set(
+    let mut resp = ureq::get(url)
+        .config()
+        .timeout_global(Some(std::time::Duration::from_secs(15)))
+        .build()
+        .header(
             "User-Agent",
             &format!(
                 "ccmd/{} (https://github.com/juliensimon/cache-commander)",
@@ -322,7 +325,8 @@ pub fn fetch_vuln_detail_at(url: &str) -> Result<OsvVulnDetail, String> {
         .call()
         .map_err(|e| format!("OSV detail request failed: {e}"))?;
     let text = resp
-        .into_string()
+        .body_mut()
+        .read_to_string()
         .map_err(|e| format!("OSV detail read failed: {e}"))?;
     parse_vuln_detail(&text).map_err(|e| format!("OSV detail parse failed: {e}"))
 }
