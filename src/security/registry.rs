@@ -186,10 +186,11 @@ pub fn check_latest(pkg: &crate::providers::PackageId) -> Result<Option<String>,
 
 /// Issue a registry request to a specific URL (mockable for M2 tests).
 pub fn check_latest_at(url: &str, ecosystem: &str) -> Result<Option<String>, String> {
-    let resp = ureq::agent()
-        .get(url)
-        .timeout(std::time::Duration::from_secs(10))
-        .set(
+    let mut resp = ureq::get(url)
+        .config()
+        .timeout_global(Some(std::time::Duration::from_secs(10)))
+        .build()
+        .header(
             "User-Agent",
             &format!(
                 "ccmd/{} (https://github.com/juliensimon/cache-commander)",
@@ -199,7 +200,8 @@ pub fn check_latest_at(url: &str, ecosystem: &str) -> Result<Option<String>, Str
         .call()
         .map_err(|e| format!("Registry request failed: {e}"))?;
     let text = resp
-        .into_string()
+        .body_mut()
+        .read_to_string()
         .map_err(|e| format!("Registry read failed: {e}"))?;
 
     Ok(parse_registry_response(ecosystem, &text))

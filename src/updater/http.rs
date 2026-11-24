@@ -36,16 +36,20 @@ impl UreqClient {
 
 impl HttpClient for UreqClient {
     fn get_latest_release(&self) -> Result<LatestRelease, UpdaterError> {
-        // Mirrors the pattern in `src/security/registry.rs` — `ureq::agent()`
-        // plus a per-request timeout, with User-Agent + Accept headers.
-        let resp = ureq::agent()
-            .get(&self.url)
-            .timeout(std::time::Duration::from_secs(10))
-            .set("User-Agent", &self.user_agent)
-            .set("Accept", "application/vnd.github+json")
+        // Mirrors the pattern in `src/security/registry.rs` — a per-request
+        // global timeout, with User-Agent + Accept headers.
+        let mut resp = ureq::get(&self.url)
+            .config()
+            .timeout_global(Some(std::time::Duration::from_secs(10)))
+            .build()
+            .header("User-Agent", &self.user_agent)
+            .header("Accept", "application/vnd.github+json")
             .call()
             .map_err(|_| UpdaterError::Network)?;
-        let body = resp.into_string().map_err(|_| UpdaterError::Network)?;
+        let body = resp
+            .body_mut()
+            .read_to_string()
+            .map_err(|_| UpdaterError::Network)?;
         serde_json::from_str(&body).map_err(|_| UpdaterError::Parse)
     }
 }
