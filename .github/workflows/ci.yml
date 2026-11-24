@@ -43,6 +43,9 @@ jobs:
     name: Test
     runs-on: ${{ matrix.os }}
     strategy:
+      # Keep the sibling job running when one OS fails, so a real ubuntu
+      # failure doesn't cancel macOS mid-test and hide its result.
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
