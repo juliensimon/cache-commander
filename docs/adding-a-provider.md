@@ -127,7 +127,7 @@ work but silently fail on that axis.
 
 - [ ] `src/security/registry.rs` — add the registry arm for version
       lookups if the ecosystem has one. Mirror an existing provider's
-      `ureq::agent().get().timeout().set("User-Agent", ...).call()`
+      `ureq::get(url).config().timeout_global(..).build().header("User-Agent", ...).call()`
       pattern; don't invent new HTTP scaffolding.
 - [ ] No changes needed in `src/security/osv.rs` — it forwards the
       ecosystem string untouched. But **verify the ecosystem name

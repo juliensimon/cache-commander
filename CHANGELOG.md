@@ -2,6 +2,57 @@
 
 ## [Unreleased]
 
+## [0.4.4] — 2026-11-24
+
+Maintenance release: restores green CI (new stable cargo and clippy lints
+had broken every stable job and the Nightly E2E since 2026-11-13), fixes
+eleven RustSec advisories in dependencies, and ports the HTTP client to
+ureq 3. One behavior change: HTTP(S) proxy environment variables are now
+honored (see Changed). pnpm 11 `index.db` package scanning (#39) and the
+E2E tool-pinning work (#68) move to the next release.
+
+### Security
+- **Dependencies (#83)**: `cargo update` plus an `rmcp` floor of 3.9.
+  `rmcp` 3.4.1 → 3.11.0 (RUSTSEC-2026-0457, -0461, -0462: OAuth SSRF
+  filter, unbounded schema cache and response buffering, all in the
+  Streamable HTTP/OAuth code that ccmd never enables). `rustls` 0.23.46
+  (RUSTSEC-2026-0346 to -0349: `Debug` leaking session secrets, ECH
+  rejection data leak, Brotli certificate decompression allocation, key
+  exchange downgrade), `rustls-webpki` 0.103.17 (RUSTSEC-2026-0382,
+  distrusted intermediates accepted), `webpki-roots` 1.0.12
+  (RUSTSEC-2026-0381, distrusted emSign intermediates), and `tokio`
+  1.54.1. `url` (RUSTSEC-2026-0592, stack overflow in `Url::origin()`) is
+  no longer a dependency at all, since ureq 3 dropped it. The TLS fixes are reached through `ureq` when ccmd queries OSV.dev
+  and the package registries.
+- **`chrono` unmaintained (RUSTSEC-2026-0543)**: no fix exists and `rmcp`
+  and `schemars` also depend on it, so `deny.toml` carries a dated ignore
+  (revisit 2026-12-31).
+
+### Changed
+- **HTTP client (#84)**: `ureq` 2 → 3 (request builder API, per-request
+  `timeout_global`, `body_mut().read_to_string()`); the four call sites
+  in the registry, OSV and updater code were ported with the same
+  timeouts, status-error handling and 10 MiB body cap, and checked against
+  live PyPI, crates.io, OSV and GitHub endpoints. **Behavior change**:
+  ureq 3 reads `HTTPS_PROXY`, `HTTP_PROXY` and `ALL_PROXY` (honoring
+  `NO_PROXY`) by default, so OSV, registry and update-check requests now go
+  through a configured proxy; ureq 2 ignored them. The redirect limit also
+  rose from 5 to 10.
+- **Dependencies**: `toml` 0.8 → 1.2, `directories` 5 → 6,
+  `jwalk` 0.8 → 0.9 (all drop-in; no source changes).
+
+### CI
+- **New stable toolchain (#80, #82)**: removed `package.homepage`
+  (redundant with `repository`, now linted by cargo and denied under
+  `CARGO_BUILD_WARNINGS`) and rewrote an index loop in `tree/state.rs`
+  flagged by clippy's `needless_range_loop`.
+- **Actions group (#78)**: setup-rust-toolchain 2.0.1, cargo-deny-action
+  2.1.3, install-action 2.90.x, upload-artifact 7.0.2, setup-java 6.3.0,
+  setup-gradle 6.4.1, download-artifact 8.0.2, action-gh-release 3.0.4.
+- **Release workflow**: releases are now created as drafts and published
+  as the last step, with provenance attestation for the macOS DMG, to
+  comply with immutable releases.
+
 ## [0.4.3] — 2026-09-27
 
 Maintenance release: every known advisory fixed rather than ignored
