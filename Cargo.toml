@@ -6,7 +6,6 @@ rust-version = "1.88"
 description = "Cache Commander — a TUI for browsing and managing cache directories"
 license = "MIT"
 repository = "https://github.com/juliensimon/cache-commander"
-homepage = "https://github.com/juliensimon/cache-commander"
 keywords = ["cache", "tui", "disk-space", "cleanup", "security"]
 categories = ["command-line-utilities"]
 exclude = ["REVIEW-*.md", "demo.tape", "docs/superpowers/", ".DS_Store", "screenshot.png", "scripts/", "TODO.md"]
