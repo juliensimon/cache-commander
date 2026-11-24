@@ -6,7 +6,6 @@ rust-version = "1.88"
 description = "Cache Commander — a TUI for browsing and managing cache directories"
 license = "MIT"
 repository = "https://github.com/juliensimon/cache-commander"
-homepage = "https://github.com/juliensimon/cache-commander"
 keywords = ["cache", "tui", "disk-space", "cleanup", "security"]
 categories = ["command-line-utilities"]
 exclude = ["REVIEW-*.md", "demo.tape", "docs/superpowers/", ".DS_Store", "screenshot.png", "scripts/", "TODO.md"]
@@ -45,7 +44,7 @@ chrono = "0.4"
 ureq = "2"
 serde_json = "1"
 percent-encoding = "2"
-rmcp = { version = "3.4", features = ["server", "transport-io", "macros"], optional = true }
+rmcp = { version = "3.9", features = ["server", "transport-io", "macros"], optional = true }
 tokio = { version = "1", features = ["full"], optional = true }
 schemars = { version = "1", features = ["derive"], optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }

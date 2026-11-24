@@ -8,6 +8,7 @@ all-features = true
 # silently persist. When the date is reached, review upstream progress and
 # either remove the ignore or extend the date with a fresh review.
 ignore = [
+    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained (no fix; alternatives jiff/time) but is also pulled in transitively by rmcp and schemars, so migrating our direct use would not remove it; revisit 2026-12-31" },
 ]
 
 [licenses]
