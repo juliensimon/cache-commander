@@ -391,19 +391,27 @@ where
                 let unchecked = Arc::clone(&unchecked);
                 std::thread::spawn(move || match checker(&pkg) {
                     Ok(Some(latest)) => {
-                        // By the ecosystem's rules; a pair that cannot be ordered
-                        // is not claimed to be outdated.
-                        let is_outdated = version::compare(pkg.ecosystem, &pkg.version, &latest)
-                            == Some(std::cmp::Ordering::Less);
-                        if let Ok(mut map) = results.lock() {
-                            map.insert(
-                                path,
-                                VersionInfo {
-                                    current: pkg.version.clone(),
-                                    latest,
-                                    is_outdated,
-                                },
-                            );
+                        // By the ecosystem's rules. A pair it cannot order is
+                        // UNCHECKED: recording it as "not outdated" would show
+                        // "all up to date" and cache that for the TTL.
+                        match version::compare(pkg.ecosystem, &pkg.version, &latest) {
+                            Some(order) => {
+                                if let Ok(mut map) = results.lock() {
+                                    map.insert(
+                                        path,
+                                        VersionInfo {
+                                            current: pkg.version.clone(),
+                                            latest,
+                                            is_outdated: order == std::cmp::Ordering::Less,
+                                        },
+                                    );
+                                }
+                            }
+                            None => {
+                                if let Ok(mut n) = unchecked.lock() {
+                                    *n += 1;
+                                }
+                            }
                         }
                     }
                     Ok(None) => {
@@ -486,6 +494,41 @@ mod tests {
     }
 
     // ---- ecosystem-aware ordering (#100) ----
+
+    #[test]
+    fn an_unorderable_outdated_check_is_unchecked_not_up_to_date() {
+        // Maven `1.0-1` vs `1.0-2` is a form the comparator deliberately cannot
+        // order. That must not be recorded (and cached) as a successful
+        // "not outdated" result: it is an unchecked package, so the UI says so
+        // instead of "all up to date".
+        let packages = vec![(
+            PathBuf::from("/a"),
+            PackageId {
+                ecosystem: "Maven",
+                name: "g:a".into(),
+                version: "1.0-1".into(),
+            },
+        )];
+        let outcome = check_versions_inner(&packages, |_| Ok(Some("1.0-2".to_string())));
+        assert!(
+            outcome.results.is_empty(),
+            "no result for an unorderable pair"
+        );
+        assert_eq!(outcome.unchecked_packages, 1);
+
+        // Control: an orderable pair is still recorded.
+        let ok = vec![(
+            PathBuf::from("/b"),
+            PackageId {
+                ecosystem: "npm",
+                name: "x".into(),
+                version: "1.0.0".into(),
+            },
+        )];
+        let outcome = check_versions_inner(&ok, |_| Ok(Some("1.2.0".to_string())));
+        assert_eq!(outcome.unchecked_packages, 0);
+        assert!(outcome.results[&PathBuf::from("/b")].is_outdated);
+    }
 
     #[test]
     fn maven_release_candidate_is_before_final() {

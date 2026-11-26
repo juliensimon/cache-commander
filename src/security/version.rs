@@ -45,7 +45,21 @@ struct SemVer {
 fn parse_semver(s: &str) -> Option<SemVer> {
     let s = s.trim();
     let s = s.strip_prefix(['v', 'V']).unwrap_or(s);
-    let s = s.split_once('+').map_or(s, |(head, _)| head);
+    // Build metadata is ignored for precedence, but only if it is well formed:
+    // non-empty dot-separated identifiers of [0-9A-Za-z-]. `1.0.0+` is not a
+    // version, and must not compare equal to `1.0.0`.
+    let s = match s.split_once('+') {
+        Some((head, build)) => {
+            let valid = build.split('.').all(|id| {
+                !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            });
+            if !valid {
+                return None;
+            }
+            head
+        }
+        None => s,
+    };
     let (core, pre) = match s.split_once('-') {
         Some((core, pre)) => (core, Some(pre)),
         None => (s, None),
@@ -57,6 +71,10 @@ fn parse_semver(s: &str) -> Option<SemVer> {
     let mut nums = [0u64; 3];
     for (i, part) in parts.iter().enumerate() {
         if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        // SemVer forbids leading zeros: `01.0.0` is invalid, not `1.0.0`.
+        if part.len() > 1 && part.starts_with('0') {
             return None;
         }
         nums[i] = part.parse().ok()?;
@@ -71,6 +89,10 @@ fn parse_semver(s: &str) -> Option<SemVer> {
                     return None;
                 }
                 ids.push(if id.bytes().all(|b| b.is_ascii_digit()) {
+                    // Numeric pre-release identifiers also forbid leading zeros.
+                    if id.len() > 1 && id.starts_with('0') {
+                        return None;
+                    }
                     Ident::Num(id.parse().ok()?)
                 } else {
                     Ident::Alpha(id.to_string())
@@ -120,13 +142,22 @@ enum Key<T> {
     Inf,
 }
 
+/// One `.`-separated segment of a PEP 440 local version label. Derived ordering
+/// is the spec's: any alphanumeric segment is below any numeric one, numeric
+/// segments compare by value, alphanumeric ones lexically (case folded).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum LocalSeg {
+    Alpha(String),
+    Num(u64),
+}
+
 struct Pep {
     epoch: u64,
     release: Vec<u64>,
     pre: Option<(u8, u64)>,
     post: Option<u64>,
     dev: Option<u64>,
-    local: Option<String>,
+    local: Option<Vec<LocalSeg>>,
 }
 
 fn parse_pep440(input: &str) -> Option<Pep> {
@@ -139,13 +170,18 @@ fn parse_pep440(input: &str) -> Option<Pep> {
     let local = match local {
         None => None,
         Some(l) => {
-            let ok = !l.is_empty()
-                && l.split(['.', '-', '_'])
-                    .all(|seg| !seg.is_empty() && seg.bytes().all(|b| b.is_ascii_alphanumeric()));
-            if !ok {
-                return None;
+            let mut segs = Vec::new();
+            for seg in l.split(['.', '-', '_']) {
+                if seg.is_empty() || !seg.bytes().all(|b| b.is_ascii_alphanumeric()) {
+                    return None;
+                }
+                segs.push(if seg.bytes().all(|b| b.is_ascii_digit()) {
+                    LocalSeg::Num(seg.parse().ok()?)
+                } else {
+                    LocalSeg::Alpha(seg.to_string())
+                });
             }
-            Some(l.replace(['-', '_'], "."))
+            Some(segs)
         }
     };
     let (epoch, rest) = match public.split_once('!') {
@@ -196,11 +232,11 @@ fn parse_pep440(input: &str) -> Option<Pep> {
         } else {
             0
         };
-        let _ = consumed_sep;
         let next = &number_src[dlen..];
         match word {
-            // Implicit post-release: `1.0-1`.
-            "" if tail.starts_with('-') && dlen > 0 && stage <= 1 => {
+            // Implicit post-release: `1.0-1`, exactly one hyphen then digits.
+            // `1.0--1` and `1.0-.1` consumed a second separator and are rejected.
+            "" if tail.starts_with('-') && dlen > 0 && !consumed_sep && stage <= 1 => {
                 post = Some(number);
                 stage = 2;
             }
@@ -244,7 +280,7 @@ type PepKey = (
     Key<(u8, u64)>,
     Key<u64>,
     Key<u64>,
-    Option<String>,
+    Option<Vec<LocalSeg>>,
 );
 
 fn pep_key(p: &Pep) -> PepKey {
@@ -353,6 +389,19 @@ fn maven_items(v: &str) -> Option<Vec<MItem>> {
             let followed_by_digit = tokens.get(idx + 1).is_some_and(|(next_sep, next)| {
                 next_sep.is_none() && next.as_bytes()[0].is_ascii_digit()
             });
+            // `-` and a digit/letter transition start a sublist in Maven, after
+            // trailing zeros are dropped: `1.0.0-alpha` is `1-alpha`, and so is
+            // `1.0.0alpha`. A `.` does not, so `1.0.CR1` keeps its zero. Without
+            // this a flat comparison ranks `1.0.0-alpha` above `1.0-sp` while
+            // `1.0.0-alpha < 1.0 < 1.0-sp`: not an order.
+            if *sep != Some(b'.') {
+                while matches!(
+                    items.last(),
+                    Some(MItem::Num(0)) | Some(MItem::Qual(MAVEN_RELEASE_RANK, _))
+                ) {
+                    items.pop();
+                }
+            }
             items.push(maven_qualifier(tok, followed_by_digit));
         }
     }
@@ -586,6 +635,90 @@ mod tests {
         for bad in ["", "1.0-1", "1..2", "1.0 final", "[1.0,2.0)", "1.0+x"] {
             assert_eq!(compare("Maven", bad, "1.0"), None, "{bad:?}");
         }
+    }
+
+    // ---- malformed versions must not compare equal to a valid one (review of #125) ----
+
+    #[test]
+    fn semver_build_metadata_is_validated_before_it_is_ignored() {
+        // `1.0.0+` and `1.0.0+foo..bar` are not valid SemVer; dropping the suffix
+        // unchecked made them equal to 1.0.0, so an unparseable installed version
+        // could clear an advisory.
+        for bad in [
+            "1.0.0+",
+            "1.0.0+foo..bar",
+            "1.0.0+.x",
+            "1.0.0+a.",
+            "1.0.0+a b",
+            "1.0.0+!",
+        ] {
+            assert_eq!(compare("npm", bad, "1.0.0"), None, "{bad:?}");
+            assert_eq!(compare("npm", "1.0.0", bad), None, "{bad:?}");
+        }
+        eq("npm", "1.0.0+build.5", "1.0.0");
+        eq("npm", "1.0.0+20130313144700", "1.0.0");
+        eq("npm", "1.0.0+a-b.c", "1.0.0");
+    }
+
+    #[test]
+    fn semver_rejects_leading_zeros_in_numeric_identifiers() {
+        // `01.0.0` / `1.0.0-01` are invalid and used to equal `1.0.0` / `1.0.0-1`.
+        for bad in [
+            "01.0.0",
+            "1.00.0",
+            "1.0.00",
+            "1.0.0-01",
+            "1.0.0-alpha.01",
+            "v01.2.3",
+        ] {
+            assert_eq!(compare("npm", bad, "1.0.0"), None, "{bad:?}");
+        }
+        // A lone zero is fine, and zeros inside alphanumeric identifiers are fine.
+        eq("npm", "0.0.0", "0.0.0");
+        lt("npm", "1.0.0-0", "1.0.0-1");
+        lt("npm", "1.0.0-0.3.7", "1.0.0-0.3.8");
+        eq("npm", "1.0.0-0a", "1.0.0-0a");
+        lt("Go", "v0.0.0-20210101120000-abcdef123456", "v0.0.1");
+    }
+
+    #[test]
+    fn pep440_implicit_post_release_allows_exactly_one_hyphen_then_digits() {
+        // `1.0--1` and `1.0-.1` were accepted as the implicit post-release `1.0-1`
+        // and compared equal to `1.0.post1`.
+        for bad in ["1.0--1", "1.0-.1", "1.0-_1", "1.0-1-1x"] {
+            assert_eq!(compare("PyPI", bad, "1.0.post1"), None, "{bad:?}");
+        }
+        eq("PyPI", "1.0-1", "1.0.post1");
+    }
+
+    #[test]
+    fn pep440_local_versions_compare_segment_by_segment() {
+        // Compared as text, `vendor.2` came out ABOVE `vendor.10`.
+        lt("PyPI", "1.0+vendor.2", "1.0+vendor.10");
+        // A numeric segment ranks above an alphanumeric one.
+        lt("PyPI", "1.0+abc", "1.0+1");
+        // A shorter local version is lower when it is a prefix.
+        lt("PyPI", "1.0+a", "1.0+a.1");
+        // Case-insensitive, and `-`/`_` are the same as `.`.
+        eq("PyPI", "1.0+ABC", "1.0+abc");
+        eq("PyPI", "1.0+a-b_c", "1.0+a.b.c");
+        lt("PyPI", "1.0+local", "1.0.post1");
+    }
+
+    #[test]
+    fn maven_zeros_before_a_hyphen_qualifier_are_normalized_away() {
+        // Maven starts a sublist at `-` (and at a digit/letter transition) after
+        // dropping trailing zeros, so `1.0.0-alpha` is `1-alpha`. A flat model kept
+        // the zeros, which made `1.0.0-alpha` rank ABOVE `1.0-sp` while it also
+        // ranked below `1.0` and `1.0` below `1.0-sp`: not an order.
+        eq("Maven", "1.0.0-alpha", "1-alpha");
+        eq("Maven", "1.0.0alpha", "1-alpha");
+        lt("Maven", "1.0.0-alpha", "1.0");
+        lt("Maven", "1.0", "1.0-sp");
+        lt("Maven", "1.0.0-alpha", "1.0-sp");
+        lt("Maven", "1.0.0-beta", "1.0.0-rc");
+        // A dot does NOT normalize, so a dotted qualifier keeps its zeros.
+        lt("Maven", "1.0.CR1", "1.0.Final");
     }
 
     // ---- unsupported ecosystems ----
