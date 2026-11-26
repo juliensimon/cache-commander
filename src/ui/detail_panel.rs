@@ -118,6 +118,17 @@ pub fn render(
         safety_style,
     )));
 
+    // Package name for remediation commands. For npm this reads package.json,
+    // and the panel redraws ~every 60ms, so resolve it at most once per render
+    // (and only if a command line is actually shown) rather than per advisory.
+    let command_pkg_name = std::cell::LazyCell::new(|| {
+        crate::providers::command_package_name(
+            node.kind,
+            &node.path,
+            &extract_package_name(&node.name),
+        )
+    });
+
     // Vulnerabilities
     if let Some(sec) = vuln_results.get(&node.path) {
         lines.push(Line::from(""));
@@ -172,15 +183,9 @@ pub fn render(
                     format!("    Fix: ≥{}", fix),
                     theme::SAFE,
                 )));
-                if let Some(cmd) = crate::providers::upgrade_command(
-                    node.kind,
-                    &crate::providers::command_package_name(
-                        node.kind,
-                        &node.path,
-                        &extract_package_name(&node.name),
-                    ),
-                    fix,
-                ) {
+                if let Some(cmd) =
+                    crate::providers::upgrade_command(node.kind, &command_pkg_name, fix)
+                {
                     lines.push(Line::from(Span::styled(
                         format!("    → {}", cmd),
                         theme::DIM,
@@ -216,15 +221,9 @@ pub fn render(
                 "  ↓ Update available",
                 theme::CAUTION,
             )));
-            if let Some(cmd) = crate::providers::upgrade_command(
-                node.kind,
-                &crate::providers::command_package_name(
-                    node.kind,
-                    &node.path,
-                    &extract_package_name(&node.name),
-                ),
-                &ver.latest,
-            ) {
+            if let Some(cmd) =
+                crate::providers::upgrade_command(node.kind, &command_pkg_name, &ver.latest)
+            {
                 lines.push(Line::from(Span::styled(format!("  → {}", cmd), theme::DIM)));
             }
         }
