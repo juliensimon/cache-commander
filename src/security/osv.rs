@@ -344,10 +344,19 @@ pub fn extract_fix_version(
                     let Some(blocker) =
                         intervals.iter().find(|iv| iv.affects(ecosystem, candidate))
                     else {
-                        // Never offer a fix that cannot be ordered against the
-                        // installed version.
-                        return version::compare(ecosystem, candidate, pkg_version)
-                            .map(|_| candidate.to_string());
+                        // `contains` is inclusive of the `fixed` bound, so the
+                        // candidate is normally at or above the installed version
+                        // (equal means "already fixed", and `is_vuln_active` clears
+                        // it). With a non-transitive ordering such as Maven's the
+                        // walk can end BELOW it, or at something that cannot be
+                        // ordered against it; that is not a known fix, and
+                        // offering it would make `is_vuln_active` drop an advisory
+                        // that still applies.
+                        return matches!(
+                            version::compare(ecosystem, candidate, pkg_version),
+                            Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+                        )
+                        .then(|| candidate.to_string());
                     };
                     match blocker.end {
                         IntervalEnd::Fixed(f)
@@ -804,6 +813,33 @@ mod tests {
         assert_eq!(
             extract_fix_version(&maven, "g:a", "Maven", "1.0.CR1"),
             Some("1.0.Final".to_string())
+        );
+    }
+
+    #[test]
+    fn a_final_fix_that_orders_below_the_installed_version_is_not_offered() {
+        // Maven's ordering is not transitive. Installed `1.0.0.alpha-1` is inside
+        // `[0, 1)`, so it is affected. The walk then moves from `1` (blocked by
+        // `[1, 1-1)`) to `1-1`, and Maven orders `1-1` BELOW `1.0.0.alpha-1`.
+        // Offering it makes `is_vuln_active` see installed >= fix and drop an
+        // advisory that still applies. A fix must not order below the installed version
+        // (equal is allowed: that is the already-fixed case), otherwise there is no
+        // known fix and the advisory stays active.
+        let detail = parse_vuln_detail(
+            r#"{"id":"X","affected":[{"package":{"name":"g:a","ecosystem":"Maven"},
+                "ranges":[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"1"}]},
+                          {"type":"ECOSYSTEM","events":[{"introduced":"1"},{"fixed":"1-1"}]}]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            extract_fix_version(&detail, "g:a", "Maven", "1.0.0.alpha-1"),
+            None
+        );
+        // Control: a well-ordered installed version in the same advisory still
+        // gets the chained fix.
+        assert_eq!(
+            extract_fix_version(&detail, "g:a", "Maven", "0.5"),
+            Some("1-1".to_string())
         );
     }
 

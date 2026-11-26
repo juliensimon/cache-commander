@@ -188,11 +188,11 @@ fn e2e_go_discovery_vuln_scan_version_check_and_delete() {
         "[e2e] proxy.golang.org latest for {}: {} (installed: {})",
         gin.1.name, latest, GIN_VULN_VERSION
     );
-    // compare_versions strips the leading `v` for Go-style versions — if the
-    // returned version is strictly greater than v1.6.0, we're good.
+    // The Go ordering ignores the leading `v` — if the returned version is
+    // strictly greater than v1.6.0, we're good.
     assert!(
-        ccmd::security::osv::compare_versions(&latest, GIN_VULN_VERSION)
-            == std::cmp::Ordering::Greater,
+        ccmd::security::version::compare("Go", &latest, GIN_VULN_VERSION)
+            == Some(std::cmp::Ordering::Greater),
         "expected a version > {GIN_VULN_VERSION} from proxy, got {latest}"
     );
 
