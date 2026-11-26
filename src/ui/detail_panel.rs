@@ -183,8 +183,8 @@ pub fn render(
                     format!("    Fix: ≥{}", fix),
                     theme::SAFE,
                 )));
-                if let Some(cmd) =
-                    crate::providers::upgrade_command(node.kind, &command_pkg_name, fix)
+                if let Some(name) = command_pkg_name.as_ref()
+                    && let Some(cmd) = crate::providers::upgrade_command(node.kind, name, fix)
                 {
                     lines.push(Line::from(Span::styled(
                         format!("    → {}", cmd),
@@ -221,8 +221,8 @@ pub fn render(
                 "  ↓ Update available",
                 theme::CAUTION,
             )));
-            if let Some(cmd) =
-                crate::providers::upgrade_command(node.kind, &command_pkg_name, &ver.latest)
+            if let Some(name) = command_pkg_name.as_ref()
+                && let Some(cmd) = crate::providers::upgrade_command(node.kind, name, &ver.latest)
             {
                 lines.push(Line::from(Span::styled(format!("  → {}", cmd), theme::DIM)));
             }

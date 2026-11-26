@@ -233,34 +233,49 @@ pub struct PackageId {
     pub version: String,
 }
 
-/// Package name to put in a remediation command. Prefers the authoritative
-/// name from `package_id` (the one OSV was queried with, scope included), and
-/// only falls back to the tree label, which for e.g. `node_modules/@scope/pkg`
-/// is just the directory basename (`pkg`).
+/// Package name to put in a remediation command, or `None` when no command
+/// should be offered. Prefers the authoritative name from `package_id` (the one
+/// OSV was queried with, scope included) and otherwise uses the tree label.
 ///
 /// For npm the name is read from `package.json`, i.e. attacker-controllable
 /// cache content, so it is only trusted when it agrees with the directory
-/// layout (see `npm_name_matches_layout`). Other providers derive the name
-/// from the path itself.
-pub fn command_package_name(kind: CacheKind, path: &Path, label_fallback: &str) -> String {
+/// layout (see `npm_name_matches_layout`). When it conflicts, or when a scoped
+/// directory (`node_modules/@scope/pkg`) has no usable identity, the label is
+/// just the bare basename (`pkg`), which is a different package, so we return
+/// `None` rather than a command that would install the wrong thing. Other
+/// providers derive the name from the path itself.
+pub fn command_package_name(kind: CacheKind, path: &Path, label_fallback: &str) -> Option<String> {
+    let is_npm = kind == CacheKind::Npm;
     match package_id(kind, path) {
-        Some(id) if kind != CacheKind::Npm || npm_name_matches_layout(path, &id.name) => id.name,
-        _ => label_fallback.to_string(),
+        Some(id) if !is_npm || npm_name_matches_layout(path, &id.name) => Some(id.name),
+        Some(_) => None,
+        None if is_npm && npm_parent_is_scope(path) => None,
+        None => Some(label_fallback.to_string()),
     }
 }
 
+fn dir_name(p: &Path) -> Option<String> {
+    p.file_name().map(|n| n.to_string_lossy().into_owned())
+}
+
+fn npm_parent_is_scope(path: &Path) -> bool {
+    path.parent()
+        .and_then(dir_name)
+        .is_some_and(|n| n.starts_with('@'))
+}
+
 /// True iff `name` (`pkg` or `@scope/pkg`) is consistent with where the
-/// package lives: the directory is named `pkg`, and for a scoped name its
-/// parent directory is `@scope`.
+/// package lives: the directory is named `pkg`; a scoped name needs the parent
+/// directory to be `@scope`, and an unscoped name needs the parent NOT to be a
+/// scope directory (`@babel/core` is not the package `core`).
 fn npm_name_matches_layout(path: &Path, name: &str) -> bool {
-    let dir_name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned());
     match name.split_once('/') {
         Some((scope, base)) if scope.starts_with('@') => {
             dir_name(path).as_deref() == Some(base)
                 && path.parent().and_then(dir_name).as_deref() == Some(scope)
         }
         Some(_) => false,
-        None => dir_name(path).as_deref() == Some(name),
+        None => dir_name(path).as_deref() == Some(name) && !npm_parent_is_scope(path),
     }
 }
 
@@ -953,16 +968,17 @@ mod tests {
         .unwrap();
         assert_eq!(
             command_package_name(CacheKind::Npm, &dir, "pkg"),
-            "@scope/pkg"
+            Some("@scope/pkg".to_string())
         );
     }
 
     #[test]
-    fn command_package_name_rejects_package_json_name_that_contradicts_layout() {
+    fn command_package_name_suppresses_command_when_package_json_name_contradicts_layout() {
         // The npm package_id name comes from file contents, which anyone who
         // can write into a cache dir controls. A `name` that doesn't match the
         // directory layout must not steer the suggested command at another
-        // package; fall back to the label instead.
+        // package, and the label is no safer a fallback: under `@babel/core`
+        // it is just `core`, an unrelated package. No command at all.
         let tmp = tempfile::tempdir().unwrap();
         let write = |rel: &str, json: &str| {
             let dir = tmp.path().join(rel);
@@ -975,22 +991,36 @@ mod tests {
             "node_modules/left-pad",
             r#"{"name":"evil-pkg","version":"1.0.0"}"#,
         );
-        assert_eq!(
-            command_package_name(CacheKind::Npm, &d1, "left-pad"),
-            "left-pad"
-        );
+        assert_eq!(command_package_name(CacheKind::Npm, &d1, "left-pad"), None);
         // Unscoped dir claiming a scoped name.
         let d2 = write(
             "node_modules/core",
             r#"{"name":"@evil/core","version":"1.0.0"}"#,
         );
-        assert_eq!(command_package_name(CacheKind::Npm, &d2, "core"), "core");
+        assert_eq!(command_package_name(CacheKind::Npm, &d2, "core"), None);
         // Scoped name whose parent dir is a different scope.
         let d3 = write(
             "node_modules/@babel/core",
             r#"{"name":"@evil/core","version":"1.0.0"}"#,
         );
-        assert_eq!(command_package_name(CacheKind::Npm, &d3, "core"), "core");
+        assert_eq!(command_package_name(CacheKind::Npm, &d3, "core"), None);
+        // Unscoped name under a scope dir: `npm install core` is a different
+        // package from `@babel/core`.
+        let d4 = write(
+            "node_modules/@babel/parser",
+            r#"{"name":"parser","version":"1.0.0"}"#,
+        );
+        assert_eq!(command_package_name(CacheKind::Npm, &d4, "parser"), None);
+    }
+
+    #[test]
+    fn command_package_name_suppresses_command_for_scoped_dir_without_package_id() {
+        // No readable identity under an `@scope` dir: the label is only the
+        // bare basename, so it must not be turned into a command.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("node_modules/@babel/core");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(command_package_name(CacheKind::Npm, &dir, "core"), None);
     }
 
     #[test]
@@ -998,7 +1028,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         assert_eq!(
             command_package_name(CacheKind::Npm, tmp.path(), "some-label"),
-            "some-label"
+            Some("some-label".to_string())
         );
     }
 

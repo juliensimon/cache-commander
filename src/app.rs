@@ -634,11 +634,12 @@ impl App {
     fn upgrade_command_for_selected(&self) -> Option<String> {
         let node = self.tree.selected_node()?;
         let kind = node.kind;
+        // `None`: the package identity is unsafe/ambiguous, so offer no command.
         let pkg_name = crate::providers::command_package_name(
             kind,
             &node.path,
             &extract_package_name(&node.name),
-        );
+        )?;
 
         // Prefer fix_version from vuln data, fall back to latest from version check
         if let Some(sec) = self.vuln_results.get(&node.path) {
