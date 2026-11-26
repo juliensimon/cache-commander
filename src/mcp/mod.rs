@@ -107,14 +107,22 @@ const NOT_A_DISCOVERED_ENTRY: &str = "Not a discovered cache entry: configured r
 /// lists (`walk_root_nodes`, the same set `list_caches` and `search_packages`
 /// return). A path being under a root is not enough: that also covers the
 /// root itself, provider containers and everything inside a package. Entries
-/// are children of a root, so the root is never in this set; entries that are
-/// symlinks are excluded so a link can never stand in for whatever it points
-/// at (a container, another package, or the root).
+/// that are symlinks are excluded so a link can never stand in for whatever it
+/// points at (a container, another package, or a root).
+///
+/// Configured roots may overlap (`/cache` and `/cache/entry`), so one root can
+/// be a discovered child of another. An entry that IS a configured root, or
+/// CONTAINS one, is therefore excluded too: deleting it would remove a root.
 fn deletable_paths(roots: &[PathBuf]) -> HashSet<PathBuf> {
+    let canonical_roots: Vec<PathBuf> = roots
+        .iter()
+        .filter_map(|r| std::fs::canonicalize(r).ok())
+        .collect();
     CcmdMcp::walk_root_nodes(roots, false)
         .iter()
         .filter(|n| std::fs::symlink_metadata(&n.path).is_ok_and(|m| !m.file_type().is_symlink()))
         .filter_map(|n| canonical_under_roots(&n.path, roots))
+        .filter(|entry| !canonical_roots.iter().any(|root| root.starts_with(entry)))
         .collect()
 }
 
@@ -122,11 +130,18 @@ fn deletable_paths(roots: &[PathBuf]) -> HashSet<PathBuf> {
 /// on, or the reason it is refused. Scope is checked here, before and
 /// independently of safety levels, so `confirm_caution` can only ever confirm
 /// an item that is already in scope.
+///
+/// The REQUESTED path must not itself be a symlink: the allowlist holds the
+/// canonical path of each package, so a link to a package would otherwise
+/// canonicalize into the set and stand in for it.
 fn resolve_deletable(
     path: &Path,
     roots: &[PathBuf],
     deletable: &HashSet<PathBuf>,
 ) -> Result<PathBuf, &'static str> {
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(NOT_A_DISCOVERED_ENTRY);
+    }
     let canonical =
         canonical_under_roots(path, roots).ok_or("Path is not inside any configured cache root")?;
     if deletable.contains(&canonical) {
@@ -1020,6 +1035,74 @@ mod tests {
         assert_eq!(result["deleted_count"], 0, "{result}");
         assert!(dir.path().join("huggingface").exists());
         assert!(hub.join("models--org--m").exists());
+    }
+
+    #[tokio::test]
+    async fn delete_and_preview_refuse_a_requested_symlink_to_a_discovered_package() {
+        // The allowlist holds the package's canonical path, so a link whose
+        // target is that package canonicalizes into the set. The REQUESTED path
+        // being a symlink must be refused too, or an unlisted link can stand in
+        // for a deletable package.
+        let (dir, server) = hf_layout();
+        let hub = dir.path().join("huggingface/hub");
+        let pkg = hub.join("models--org--m");
+        let alias = dir.path().join("alias-to-pkg");
+        symlink(&pkg, &alias).unwrap();
+
+        let preview = tools::PreviewDeleteInput {
+            paths: vec![alias.to_string_lossy().to_string()],
+        };
+        let out = server.preview_delete(Parameters(preview)).await.unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["items"][0]["would_delete"], false, "{v}");
+
+        let result = call_delete(&server, &[&alias], true).await;
+        assert_eq!(result["deleted_count"], 0, "{result}");
+        assert!(pkg.exists(), "the package behind the link must survive");
+    }
+
+    fn server_with_roots(roots: Vec<PathBuf>) -> CcmdMcp {
+        let mut config = Config::default_for_test();
+        config.roots = roots;
+        CcmdMcp::new(&config)
+    }
+
+    #[tokio::test]
+    async fn delete_refuses_an_entry_that_is_a_configured_root() {
+        // Roots may overlap (config allows it): the inner root is also a child
+        // of the outer one, so discovery lists it. It must still never be
+        // deletable, because it is a configured root.
+        let (dir, _) = hf_layout();
+        let pkg = dir.path().join("huggingface/hub/models--org--m");
+        let server = server_with_roots(vec![dir.path().to_path_buf(), pkg.clone()]);
+
+        let result = call_delete(&server, &[&pkg], true).await;
+
+        assert_eq!(result["deleted_count"], 0, "{result}");
+        assert!(pkg.exists(), "a configured root must survive");
+    }
+
+    #[tokio::test]
+    async fn delete_refuses_an_entry_that_contains_a_configured_root() {
+        // Deleting a discovered entry that CONTAINS another configured root
+        // would remove that root with it.
+        let dir = TempDir::new().unwrap();
+        let plain = dir.path().join("plain");
+        let inner = plain.join("inner");
+        let other = dir.path().join("other");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(inner.join("f"), "x").unwrap();
+        std::fs::write(other.join("f"), "x").unwrap();
+        let server = server_with_roots(vec![dir.path().to_path_buf(), inner.clone()]);
+
+        let result = call_delete(&server, &[&plain, &other], true).await;
+
+        // `other` is an ordinary discovered entry and is deleted; `plain`
+        // contains the configured root `inner` and is refused.
+        assert_eq!(result["deleted_count"], 1, "{result}");
+        assert!(!other.exists(), "control: an ordinary entry is deletable");
+        assert!(plain.exists() && inner.exists(), "must not remove a root");
     }
 
     #[tokio::test]
