@@ -1,6 +1,37 @@
 use super::MetadataField;
 use std::path::Path;
 
+/// The path's components with each `..` resolved lexically against the
+/// component before it. Configured scan roots are only tilde-expanded, so a
+/// root like `~/proj/../.m2/repository` carries `..` into every artifact path;
+/// left unresolved it would end up in the group id, and rejecting it would
+/// silently drop every package under that root. Returns `None` when a `..`
+/// has nothing to resolve against (it would climb above the start or the
+/// filesystem root), rather than guessing.
+fn resolve_parent_dirs(path: &Path) -> Option<Vec<String>> {
+    use std::path::Component;
+    let mut comps: Vec<String> = Vec::new();
+    // Index of the first component that `..` may remove: everything after a
+    // root/prefix marker, so `/..` is never "resolved" away.
+    let mut floor = 0;
+    for c in path.components() {
+        match c {
+            Component::ParentDir => {
+                if comps.len() <= floor {
+                    return None;
+                }
+                comps.pop();
+            }
+            Component::Normal(s) => comps.push(s.to_string_lossy().into_owned()),
+            Component::RootDir | Component::Prefix(_) | Component::CurDir => {
+                comps.push(c.as_os_str().to_string_lossy().into_owned());
+                floor = comps.len();
+            }
+        }
+    }
+    Some(comps)
+}
+
 /// Parse a Maven artifact path into (group, artifact, version).
 /// Expects layout `.../.m2/**/repository/<group-path>/<artifact>/<version>/<file>`.
 ///
@@ -9,23 +40,14 @@ use std::path::Path;
 /// a path as Maven. Taking the first one (not the nearest to the artifact) is
 /// what keeps a group id that itself contains `repository`
 /// (`com.repository.acme`) intact. Returns `None` when there is no `.m2`
-/// ancestor or no `repository` directory below it, rather than guessing a group,
-/// and when the path contains an unresolved `..` (it would end up in the group).
+/// ancestor or no `repository` directory below it, rather than guessing a group.
+/// `..` components are resolved lexically first (see `resolve_parent_dirs`).
 ///
 /// Known limit: the root is inferred from the path alone, so a custom root not
 /// named `repository` (e.g. `.m2/custom-repo/com/repository/acme/...`) cannot be
 /// told apart from a nested `.m2/work/repository`; see #118 (needs the scan root).
 fn parse_coordinates(path: &Path) -> Option<(String, String, String)> {
-    if path
-        .components()
-        .any(|c| matches!(c, std::path::Component::ParentDir))
-    {
-        return None;
-    }
-    let comps: Vec<String> = path
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect();
+    let comps = resolve_parent_dirs(path)?;
     let m2 = comps.iter().position(|c| c == ".m2")?;
     let root = m2 + 1 + comps[m2 + 1..].iter().position(|c| c == "repository")?;
     // <group...> <artifact> <version> <file>, with at least one group part.
@@ -168,14 +190,46 @@ mod tests {
     }
 
     #[test]
-    fn parent_dir_components_fail_closed() {
+    fn parent_dir_components_are_resolved_lexically() {
         // `Path::components()` keeps `..` and configured roots are only
-        // tilde-expanded, so an unresolved `..` would leak into the group
-        // (`...repository.com.acme`) and query OSV for the wrong package.
+        // tilde-expanded, so a scan root like `~/proj/../.m2/repository` carries
+        // `..` into every artifact path. Left in, it leaked into the group
+        // (`...repository.com.acme`) and queried OSV for the wrong package;
+        // rejecting it instead silently dropped every package under that root.
+        // Resolve it: the coordinates are those of the resolved location.
+        let resolved = [
+            // `..` in the root prefix (the realistic case).
+            (
+                "/home/user/proj/../.m2/repository/com/acme/widget/1.0/widget-1.0.jar",
+                "com.acme:widget",
+            ),
+            (
+                "/home/user/../user/.m2/repository/com/acme/widget/1.0/widget-1.0.jar",
+                "com.acme:widget",
+            ),
+            // `..` after the root resolves to the real location.
+            (
+                "/home/user/.m2/repository/../repository/com/acme/widget/1.0/widget-1.0.jar",
+                "com.acme:widget",
+            ),
+            (
+                "/home/user/.m2/repository/com/../acme/widget/1.0/widget-1.0.jar",
+                "acme:widget",
+            ),
+        ];
+        for (p, expected) in resolved {
+            let id = package_id(&PathBuf::from(p));
+            assert_eq!(id.map(|i| i.name).as_deref(), Some(expected), "{p}");
+        }
+    }
+
+    #[test]
+    fn parent_dir_climbing_above_the_start_fails_closed() {
+        // Nothing to resolve `..` against: no coordinates rather than a guess.
         for p in [
-            "/home/user/.m2/repository/../repository/com/acme/widget/1.0/widget-1.0.jar",
-            "/home/user/.m2/repository/com/../acme/widget/1.0/widget-1.0.jar",
-            "/home/user/../user/.m2/repository/com/acme/widget/1.0/widget-1.0.jar",
+            "../.m2/repository/com/acme/widget/1.0/widget-1.0.jar",
+            "/../.m2/repository/com/acme/widget/1.0/widget-1.0.jar",
+            "/home/../../.m2/repository/com/acme/widget/1.0/widget-1.0.jar",
         ] {
             let path = PathBuf::from(p);
             assert_eq!(semantic_name(&path), None, "{p}");
