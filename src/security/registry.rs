@@ -80,15 +80,31 @@ pub fn parse_go_proxy_list(body: &str) -> Option<String> {
         .filter(|l| !l.is_empty())
         .collect();
 
-    let pick = |candidates: Vec<&str>| -> Option<String> {
-        candidates
-            .into_iter()
-            // Go module versions, by Go's (SemVer) ordering.
-            .max_by(|a, b| {
-                crate::security::version::compare("Go", a, b).unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .map(|s| s.to_string())
-    };
+    // Highest by Go's (SemVer) ordering. `Ok(None)` means there are no
+    // candidates, so the caller tries the next tier. `Err` means a candidate
+    // cannot be ordered, so NO latest version is known: guessing (an unorderable
+    // entry used to count as "equal" and could reset the running maximum) would
+    // report an older release as the latest, and an installed older one as up to
+    // date.
+    fn highest<'a>(candidates: &[&'a str]) -> Result<Option<&'a str>, ()> {
+        let mut best: Option<&'a str> = None;
+        for &candidate in candidates {
+            // Orderable against itself iff it parses as a Go version.
+            if crate::security::version::compare("Go", candidate, candidate).is_none() {
+                return Err(());
+            }
+            best = match best {
+                Some(b)
+                    if crate::security::version::compare("Go", candidate, b)
+                        != Some(std::cmp::Ordering::Greater) =>
+                {
+                    Some(b)
+                }
+                _ => Some(candidate),
+            };
+        }
+        Ok(best)
+    }
 
     let preferred: Vec<&str> = all
         .iter()
@@ -96,8 +112,10 @@ pub fn parse_go_proxy_list(body: &str) -> Option<String> {
         .filter(|l| !is_go_pseudo_version(l))
         .filter(|l| !l.ends_with("+incompatible"))
         .collect();
-    if let Some(v) = pick(preferred) {
-        return Some(v);
+    match highest(&preferred) {
+        Ok(Some(v)) => return Some(v.to_string()),
+        Ok(None) => {}
+        Err(()) => return None,
     }
 
     let non_pseudo: Vec<&str> = all
@@ -105,11 +123,13 @@ pub fn parse_go_proxy_list(body: &str) -> Option<String> {
         .copied()
         .filter(|l| !is_go_pseudo_version(l))
         .collect();
-    if let Some(v) = pick(non_pseudo) {
-        return Some(v);
+    match highest(&non_pseudo) {
+        Ok(Some(v)) => return Some(v.to_string()),
+        Ok(None) => {}
+        Err(()) => return None,
     }
 
-    pick(all)
+    highest(&all).ok().flatten().map(str::to_string)
 }
 
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
@@ -407,6 +427,39 @@ mod tests {
     }
 
     // --- Go proxy (proxy.golang.org /@v/list) ---
+
+    #[test]
+    fn parse_go_proxy_list_does_not_guess_when_an_entry_cannot_be_ordered() {
+        // `1844...` overflows the numeric parser, so that entry cannot be
+        // ordered. Treating it as "equal" let it reset the running maximum:
+        // `max_by` keeps the last of two equals, so this list selected v1.0.0
+        // despite the known newer v1.9.0, and an installed v1.0.0 was then
+        // reported (and cached) as up to date.
+        let bad = "v1.18446744073709551616.0";
+        for body in [
+            format!("v1.9.0\n{bad}\nv1.0.0\n"),
+            format!("{bad}\nv1.9.0\nv1.0.0\n"),
+            format!("v1.9.0\nv1.0.0\n{bad}\n"),
+            // A single entry that cannot be ordered is not a known latest either.
+            format!("{bad}\n"),
+        ] {
+            assert_eq!(parse_go_proxy_list(&body), None, "{body:?}");
+        }
+    }
+
+    #[test]
+    fn parse_go_proxy_list_unorderable_entry_is_not_skipped_in_favour_of_a_pseudo_version() {
+        // No candidate means "try the next tier"; an UNORDERABLE candidate means
+        // "no latest is known". It must not be skipped so that the pseudo version
+        // below is returned as the latest.
+        let body = "v1.18446744073709551616.0\nv0.0.0-20210101120000-abcdef123456\n";
+        assert_eq!(parse_go_proxy_list(body), None);
+        // Control: with no tagged versions at all, the pseudo version is used.
+        assert_eq!(
+            parse_go_proxy_list("v0.0.0-20210101120000-abcdef123456\n"),
+            Some("v0.0.0-20210101120000-abcdef123456".into())
+        );
+    }
 
     #[test]
     fn parse_go_proxy_list_picks_highest_semver() {
