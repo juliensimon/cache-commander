@@ -355,15 +355,22 @@ pub fn extract_fix_version(
             let governing = intervals
                 .iter()
                 .filter(|iv| {
-                    // Started at or below the installed version, or (for an
-                    // unorderable start such as `9.x`) ended at a real version at
-                    // or below it: either way the installed version is past it.
-                    (is_concrete_version(iv.introduced) && version_lte(iv.introduced, pkg_version))
-                        || matches!(
+                    // Started at or below the installed version, or, ONLY when the
+                    // start cannot be ordered (`9.x`), ended at a real version at
+                    // or below it: then the installed version is certainly past
+                    // it. An interval with an orderable start above the installed
+                    // version has not begun, and must not be admitted through its
+                    // `fixed` bound (malformed `[5.0, fixed 1.0]` would otherwise
+                    // clear an advisory from inconsistent data).
+                    if is_concrete_version(iv.introduced) {
+                        version_lte(iv.introduced, pkg_version)
+                    } else {
+                        matches!(
                             iv.end,
                             IntervalEnd::Fixed(f)
                                 if is_concrete_version(f) && version_lte(f, pkg_version)
                         )
+                    }
                 })
                 .max_by(|a, b| {
                     // An orderable start outranks an unknown one, so a text
@@ -875,6 +882,19 @@ mod tests {
             extract_fix_version(&detail, "pkg", "npm", "2.0.0"),
             Some("1.0".to_string())
         );
+    }
+
+    #[test]
+    fn an_inconsistent_interval_is_not_admitted_through_its_fixed_bound() {
+        // `[introduced 5.0, fixed 1.0]` is malformed (starts above its own end).
+        // Installed 2.0.0 is below its start, so it has not begun; admitting it
+        // only because its `fixed` is below the installed version would clear
+        // the advisory from inconsistent data. The `fixed` clause is only for an
+        // interval whose start cannot be ordered at all.
+        let detail = detail_with_ranges(
+            r#"[{"type":"ECOSYSTEM","events":[{"introduced":"5.0"},{"fixed":"1.0"}]}]"#,
+        );
+        assert_eq!(extract_fix_version(&detail, "pkg", "npm", "2.0.0"), None);
     }
 
     #[test]
