@@ -153,10 +153,10 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
 
       - name: Install pnpm
-        run: npm install -g pnpm
+        run: npm install -g --ignore-scripts pnpm
 
       - name: Install Yarn Classic
-        run: npm install -g yarn@1
+        run: npm install -g --ignore-scripts yarn@1
 
       - name: Enable Corepack (for Yarn Berry)
         run: corepack enable
