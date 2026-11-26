@@ -32,7 +32,7 @@ pub fn render_delete_confirm(f: &mut Frame, items: &[&TreeNode]) {
     for item in items.iter().take(10) {
         lines.push(Line::from(vec![
             Span::styled("  ", theme::NORMAL),
-            Span::styled(&item.name, theme::NORMAL),
+            Span::styled(crate::ui::printable(&item.name), theme::NORMAL),
             Span::styled(format!(" ({})", format_size(item.size, BINARY)), theme::DIM),
         ]));
     }

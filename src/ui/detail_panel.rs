@@ -32,13 +32,19 @@ pub fn render(
     let mut lines: Vec<Line> = Vec::new();
 
     // Title
-    lines.push(Line::from(Span::styled(&node.name, theme::TITLE)));
+    lines.push(Line::from(Span::styled(
+        crate::ui::printable(&node.name),
+        theme::TITLE,
+    )));
     lines.push(Line::from(""));
 
     // Path
     lines.push(Line::from(vec![
         Span::styled("Path     ", theme::DIM),
-        Span::styled(node.path.to_string_lossy().to_string(), theme::NORMAL),
+        Span::styled(
+            crate::ui::printable(&node.path.to_string_lossy()).into_owned(),
+            theme::NORMAL,
+        ),
     ]));
 
     // Size
