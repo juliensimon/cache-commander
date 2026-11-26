@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/juliensimon/cache-commander/actions/workflows/ci.yml/badge.svg)](https://github.com/juliensimon/cache-commander/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/juliensimon/cache-commander/branch/master/graph/badge.svg)](https://codecov.io/gh/juliensimon/cache-commander)
+[![Scanned by Aikido](https://img.shields.io/badge/scanned%20by-Aikido-6551F3)](https://www.aikido.dev/)
 [![Release](https://github.com/juliensimon/cache-commander/actions/workflows/release.yml/badge.svg)](https://github.com/juliensimon/cache-commander/releases)
 [![GitHub release](https://img.shields.io/github/v/release/juliensimon/cache-commander)](https://github.com/juliensimon/cache-commander/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
