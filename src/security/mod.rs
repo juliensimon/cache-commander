@@ -528,6 +528,44 @@ mod tests {
     }
 
     #[test]
+    fn backfill_keeps_an_advisory_inside_an_open_last_interval() {
+        // Events [0, fixed 1.0) then [1.5, open): installed 1.6.0 is affected
+        // and has no fix. The old pairing produced fix 1.0 and cleared it.
+        let detail_json = r#"{
+            "id": "CVE-1",
+            "affected": [{
+                "package": {"name": "requests", "ecosystem": "PyPI"},
+                "ranges": [{"type":"ECOSYSTEM","events":[
+                    {"introduced":"0"},{"fixed":"1.0"},{"introduced":"1.5"}
+                ]}]
+            }]
+        }"#;
+        let mut results = HashMap::new();
+        results.insert(
+            PathBuf::from("/a"),
+            SecurityInfo {
+                vulns: vec![Vulnerability {
+                    id: "CVE-1".into(),
+                    summary: "x".into(),
+                    severity: None,
+                    fix_version: None,
+                }],
+            },
+        );
+        let packages = vec![(PathBuf::from("/a"), pkg("requests", "1.6.0"))];
+        let mut detail_cache = HashMap::new();
+        detail_cache.insert(
+            "CVE-1".to_string(),
+            osv::parse_vuln_detail(detail_json).unwrap(),
+        );
+
+        backfill_and_filter_vulns(&mut results, &packages, &detail_cache);
+
+        let info = results.get(&PathBuf::from("/a")).expect("must stay active");
+        assert_eq!(info.vulns[0].fix_version, None);
+    }
+
+    #[test]
     fn backfill_clears_a_rejected_fix_instead_of_offering_it() {
         // An ECOSYSTEM range with `fixed: "main"` keeps the advisory active, but
         // `fix_version` must not stay `Some("main")`: the UI and upgrade action
