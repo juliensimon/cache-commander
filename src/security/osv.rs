@@ -355,9 +355,29 @@ pub fn extract_fix_version(
             let governing = intervals
                 .iter()
                 .filter(|iv| {
-                    is_concrete_version(iv.introduced) && version_lte(iv.introduced, pkg_version)
+                    // Started at or below the installed version, or (for an
+                    // unorderable start such as `9.x`) ended at a real version at
+                    // or below it: either way the installed version is past it.
+                    (is_concrete_version(iv.introduced) && version_lte(iv.introduced, pkg_version))
+                        || matches!(
+                            iv.end,
+                            IntervalEnd::Fixed(f)
+                                if is_concrete_version(f) && version_lte(f, pkg_version)
+                        )
                 })
-                .max_by(|a, b| compare_versions(a.introduced, b.introduced));
+                .max_by(|a, b| {
+                    // An orderable start outranks an unknown one, so a text
+                    // comparison of `9.x` can never pick the governing interval.
+                    match (
+                        is_concrete_version(a.introduced),
+                        is_concrete_version(b.introduced),
+                    ) {
+                        (true, true) => compare_versions(a.introduced, b.introduced),
+                        (true, false) => std::cmp::Ordering::Greater,
+                        (false, true) => std::cmp::Ordering::Less,
+                        (false, false) => std::cmp::Ordering::Equal,
+                    }
+                });
             return match governing.map(|iv| &iv.end) {
                 Some(IntervalEnd::Fixed(f)) if is_concrete_version(f) => Some(f.to_string()),
                 _ => None,
@@ -839,6 +859,34 @@ mod tests {
                 "introduced {bad:?}: possibly applicable, so no known fix"
             );
         }
+    }
+
+    #[test]
+    fn an_interval_with_an_unknown_start_but_a_known_end_below_installed_is_past() {
+        // `[introduced 9.x, fixed 1.0]`: whatever the unknown start is, installed
+        // 2.0.0 is past its end, so it is already fixed. Stage 2 must still see
+        // this interval (via its concrete `fixed`) and report 1.0 so the
+        // advisory is dropped, instead of excluding it for the unorderable start
+        // and leaving a fixed vulnerability showing as active.
+        let detail = detail_with_ranges(
+            r#"[{"type":"ECOSYSTEM","events":[{"introduced":"9.x"},{"fixed":"1.0"}]}]"#,
+        );
+        assert_eq!(
+            extract_fix_version(&detail, "pkg", "npm", "2.0.0"),
+            Some("1.0".to_string())
+        );
+    }
+
+    #[test]
+    fn stage_two_prefers_an_orderable_interval_over_an_unknown_start() {
+        // Installed 10.0.0 is past both: [8.0, last_affected 9.0] (no fix, so
+        // None) and [9.x, fixed 1.0]. The interval with a real start wins; the
+        // unknown one must not be picked by comparing "9.x" as text.
+        let detail = detail_with_ranges(
+            r#"[{"type":"ECOSYSTEM","events":[{"introduced":"8.0"},{"last_affected":"9.0"}]},
+                {"type":"ECOSYSTEM","events":[{"introduced":"9.x"},{"fixed":"1.0"}]}]"#,
+        );
+        assert_eq!(extract_fix_version(&detail, "pkg", "npm", "10.0.0"), None);
     }
 
     #[test]
