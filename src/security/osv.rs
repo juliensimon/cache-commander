@@ -144,10 +144,140 @@ pub struct OsvEvent {
     pub introduced: Option<String>,
     #[serde(default)]
     pub fixed: Option<String>,
+    /// Inclusive end of an affected interval (unlike `fixed`, which is
+    /// exclusive). It ends an interval without naming a version that fixes it.
+    #[serde(default)]
+    pub last_affected: Option<String>,
+    /// Exclusive end of an interval that has no fixing version (used mostly by
+    /// GIT ranges, but the spec allows it on any range).
+    #[serde(default)]
+    pub limit: Option<String>,
 }
 
 pub fn parse_vuln_detail(json: &str) -> Result<OsvVulnDetail, serde_json::Error> {
     serde_json::from_str(json)
+}
+
+/// How an affected interval ends.
+enum IntervalEnd<'a> {
+    /// Exclusive upper bound: the version that fixes it.
+    Fixed(&'a str),
+    /// Inclusive upper bound: no fixed version exists.
+    LastAffected(&'a str),
+    /// Exclusive upper bound with no fixing version.
+    Limit(&'a str),
+    /// Never ended: every later version is affected.
+    Open,
+}
+
+struct Interval<'a> {
+    introduced: &'a str,
+    end: IntervalEnd<'a>,
+}
+
+impl Interval<'_> {
+    /// Whether the interval has begun by `version`. An `introduced` that is not
+    /// a real version (`9.x`, `main`) cannot be ordered against it, so the
+    /// interval is treated as possibly applicable rather than skipped (the
+    /// mirror of an unknown upper bound): skipping it would let another
+    /// interval's fix clear an advisory that may still apply.
+    fn started_by(&self, version: &str) -> bool {
+        !is_concrete_version(self.introduced) || version_lte(self.introduced, version)
+    }
+
+    /// Whether `version` lies in this interval. The `fixed` bound is treated
+    /// as inclusive here, so an installed version equal to the fix still picks
+    /// this interval and reports that fix; `is_vuln_active` is what then
+    /// recognizes it as fixed. (A version below `introduced` or past the end is
+    /// handled by the second stage of `extract_fix_version`.)
+    fn contains(&self, version: &str) -> bool {
+        self.started_by(version)
+            && match self.end {
+                IntervalEnd::Fixed(bound)
+                | IntervalEnd::LastAffected(bound)
+                | IntervalEnd::Limit(bound)
+                    if is_concrete_version(bound) =>
+                {
+                    version_lte(version, bound)
+                }
+                // An end that is not a real version (`main`, `1.x`, a hash)
+                // cannot be compared; the interval's extent is unknown, and for
+                // a security check unknown means possibly affected.
+                IntervalEnd::Fixed(_)
+                | IntervalEnd::LastAffected(_)
+                | IntervalEnd::Limit(_)
+                | IntervalEnd::Open => true,
+            }
+    }
+
+    /// Whether `version` is affected by this interval with the bounds exactly as
+    /// specified: `fixed` and `limit` are exclusive, `last_affected` inclusive.
+    /// Used to check a candidate upgrade target, where being AT a `fixed` bound
+    /// already means "not affected" (unlike `contains`, which is boundary
+    /// tolerant so an installed version equal to the fix still reports it).
+    fn affects(&self, version: &str) -> bool {
+        self.started_by(version)
+            && match self.end {
+                IntervalEnd::Fixed(bound) | IntervalEnd::Limit(bound)
+                    if is_concrete_version(bound) =>
+                {
+                    compare_versions(version, bound) == std::cmp::Ordering::Less
+                }
+                IntervalEnd::LastAffected(bound) if is_concrete_version(bound) => {
+                    version_lte(version, bound)
+                }
+                _ => true,
+            }
+    }
+}
+
+/// The event's string value, treating an empty string as absent.
+fn non_empty(v: &Option<String>) -> Option<&str> {
+    v.as_deref().filter(|x| !x.is_empty())
+}
+
+/// A range's `events` are an ORDERED sequence: `introduced` opens an interval
+/// and the next `fixed` or `last_affected` closes it; an `introduced` with no
+/// closing event stays open. One range can hold several intervals
+/// (`[0,1.0)` then `[1.5,2.0)`), so it must not be collapsed to a single
+/// (last introduced, last fixed) pair, which pairs a later `introduced` with an
+/// earlier `fixed` and invents a fix below the version it applies to.
+fn range_intervals(range: &OsvRange) -> Vec<Interval<'_>> {
+    let mut out = Vec::new();
+    let mut open: Option<&str> = None;
+    for event in &range.events {
+        if let Some(introduced) = event.introduced.as_deref() {
+            // A second `introduced` while one is still open: the earlier one
+            // never ended.
+            if let Some(previous) = open.replace(introduced) {
+                out.push(Interval {
+                    introduced: previous,
+                    end: IntervalEnd::Open,
+                });
+            }
+        }
+        let end = match (
+            non_empty(&event.fixed),
+            non_empty(&event.last_affected),
+            non_empty(&event.limit),
+        ) {
+            (Some(f), _, _) => Some(IntervalEnd::Fixed(f)),
+            (None, Some(l), _) => Some(IntervalEnd::LastAffected(l)),
+            (None, None, Some(l)) => Some(IntervalEnd::Limit(l)),
+            (None, None, None) => None,
+        };
+        if let (Some(end), Some(introduced)) = (end, open) {
+            out.push(Interval { introduced, end });
+            open = None;
+        }
+    }
+    if let Some(introduced) = open {
+        out.push(Interval {
+            introduced,
+            end: IntervalEnd::Open,
+        });
+    }
+    out
 }
 
 /// Extract the fix version for a specific package version from OSV detail.
@@ -166,51 +296,99 @@ pub fn extract_fix_version(
             && pkg.name == package_name
             && pkg.ecosystem == ecosystem
         {
-            // One candidate per range that has an `introduced` event, WITH its
-            // own optional fix. A range must stay a candidate even when it has
-            // no fix or a non-version one: dropping it here would let the
-            // selection below fall through to a DIFFERENT range's fix and read
-            // an installed version that sits in this range as already fixed.
-            let mut candidates: Vec<(&str, Option<&str>)> = Vec::new();
-            for range in affected.ranges.iter().filter(|r| r.is_version_range()) {
-                let mut intro: Option<&str> = None;
-                let mut fix: Option<&str> = None;
-                for event in &range.events {
-                    if let Some(i) = &event.introduced {
-                        intro = Some(i);
-                    }
-                    if let Some(f) = &event.fixed {
-                        fix = Some(f);
-                    }
-                }
-                if let Some(i) = intro {
-                    candidates.push((i, fix.filter(|f| !f.is_empty())));
-                }
-            }
+            let intervals: Vec<Interval<'_>> = affected
+                .ranges
+                .iter()
+                .filter(|r| r.is_version_range())
+                .flat_map(range_intervals)
+                .collect();
 
-            if candidates.is_empty() {
+            // Stage 1: the installed version is INSIDE one or more intervals,
+            // so it is affected. A fix is only offered when EVERY containing
+            // interval ends in a concrete `fixed` version; an open or
+            // `last_affected` interval, or a non-version fix (`main`, `1.x`, a
+            // hash), means there is no known fix and the advisory stays active.
+            // Never borrow another interval's fix. With several containing
+            // intervals the fix must leave all of them, so take the highest.
+            let containing: Vec<&Interval<'_>> = intervals
+                .iter()
+                .filter(|iv| iv.contains(pkg_version))
+                .collect();
+            if !containing.is_empty() {
+                let mut fixes: Vec<&str> = Vec::new();
+                for iv in containing {
+                    match iv.end {
+                        IntervalEnd::Fixed(f) if is_concrete_version(f) => fixes.push(f),
+                        _ => return None,
+                    }
+                }
+                // The highest containing fix is only a candidate: it may itself
+                // sit inside ANOTHER interval (`[0,4.0)`, `[1.0,2.0)` and
+                // `[3.0,open)` give 4.0 for 1.5, which is still affected), so
+                // advance through concrete fixes until no interval affects it,
+                // or give up if one has no concrete end.
+                let mut candidate = fixes.into_iter().max_by(|a, b| compare_versions(a, b))?;
+                for _ in 0..=intervals.len() {
+                    let Some(blocker) = intervals.iter().find(|iv| iv.affects(candidate)) else {
+                        return Some(candidate.to_string());
+                    };
+                    match blocker.end {
+                        IntervalEnd::Fixed(f)
+                            if is_concrete_version(f)
+                                && compare_versions(f, candidate)
+                                    == std::cmp::Ordering::Greater =>
+                        {
+                            candidate = f;
+                        }
+                        _ => return None,
+                    }
+                }
                 return None;
             }
 
-            // Find the best matching range: the one whose introduced version
-            // is <= pkg_version with the highest introduced version.
-            // This picks the most specific range that covers our version.
-            let best = candidates
+            // Stage 2: inside no interval, so it is already past a fix or in a
+            // gap between intervals. OSV can still report such a version (the
+            // "rustix case": installed 1.1.4 against a 1.0.5 fix), so return the
+            // fix of the most specific interval that starts at or below it
+            // (greatest `introduced`); `is_vuln_active` then sees installed >=
+            // fix and drops the advisory instead of raising a false alarm.
+            let governing = intervals
                 .iter()
-                .filter(|(intro, _)| version_lte(intro, pkg_version))
-                .max_by(|(a, _), (b, _)| compare_versions(a, b));
-
-            // Only now look at THIS range's fix: it must be a concrete version.
-            // Missing or non-version (`main`, `1.x`, a hash) means unknown, and
-            // unknown keeps the advisory active; never borrow another range's.
-            if let Some((_, fix)) = best {
-                return fix
-                    .filter(|f| is_concrete_version(f))
-                    .map(|f| f.to_string());
-            }
-
-            // No range matched — we don't know which range applies
-            return None;
+                .filter(|iv| {
+                    // Started at or below the installed version, or, ONLY when the
+                    // start cannot be ordered (`9.x`), ended at a real version at
+                    // or below it: then the installed version is certainly past
+                    // it. An interval with an orderable start above the installed
+                    // version has not begun, and must not be admitted through its
+                    // `fixed` bound (malformed `[5.0, fixed 1.0]` would otherwise
+                    // clear an advisory from inconsistent data).
+                    if is_concrete_version(iv.introduced) {
+                        version_lte(iv.introduced, pkg_version)
+                    } else {
+                        matches!(
+                            iv.end,
+                            IntervalEnd::Fixed(f)
+                                if is_concrete_version(f) && version_lte(f, pkg_version)
+                        )
+                    }
+                })
+                .max_by(|a, b| {
+                    // An orderable start outranks an unknown one, so a text
+                    // comparison of `9.x` can never pick the governing interval.
+                    match (
+                        is_concrete_version(a.introduced),
+                        is_concrete_version(b.introduced),
+                    ) {
+                        (true, true) => compare_versions(a.introduced, b.introduced),
+                        (true, false) => std::cmp::Ordering::Greater,
+                        (false, true) => std::cmp::Ordering::Less,
+                        (false, false) => std::cmp::Ordering::Equal,
+                    }
+                });
+            return match governing.map(|iv| &iv.end) {
+                Some(IntervalEnd::Fixed(f)) if is_concrete_version(f) => Some(f.to_string()),
+                _ => None,
+            };
         }
     }
     None
@@ -555,6 +733,226 @@ mod tests {
                 "installed 1.6.0 is in the second range: {second}"
             );
         }
+    }
+
+    // ---- events are ordered intervals, not (last introduced, last fixed) (#101) ----
+
+    fn fix_for(events: &str, installed: &str) -> Option<String> {
+        let detail = detail_with_ranges(&format!(r#"[{{"type":"ECOSYSTEM","events":{events}}}]"#));
+        extract_fix_version(&detail, "pkg", "npm", installed)
+    }
+
+    #[test]
+    fn interleaved_intervals_in_one_range_each_get_their_own_fix() {
+        // [0, 1.0) and [1.5, 2.0) in ONE range. Collapsing to the last
+        // introduced/fixed lost the first interval entirely.
+        let ev = r#"[{"introduced":"0"},{"fixed":"1.0"},{"introduced":"1.5"},{"fixed":"2.0"}]"#;
+        assert_eq!(fix_for(ev, "0.5.0"), Some("1.0".to_string()));
+        assert_eq!(fix_for(ev, "1.6.0"), Some("2.0".to_string()));
+        // In the gap between the intervals (1.2.0) or past the last one (2.5.0)
+        // the version is NOT affected, so the fix of the interval that starts at
+        // or below it is reported: installed >= fix, which `is_vuln_active`
+        // reads as "already fixed" and drops, as with the rustix case.
+        assert_eq!(fix_for(ev, "1.2.0"), Some("1.0".to_string()));
+        assert_eq!(fix_for(ev, "2.5.0"), Some("2.0".to_string()));
+    }
+
+    #[test]
+    fn an_open_last_interval_never_borrows_an_earlier_fix() {
+        // [0, 1.0) then [1.5, open). Pairing the last `introduced` (1.5) with the
+        // earlier `fixed` (1.0) produced a "fix" below the introduced version, so
+        // installed 1.6.0 (affected, no fix exists) was read as already fixed.
+        let ev = r#"[{"introduced":"0"},{"fixed":"1.0"},{"introduced":"1.5"}]"#;
+        assert_eq!(fix_for(ev, "1.6.0"), None);
+        assert_eq!(fix_for(ev, "0.5.0"), Some("1.0".to_string()));
+    }
+
+    #[test]
+    fn last_affected_ends_an_interval_without_offering_a_fix() {
+        // [0, 1.0) then [2.0, 2.5] (last_affected is inclusive, not a fix).
+        let ev =
+            r#"[{"introduced":"0"},{"fixed":"1.0"},{"introduced":"2.0"},{"last_affected":"2.5"}]"#;
+        assert_eq!(
+            fix_for(ev, "2.2.0"),
+            None,
+            "affected, and there is no fixed version"
+        );
+        assert_eq!(fix_for(ev, "0.5.0"), Some("1.0".to_string()));
+    }
+
+    #[test]
+    fn last_affected_closes_its_interval_so_it_does_not_leak_into_the_next() {
+        // [0, 1.2] (last_affected) then [2.0, 3.0). If last_affected were
+        // ignored, the first interval would stay open and swallow 2.5.0 too,
+        // turning a known fix into "no fix".
+        let ev =
+            r#"[{"introduced":"0"},{"last_affected":"1.2"},{"introduced":"2.0"},{"fixed":"3.0"}]"#;
+        assert_eq!(fix_for(ev, "2.5.0"), Some("3.0".to_string()));
+        assert_eq!(
+            fix_for(ev, "1.0.0"),
+            None,
+            "inside the last_affected interval"
+        );
+    }
+
+    #[test]
+    fn one_containing_interval_without_a_fix_means_no_fix_at_all() {
+        // Installed 1.5 is inside [0, 3.0) AND a second interval with no usable
+        // fix. Upgrading to 3.0 would still leave it in the second one, so
+        // offering 3.0 would be a false fix. Check an open interval, a
+        // last_affected interval and a non-version fix.
+        for second in [
+            r#"{"introduced":"1.0"}"#,
+            r#"{"introduced":"1.0"},{"last_affected":"9.0"}"#,
+            r#"{"introduced":"1.0"},{"fixed":"main"}"#,
+        ] {
+            let detail = detail_with_ranges(&format!(
+                r#"[{{"type":"ECOSYSTEM","events":[{{"introduced":"0"}},{{"fixed":"3.0"}}]}},
+                    {{"type":"ECOSYSTEM","events":[{second}]}}]"#
+            ));
+            assert_eq!(
+                extract_fix_version(&detail, "pkg", "npm", "1.5.0"),
+                None,
+                "second interval: {second}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fix_must_not_land_inside_another_interval() {
+        // Installed 1.5 is inside [0, 4.0) and [1.0, 2.0), so the candidate fix
+        // is 4.0. But 4.0 is inside a third interval [3.0, ...). If that one is
+        // open there is no safe version to upgrade to; if it ends at 5.0 the
+        // fix is 5.0. Offering 4.0 would make the upgrade command useless.
+        let with_third = |third: &str| {
+            let detail = detail_with_ranges(&format!(
+                r#"[{{"type":"ECOSYSTEM","events":[{{"introduced":"0"}},{{"fixed":"4.0"}}]}},
+                    {{"type":"ECOSYSTEM","events":[{{"introduced":"1.0"}},{{"fixed":"2.0"}}]}},
+                    {{"type":"ECOSYSTEM","events":[{third}]}}]"#
+            ));
+            extract_fix_version(&detail, "pkg", "npm", "1.5.0")
+        };
+        assert_eq!(with_third(r#"{"introduced":"3.0"}"#), None, "open interval");
+        assert_eq!(
+            with_third(r#"{"introduced":"3.0"},{"last_affected":"9.0"}"#),
+            None,
+            "last_affected interval"
+        );
+        assert_eq!(
+            with_third(r#"{"introduced":"3.0"},{"fixed":"5.0"}"#),
+            Some("5.0".to_string()),
+            "advance through a concrete fix"
+        );
+        // A fix exactly at another interval's exclusive end is already clear.
+        assert_eq!(
+            with_third(r#"{"introduced":"3.0"},{"fixed":"4.0"}"#),
+            Some("4.0".to_string())
+        );
+    }
+
+    #[test]
+    fn an_unrecognized_introduced_bound_is_treated_as_possibly_applicable() {
+        // `introduced: "9.x"` is not a version, so comparing it as text ranked it
+        // above 2.0 and the interval was skipped; the first range's fix then
+        // cleared the advisory. An unknown lower bound must fail toward affected.
+        for bad in ["9.x", "main", "latest", "*"] {
+            let detail = detail_with_ranges(&format!(
+                r#"[{{"type":"ECOSYSTEM","events":[{{"introduced":"0"}},{{"fixed":"1.0"}}]}},
+                    {{"type":"ECOSYSTEM","events":[{{"introduced":"{bad}"}}]}}]"#
+            ));
+            assert_eq!(
+                extract_fix_version(&detail, "pkg", "npm", "2.0.0"),
+                None,
+                "introduced {bad:?}: possibly applicable, so no known fix"
+            );
+        }
+    }
+
+    #[test]
+    fn an_interval_with_an_unknown_start_but_a_known_end_below_installed_is_past() {
+        // `[introduced 9.x, fixed 1.0]`: whatever the unknown start is, installed
+        // 2.0.0 is past its end, so it is already fixed. Stage 2 must still see
+        // this interval (via its concrete `fixed`) and report 1.0 so the
+        // advisory is dropped, instead of excluding it for the unorderable start
+        // and leaving a fixed vulnerability showing as active.
+        let detail = detail_with_ranges(
+            r#"[{"type":"ECOSYSTEM","events":[{"introduced":"9.x"},{"fixed":"1.0"}]}]"#,
+        );
+        assert_eq!(
+            extract_fix_version(&detail, "pkg", "npm", "2.0.0"),
+            Some("1.0".to_string())
+        );
+    }
+
+    #[test]
+    fn an_inconsistent_interval_is_not_admitted_through_its_fixed_bound() {
+        // `[introduced 5.0, fixed 1.0]` is malformed (starts above its own end).
+        // Installed 2.0.0 is below its start, so it has not begun; admitting it
+        // only because its `fixed` is below the installed version would clear
+        // the advisory from inconsistent data. The `fixed` clause is only for an
+        // interval whose start cannot be ordered at all.
+        let detail = detail_with_ranges(
+            r#"[{"type":"ECOSYSTEM","events":[{"introduced":"5.0"},{"fixed":"1.0"}]}]"#,
+        );
+        assert_eq!(extract_fix_version(&detail, "pkg", "npm", "2.0.0"), None);
+    }
+
+    #[test]
+    fn stage_two_prefers_an_orderable_interval_over_an_unknown_start() {
+        // Installed 10.0.0 is past both: [8.0, last_affected 9.0] (no fix, so
+        // None) and [9.x, fixed 1.0]. The interval with a real start wins; the
+        // unknown one must not be picked by comparing "9.x" as text.
+        let detail = detail_with_ranges(
+            r#"[{"type":"ECOSYSTEM","events":[{"introduced":"8.0"},{"last_affected":"9.0"}]},
+                {"type":"ECOSYSTEM","events":[{"introduced":"9.x"},{"fixed":"1.0"}]}]"#,
+        );
+        assert_eq!(extract_fix_version(&detail, "pkg", "npm", "10.0.0"), None);
+    }
+
+    #[test]
+    fn an_unrecognized_introduced_bound_also_blocks_a_candidate_upgrade() {
+        // Installed 1.0 is in [0, 4.0), candidate fix 4.0. A second interval with
+        // an unrecognized `introduced` and an open end might cover 4.0, so 4.0
+        // must not be offered as a safe upgrade. (It is rejected at stage 1: that
+        // interval also "contains" the installed version, since an unknown lower
+        // bound counts as started. `affects` shares the same `started_by`, but any
+        // interval that affects a candidate above the installed version also
+        // contains the installed one, so its use there is not separately testable.)
+        let detail = detail_with_ranges(
+            r#"[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"4.0"}]},
+                {"type":"ECOSYSTEM","events":[{"introduced":"9.x"}]}]"#,
+        );
+        assert_eq!(extract_fix_version(&detail, "pkg", "npm", "1.0.0"), None);
+    }
+
+    #[test]
+    fn limit_closes_an_interval_without_offering_a_fix() {
+        // `limit` is an exclusive end (no fix). Ignoring it left [0, 1.0) open,
+        // and that open interval vetoed the applicable 3.0 fix for 2.5.0.
+        let detail = detail_with_ranges(
+            r#"[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"limit":"1.0"}]},
+                {"type":"ECOSYSTEM","events":[{"introduced":"2.0"},{"fixed":"3.0"}]}]"#,
+        );
+        assert_eq!(
+            extract_fix_version(&detail, "pkg", "npm", "2.5.0"),
+            Some("3.0".to_string())
+        );
+        // Inside the limit interval: affected, and no fix is known.
+        assert_eq!(extract_fix_version(&detail, "pkg", "npm", "0.5.0"), None);
+    }
+
+    #[test]
+    fn overlapping_intervals_offer_a_fix_that_leaves_all_of_them() {
+        // Installed 1.5 is inside [0, 3.0) and [1.0, 2.0). Upgrading to 2.0
+        // would still be inside the first, so the offered fix is 3.0.
+        let detail = detail_with_ranges(
+            r#"[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"3.0"}]},
+                {"type":"ECOSYSTEM","events":[{"introduced":"1.0"},{"fixed":"2.0"}]}]"#,
+        );
+        assert_eq!(
+            extract_fix_version(&detail, "pkg", "npm", "1.5.0"),
+            Some("3.0".to_string())
+        );
     }
 
     #[test]

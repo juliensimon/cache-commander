@@ -21,7 +21,7 @@ pub const DEFAULT_TTL_SECS: u64 = 24 * 60 * 60;
 /// be filtered out wrongly) must not be served. Bump this whenever the
 /// OSV extraction/filtering semantics change; a cache file with a different
 /// (or no) schema is discarded on load and rebuilt by a fresh scan.
-pub const VULN_CACHE_SCHEMA: u32 = 2;
+pub const VULN_CACHE_SCHEMA: u32 = 3;
 
 fn key(pkg: &PackageId) -> String {
     format!("{}|{}|{}", pkg.ecosystem, pkg.name, pkg.version)
