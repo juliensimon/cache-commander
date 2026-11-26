@@ -549,25 +549,48 @@ impl App {
     /// - Any other node must live inside its own tree root once symlinks in its
     ///   parent chain are resolved. The returned path is the canonical parent
     ///   plus the final name, so the checked location is the one mutated.
+    /// - A path can be several nodes at once (a configured root that is also
+    ///   reachable as a descendant of another root through a symlink). Every
+    ///   node with this path is considered, and the root interpretation only
+    ///   wins if NO match is a descendant: matching just the first node would
+    ///   let a descendant borrow a root's trust. If any descendant match fails
+    ///   containment the candidate is refused (fail closed).
     fn scoped_delete_target(&self, path: &std::path::Path) -> Option<std::path::PathBuf> {
         let normalized: std::path::PathBuf = path.components().collect();
         if std::fs::symlink_metadata(&normalized).is_ok_and(|m| m.file_type().is_symlink()) {
             return None;
         }
-        let idx = self.tree.nodes.iter().position(|n| n.path == path)?;
-        let mut root = idx;
-        while let Some(parent) = self.tree.nodes[root].parent {
-            root = parent;
-        }
-        if root == idx {
-            return Some(normalized);
-        }
-        let canonical_root = std::fs::canonicalize(&self.tree.nodes[root].path).ok()?;
-        let canonical_parent = std::fs::canonicalize(normalized.parent()?).ok()?;
-        if !canonical_parent.starts_with(&canonical_root) {
+        let matches: Vec<usize> = self
+            .tree
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.path == path)
+            .map(|(i, _)| i)
+            .collect();
+        if matches.is_empty() {
             return None;
         }
-        Some(canonical_parent.join(normalized.file_name()?))
+        let mut canonical_parent: Option<std::path::PathBuf> = None;
+        for idx in matches {
+            let mut root = idx;
+            while let Some(parent) = self.tree.nodes[root].parent {
+                root = parent;
+            }
+            if root == idx {
+                continue; // a root node: trusted, unless another match says otherwise
+            }
+            let canonical_root = std::fs::canonicalize(&self.tree.nodes[root].path).ok()?;
+            let parent = std::fs::canonicalize(normalized.parent()?).ok()?;
+            if !parent.starts_with(&canonical_root) {
+                return None;
+            }
+            canonical_parent = Some(parent);
+        }
+        match canonical_parent {
+            Some(parent) => Some(parent.join(normalized.file_name()?)),
+            None => Some(normalized),
+        }
     }
 
     fn perform_delete(&mut self) {
@@ -595,6 +618,19 @@ impl App {
                 continue;
             };
             let target = target.as_path();
+
+            // The validated location can be classified differently from the
+            // displayed path (`.bun/alias -> .bun/bin` makes `alias/bun` look
+            // Safe while resolving to the Unsafe runtime), so enforce the
+            // safety policy on it too, before the size walk, hook or removal.
+            // The original-path refusal above stays.
+            let target_kind = crate::providers::detect(target);
+            if crate::providers::safety(target_kind, target)
+                == crate::providers::SafetyLevel::Unsafe
+            {
+                refused_unsafe += 1;
+                continue;
+            }
 
             // Measure size before deleting
             let size = crate::scanner::walker::dir_size(target);
@@ -2066,6 +2102,123 @@ mod tests {
         app.perform_delete();
 
         assert!(stray.join("data.txt").exists(), "stray path must survive");
+        assert!(app.status_msg.as_deref().unwrap_or("").contains("refused"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn perform_delete_rechecks_safety_on_the_resolved_target() {
+        // `.bun/alias -> .bun/bin`, so the node `.bun/alias/bun` looks Safe by
+        // its displayed path but resolves to the Unsafe `.bun/bin/bun` runtime.
+        // Safety must be enforced on the location that will actually be removed.
+        let tmp = tempfile::tempdir().unwrap();
+        let bun_root = tmp.path().join(".bun");
+        let bin = bun_root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("bun"), b"runtime").unwrap();
+        std::os::unix::fs::symlink(&bin, bun_root.join("alias")).unwrap();
+        let displayed = bun_root.join("alias/bun");
+
+        // Precondition: judged by the displayed path alone it is NOT Unsafe,
+        // otherwise the existing path-based refusal would hide this bug.
+        let kind = crate::providers::detect(&displayed);
+        assert_ne!(
+            crate::providers::safety(kind, &displayed),
+            crate::providers::SafetyLevel::Unsafe,
+            "fixture must look safe by its displayed path"
+        );
+
+        let (mut app, _tx, _rx) = build_app(bare_config());
+        app.tree.set_roots(vec![expandable_node(
+            ".bun",
+            bun_root.clone(),
+            CacheKind::Bun,
+        )]);
+        app.tree.insert_children(
+            0,
+            vec![expandable_node(
+                "alias",
+                bun_root.join("alias"),
+                CacheKind::Bun,
+            )],
+        );
+        app.tree.insert_children(
+            1,
+            vec![mk_node_with_path("bun", displayed.clone(), CacheKind::Bun)],
+        );
+        assert!(app.tree.nodes.iter().any(|n| n.path == displayed));
+        app.delete_candidates = vec![displayed];
+
+        app.perform_delete();
+
+        assert!(bin.join("bun").exists(), "the Unsafe runtime must survive");
+        assert!(app.status_msg.as_deref().unwrap_or("").contains("refused"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn perform_delete_does_not_trust_a_path_that_is_also_a_descendant() {
+        // `root/link/victim` is configured as its own root AND appears as a
+        // descendant of `root` through `link -> outside`. Matching the first
+        // node by pathname can pick the trusted root interpretation and skip
+        // containment. A path that is a descendant anywhere must satisfy
+        // containment for that descendant, so this is refused (fail closed).
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(outside.join("victim")).unwrap();
+        std::fs::write(outside.join("victim/data.txt"), b"precious").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+        let victim = root.join("link/victim");
+
+        let (mut app, _tx, _rx) = build_app(bare_config());
+        // The victim root comes FIRST so a first-match lookup finds it.
+        app.tree.set_roots(vec![
+            mk_node_with_path("victim-root", victim.clone(), CacheKind::Cargo),
+            expandable_node("root", root.clone(), CacheKind::Cargo),
+        ]);
+        let root_idx = app.tree.nodes.iter().position(|n| n.path == root).unwrap();
+        app.tree.insert_children(
+            root_idx,
+            vec![expandable_node("link", root.join("link"), CacheKind::Cargo)],
+        );
+        let link_idx = app
+            .tree
+            .nodes
+            .iter()
+            .position(|n| n.path == root.join("link"))
+            .unwrap();
+        app.tree.insert_children(
+            link_idx,
+            vec![mk_node_with_path(
+                "victim",
+                victim.clone(),
+                CacheKind::Cargo,
+            )],
+        );
+        let matches: Vec<usize> = app
+            .tree
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.path == victim)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            matches.len(),
+            2,
+            "precondition: the path is a root and a descendant"
+        );
+        assert_eq!(app.tree.nodes[matches[0]].parent, None, "root comes first");
+        app.delete_candidates = vec![victim];
+
+        app.perform_delete();
+
+        assert!(
+            outside.join("victim/data.txt").exists(),
+            "data outside the cache root must survive"
+        );
         assert!(app.status_msg.as_deref().unwrap_or("").contains("refused"));
     }
 
