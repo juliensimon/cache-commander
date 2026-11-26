@@ -475,6 +475,59 @@ mod tests {
     }
 
     #[test]
+    fn backfill_keeps_the_advisory_when_the_matching_range_has_no_usable_fix() {
+        // End to end through the filter that actually drops advisories. Ranges
+        // `[0, 1.4.0)` and `[2.0.0, "main")`; installed 2.5.0 is in the SECOND.
+        // Rejecting the second range's fix must not fall back to 1.4.0 (which
+        // would make `is_vuln_active` clear the advisory. Control: 1.0.0 is in
+        // the first range, so it keeps that range's fix, 1.4.0.
+        let detail_json = r#"{
+            "id": "CVE-1",
+            "affected": [{
+                "package": {"name": "requests", "ecosystem": "PyPI"},
+                "ranges": [
+                    {"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"1.4.0"}]},
+                    {"type":"ECOSYSTEM","events":[{"introduced":"2.0.0"},{"fixed":"main"}]}
+                ]
+            }]
+        }"#;
+        let run = |installed: &str| {
+            let mut results = HashMap::new();
+            results.insert(
+                PathBuf::from("/a"),
+                SecurityInfo {
+                    vulns: vec![Vulnerability {
+                        id: "CVE-1".into(),
+                        summary: "x".into(),
+                        severity: None,
+                        fix_version: None,
+                    }],
+                },
+            );
+            let packages = vec![(PathBuf::from("/a"), pkg("requests", installed))];
+            let mut detail_cache = HashMap::new();
+            detail_cache.insert(
+                "CVE-1".to_string(),
+                osv::parse_vuln_detail(detail_json).unwrap(),
+            );
+            backfill_and_filter_vulns(&mut results, &packages, &detail_cache);
+            results
+        };
+
+        // In the second range: the advisory must survive, with no fix offered.
+        let in_second = run("2.5.0");
+        let info = in_second
+            .get(&PathBuf::from("/a"))
+            .expect("must stay active");
+        assert_eq!(info.vulns[0].fix_version, None);
+
+        // In the first range and below its fix: active, with that range's fix.
+        let in_first = run("1.0.0");
+        let info = in_first.get(&PathBuf::from("/a")).expect("still affected");
+        assert_eq!(info.vulns[0].fix_version.as_deref(), Some("1.4.0"));
+    }
+
+    #[test]
     fn backfill_clears_a_rejected_fix_instead_of_offering_it() {
         // An ECOSYSTEM range with `fixed: "main"` keeps the advisory active, but
         // `fix_version` must not stay `Some("main")`: the UI and upgrade action
