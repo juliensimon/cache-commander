@@ -166,8 +166,12 @@ pub fn extract_fix_version(
             && pkg.name == package_name
             && pkg.ecosystem == ecosystem
         {
-            // Collect all (introduced, fixed) pairs from ranges
-            let mut candidates: Vec<(&str, &str)> = Vec::new();
+            // One candidate per range that has an `introduced` event, WITH its
+            // own optional fix. A range must stay a candidate even when it has
+            // no fix or a non-version one: dropping it here would let the
+            // selection below fall through to a DIFFERENT range's fix and read
+            // an installed version that sits in this range as already fixed.
+            let mut candidates: Vec<(&str, Option<&str>)> = Vec::new();
             for range in affected.ranges.iter().filter(|r| r.is_version_range()) {
                 let mut intro: Option<&str> = None;
                 let mut fix: Option<&str> = None;
@@ -179,10 +183,8 @@ pub fn extract_fix_version(
                         fix = Some(f);
                     }
                 }
-                if let (Some(i), Some(f)) = (intro, fix)
-                    && is_concrete_version(f)
-                {
-                    candidates.push((i, f));
+                if let Some(i) = intro {
+                    candidates.push((i, fix.filter(|f| !f.is_empty())));
                 }
             }
 
@@ -198,8 +200,13 @@ pub fn extract_fix_version(
                 .filter(|(intro, _)| version_lte(intro, pkg_version))
                 .max_by(|(a, _), (b, _)| compare_versions(a, b));
 
+            // Only now look at THIS range's fix: it must be a concrete version.
+            // Missing or non-version (`main`, `1.x`, a hash) means unknown, and
+            // unknown keeps the advisory active; never borrow another range's.
             if let Some((_, fix)) = best {
-                return Some(fix.to_string());
+                return fix
+                    .filter(|f| is_concrete_version(f))
+                    .map(|f| f.to_string());
             }
 
             // No range matched — we don't know which range applies
@@ -526,6 +533,42 @@ mod tests {
         ] {
             assert!(!is_concrete_version(bad), "must reject {bad:?}");
         }
+    }
+
+    #[test]
+    fn a_range_without_a_usable_fix_does_not_fall_back_to_another_ranges_fix() {
+        // Ranges: [0, 1.0) and [1.5, <no usable fix>). Installed 1.6 is inside
+        // the SECOND range. Choosing the range by `introduced` must not skip a
+        // range just because its fix is missing or not a version and then fall
+        // back to the first range's fix `1.0`, which would read 1.6 as fixed.
+        for second in [
+            r#"{"type":"ECOSYSTEM","events":[{"introduced":"1.5"},{"fixed":"main"}]}"#,
+            r#"{"type":"ECOSYSTEM","events":[{"introduced":"1.5"},{"fixed":"1.x"}]}"#,
+            r#"{"type":"ECOSYSTEM","events":[{"introduced":"1.5"}]}"#,
+        ] {
+            let detail = detail_with_ranges(&format!(
+                r#"[{{"type":"ECOSYSTEM","events":[{{"introduced":"0"}},{{"fixed":"1.0"}}]}},{second}]"#
+            ));
+            assert_eq!(
+                extract_fix_version(&detail, "pkg", "npm", "1.6.0"),
+                None,
+                "installed 1.6.0 is in the second range: {second}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_matching_range_still_supplies_its_own_fix() {
+        // Control: installed 0.5 is only in the first range, so its fix is used
+        // even though a later range has no usable fix.
+        let detail = detail_with_ranges(
+            r#"[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"1.0"}]},
+                {"type":"ECOSYSTEM","events":[{"introduced":"1.5"},{"fixed":"main"}]}]"#,
+        );
+        assert_eq!(
+            extract_fix_version(&detail, "pkg", "npm", "0.5.0"),
+            Some("1.0".to_string())
+        );
     }
 
     #[test]
