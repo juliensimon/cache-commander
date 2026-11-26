@@ -1,5 +1,24 @@
 use super::MetadataField;
+use std::io::Read;
 use std::path::Path;
+
+/// Largest `package.json` we will read. Real manifests are a few KB (the
+/// biggest in the wild are well under 1 MiB); anything larger in a cache dir
+/// is treated as unreadable instead of being pulled into memory.
+const MAX_PACKAGE_JSON_BYTES: u64 = 1024 * 1024;
+
+/// Read `<dir>/package.json` as UTF-8, reading at most
+/// `MAX_PACKAGE_JSON_BYTES + 1` bytes from disk. `None` if it is missing,
+/// unreadable, not UTF-8, or larger than the limit. Every npm metadata reader
+/// goes through this so a huge file cannot stall or exhaust ccmd.
+fn read_package_json(dir: &Path) -> Option<String> {
+    let file = std::fs::File::open(dir.join("package.json")).ok()?;
+    let mut content = String::new();
+    file.take(MAX_PACKAGE_JSON_BYTES + 1)
+        .read_to_string(&mut content)
+        .ok()?;
+    (content.len() as u64 <= MAX_PACKAGE_JSON_BYTES).then_some(content)
+}
 
 pub fn semantic_name(path: &Path) -> Option<String> {
     let name = path.file_name()?.to_string_lossy().to_string();
@@ -22,8 +41,7 @@ pub fn semantic_name(path: &Path) -> Option<String> {
 
 /// Read package.json inside an npx hash dir to find the package name.
 fn npx_package_name(path: &Path) -> Option<String> {
-    let pkg_json = path.join("package.json");
-    let content = std::fs::read_to_string(pkg_json).ok()?;
+    let content = read_package_json(path)?;
 
     // Look for "_npx": { "packages": ["name"] }
     // Simple JSON parsing without a dependency
@@ -95,7 +113,7 @@ fn npx_package_name(path: &Path) -> Option<String> {
 /// cannot spoof it) and both fields must be valid npm coordinates. A
 /// duplicated root key resolves to the last one, as with `JSON.parse` in npm.
 pub fn package_id(path: &Path) -> Option<super::PackageId> {
-    let content = std::fs::read_to_string(path.join("package.json")).ok()?;
+    let content = read_package_json(path)?;
     let root: serde_json::Value = serde_json::from_str(&content).ok()?;
     let root = root.as_object()?;
     let name = root.get("name")?.as_str()?;
@@ -235,8 +253,7 @@ fn dep_depth(path: &Path) -> usize {
 
 /// Detect install scripts (preinstall, install, postinstall) in package.json.
 fn detect_install_scripts(path: &Path) -> Option<String> {
-    let pkg_json = path.join("package.json");
-    let content = std::fs::read_to_string(pkg_json).ok()?;
+    let content = read_package_json(path)?;
 
     let mut found = Vec::new();
     for script_name in &["preinstall", "install", "postinstall"] {
@@ -535,6 +552,64 @@ mod tests {
     fn dep_depth_deep_transitive() {
         let path = PathBuf::from("/npm/_npx/a/node_modules/a/node_modules/b/node_modules/c");
         assert_eq!(dep_depth(&path), 2);
+    }
+
+    // ---- bounded package.json reads (#97) ---------------------------------------
+
+    /// `json` padded with trailing spaces to exactly `len` bytes (still valid
+    /// JSON), written as `<tmp>/pkg/package.json`.
+    fn pkg_dir_with_json_of_len(json: &str, len: usize) -> (tempfile::TempDir, PathBuf) {
+        assert!(json.len() <= len);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("pkg");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut content = String::from(json);
+        content.push_str(&" ".repeat(len - json.len()));
+        std::fs::write(dir.join("package.json"), content).unwrap();
+        (tmp, dir)
+    }
+
+    const ID_JSON: &str = r#"{"name":"big","version":"1.0.0"}"#;
+    const NPX_JSON: &str = r#"{"_npx":{"packages":["big"]}}"#;
+    const SCRIPTS_JSON: &str = r#"{"scripts":{"postinstall":"node x.js"}}"#;
+
+    #[test]
+    fn package_json_at_the_size_limit_is_still_read() {
+        let (_t, dir) = pkg_dir_with_json_of_len(ID_JSON, MAX_PACKAGE_JSON_BYTES as usize);
+        assert_eq!(package_id(&dir).unwrap().name, "big");
+        let (_t, dir) = pkg_dir_with_json_of_len(NPX_JSON, MAX_PACKAGE_JSON_BYTES as usize);
+        assert_eq!(npx_package_name(&dir), Some("[npx] big".into()));
+        let (_t, dir) = pkg_dir_with_json_of_len(SCRIPTS_JSON, MAX_PACKAGE_JSON_BYTES as usize);
+        assert_eq!(detect_install_scripts(&dir), Some("postinstall".into()));
+    }
+
+    #[test]
+    fn oversized_package_json_is_rejected_by_every_reader() {
+        // A huge file in a cache dir must not be read into memory in full: all
+        // three readers refuse anything over the limit (DoS, issue #97).
+        let over = MAX_PACKAGE_JSON_BYTES as usize + 1;
+        let (_t, dir) = pkg_dir_with_json_of_len(ID_JSON, over);
+        assert!(package_id(&dir).is_none());
+        let (_t, dir) = pkg_dir_with_json_of_len(NPX_JSON, over);
+        assert!(npx_package_name(&dir).is_none());
+        let (_t, dir) = pkg_dir_with_json_of_len(SCRIPTS_JSON, over);
+        assert!(detect_install_scripts(&dir).is_none());
+    }
+
+    #[test]
+    fn read_package_json_never_reads_more_than_the_limit_plus_one() {
+        // Far larger than the limit: the reader must bail without needing the
+        // whole file (checked by the result, and by the bounded `take`).
+        let (_t, dir) = pkg_dir_with_json_of_len(ID_JSON, MAX_PACKAGE_JSON_BYTES as usize * 4);
+        assert!(read_package_json(&dir).is_none());
+    }
+
+    #[test]
+    fn read_package_json_missing_or_non_utf8_is_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(read_package_json(tmp.path()).is_none());
+        std::fs::write(tmp.path().join("package.json"), [0xff, 0xfe, 0x00]).unwrap();
+        assert!(read_package_json(tmp.path()).is_none());
     }
 
     #[test]
