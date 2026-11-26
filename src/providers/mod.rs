@@ -237,10 +237,31 @@ pub struct PackageId {
 /// name from `package_id` (the one OSV was queried with, scope included), and
 /// only falls back to the tree label, which for e.g. `node_modules/@scope/pkg`
 /// is just the directory basename (`pkg`).
+///
+/// For npm the name is read from `package.json`, i.e. attacker-controllable
+/// cache content, so it is only trusted when it agrees with the directory
+/// layout (see `npm_name_matches_layout`). Other providers derive the name
+/// from the path itself.
 pub fn command_package_name(kind: CacheKind, path: &Path, label_fallback: &str) -> String {
-    package_id(kind, path)
-        .map(|id| id.name)
-        .unwrap_or_else(|| label_fallback.to_string())
+    match package_id(kind, path) {
+        Some(id) if kind != CacheKind::Npm || npm_name_matches_layout(path, &id.name) => id.name,
+        _ => label_fallback.to_string(),
+    }
+}
+
+/// True iff `name` (`pkg` or `@scope/pkg`) is consistent with where the
+/// package lives: the directory is named `pkg`, and for a scoped name its
+/// parent directory is `@scope`.
+fn npm_name_matches_layout(path: &Path, name: &str) -> bool {
+    let dir_name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned());
+    match name.split_once('/') {
+        Some((scope, base)) if scope.starts_with('@') => {
+            dir_name(path).as_deref() == Some(base)
+                && path.parent().and_then(dir_name).as_deref() == Some(scope)
+        }
+        Some(_) => false,
+        None => dir_name(path).as_deref() == Some(name),
+    }
 }
 
 pub fn package_id(kind: CacheKind, path: &Path) -> Option<PackageId> {
@@ -934,6 +955,42 @@ mod tests {
             command_package_name(CacheKind::Npm, &dir, "pkg"),
             "@scope/pkg"
         );
+    }
+
+    #[test]
+    fn command_package_name_rejects_package_json_name_that_contradicts_layout() {
+        // The npm package_id name comes from file contents, which anyone who
+        // can write into a cache dir controls. A `name` that doesn't match the
+        // directory layout must not steer the suggested command at another
+        // package; fall back to the label instead.
+        let tmp = tempfile::tempdir().unwrap();
+        let write = |rel: &str, json: &str| {
+            let dir = tmp.path().join(rel);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("package.json"), json).unwrap();
+            dir
+        };
+        // Unscoped dir claiming to be a different package.
+        let d1 = write(
+            "node_modules/left-pad",
+            r#"{"name":"evil-pkg","version":"1.0.0"}"#,
+        );
+        assert_eq!(
+            command_package_name(CacheKind::Npm, &d1, "left-pad"),
+            "left-pad"
+        );
+        // Unscoped dir claiming a scoped name.
+        let d2 = write(
+            "node_modules/core",
+            r#"{"name":"@evil/core","version":"1.0.0"}"#,
+        );
+        assert_eq!(command_package_name(CacheKind::Npm, &d2, "core"), "core");
+        // Scoped name whose parent dir is a different scope.
+        let d3 = write(
+            "node_modules/@babel/core",
+            r#"{"name":"@evil/core","version":"1.0.0"}"#,
+        );
+        assert_eq!(command_package_name(CacheKind::Npm, &d3, "core"), "core");
     }
 
     #[test]
