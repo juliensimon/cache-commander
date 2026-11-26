@@ -1,43 +1,29 @@
 use super::MetadataField;
 use std::path::Path;
 
-/// True iff `dir` is a verified Maven local repository root, `.../.m2/repository`.
-/// A bare directory named `repository` is not enough: it can be part of a
-/// group id (`com.repository.acme`).
-fn is_m2_repository_root(dir: &Path) -> bool {
-    let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned());
-    name(dir).as_deref() == Some("repository")
-        && dir.parent().and_then(name).as_deref() == Some(".m2")
-}
-
 /// Parse a Maven artifact path into (group, artifact, version).
-/// Expects layout `.../.m2/repository/<group-path>/<artifact>/<version>/<file>`.
-/// Returns `None` when no `.m2/repository` ancestor is found, rather than
-/// guessing a group from an unverified directory.
+/// Expects layout `.../.m2/**/repository/<group-path>/<artifact>/<version>/<file>`.
+///
+/// The repository root is the FIRST `repository` component after the `.m2`
+/// component, the same `.m2` relationship `providers::detect` uses to classify
+/// a path as Maven. Taking the first one (not the nearest to the artifact) is
+/// what keeps a group id that itself contains `repository`
+/// (`com.repository.acme`) intact. Returns `None` when there is no `.m2`
+/// ancestor or no `repository` directory below it, rather than guessing a group.
 fn parse_coordinates(path: &Path) -> Option<(String, String, String)> {
-    let version = path.parent()?.file_name()?.to_string_lossy().to_string();
-    let artifact = path
-        .parent()?
-        .parent()?
-        .file_name()?
-        .to_string_lossy()
-        .to_string();
-
-    let mut group_parts: Vec<String> = Vec::new();
-    let mut current = path.parent()?.parent()?.parent()?;
-    loop {
-        if is_m2_repository_root(current) {
-            break;
-        }
-        // At the filesystem root `file_name()` is `None`: no anchor was found.
-        group_parts.push(current.file_name()?.to_string_lossy().to_string());
-        current = current.parent()?;
-    }
-    if group_parts.is_empty() {
+    let comps: Vec<String> = path
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    let m2 = comps.iter().position(|c| c == ".m2")?;
+    let root = m2 + 1 + comps[m2 + 1..].iter().position(|c| c == "repository")?;
+    // <group...> <artifact> <version> <file>, with at least one group part.
+    let rest = &comps[root + 1..];
+    if rest.len() < 4 {
         return None;
     }
-    group_parts.reverse();
-    Some((group_parts.join("."), artifact, version))
+    let (group, tail) = rest.split_at(rest.len() - 3);
+    Some((group.join("."), tail[0].clone(), tail[1].clone()))
 }
 
 pub fn semantic_name(path: &Path) -> Option<String> {
@@ -132,6 +118,31 @@ mod tests {
             package_id(&last).unwrap().name,
             "com.acme.repository:widget"
         );
+    }
+
+    #[test]
+    fn repository_nested_below_m2_is_still_parsed() {
+        // `detect` classifies anything under a `.m2` ancestor as Maven, so a
+        // local repository configured below `.m2` (e.g. `.m2/work/repository`)
+        // must keep its coordinates, including a `repository` group part.
+        let plain =
+            PathBuf::from("/home/user/.m2/work/repository/com/acme/widget/1.0/widget-1.0.jar");
+        assert_eq!(package_id(&plain).unwrap().name, "com.acme:widget");
+        let interior = PathBuf::from(
+            "/home/user/.m2/work/repository/com/repository/acme/widget/1.0/widget-1.0.jar",
+        );
+        assert_eq!(
+            package_id(&interior).unwrap().name,
+            "com.repository.acme:widget"
+        );
+    }
+
+    #[test]
+    fn m2_without_any_repository_dir_yields_no_coordinates() {
+        // No `repository` directory below `.m2`: nothing to anchor to, so no
+        // guessed group (this was already `None` before #103).
+        let path = PathBuf::from("/home/user/.m2/custom-repo/com/acme/widget/1.0/widget-1.0.jar");
+        assert!(package_id(&path).is_none());
     }
 
     #[test]
