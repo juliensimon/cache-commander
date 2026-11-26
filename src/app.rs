@@ -633,8 +633,13 @@ impl App {
 
     fn upgrade_command_for_selected(&self) -> Option<String> {
         let node = self.tree.selected_node()?;
-        let pkg_name = extract_package_name(&node.name);
         let kind = node.kind;
+        // `None`: the package identity is unsafe/ambiguous, so offer no command.
+        let pkg_name = crate::providers::command_package_name(
+            kind,
+            &node.path,
+            &extract_package_name(&node.name),
+        )?;
 
         // Prefer fix_version from vuln data, fall back to latest from version check
         if let Some(sec) = self.vuln_results.get(&node.path) {
@@ -1965,6 +1970,35 @@ mod tests {
         let cmd = app.upgrade_command_for_selected().expect("cmd");
         assert!(cmd.contains("requests"), "pkg name: {cmd}");
         assert!(cmd.contains("2.31.0"), "latest version: {cmd}");
+    }
+
+    #[test]
+    fn upgrade_command_keeps_npm_scope_from_package_id() {
+        // Issue #98: the tree label of a scoped package is its directory
+        // basename ("core"), so building the command from `node.name` would
+        // tell the user to install an unrelated unscoped package.
+        let tmp = tempfile::tempdir().unwrap();
+        let pkg_dir = tmp.path().join("node_modules/@babel/core");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(
+            pkg_dir.join("package.json"),
+            r#"{"name":"@babel/core","version":"7.0.0"}"#,
+        )
+        .unwrap();
+
+        let (mut app, _tx, _rx) = build_app(bare_config());
+        let node = mk_node_with_path("core", pkg_dir.clone(), CacheKind::Npm);
+        app.tree.set_roots(vec![node]);
+        app.version_results.insert(
+            pkg_dir,
+            VersionInfo {
+                current: "7.0.0".into(),
+                latest: "7.1.0".into(),
+                is_outdated: true,
+            },
+        );
+        let cmd = app.upgrade_command_for_selected().expect("cmd");
+        assert_eq!(cmd, "npm install @babel/core@7.1.0");
     }
 
     #[test]

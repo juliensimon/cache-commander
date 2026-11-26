@@ -118,6 +118,17 @@ pub fn render(
         safety_style,
     )));
 
+    // Package name for remediation commands. For npm this reads package.json,
+    // and the panel redraws ~every 60ms, so resolve it at most once per render
+    // (and only if a command line is actually shown) rather than per advisory.
+    let command_pkg_name = std::cell::LazyCell::new(|| {
+        crate::providers::command_package_name(
+            node.kind,
+            &node.path,
+            &extract_package_name(&node.name),
+        )
+    });
+
     // Vulnerabilities
     if let Some(sec) = vuln_results.get(&node.path) {
         lines.push(Line::from(""));
@@ -172,11 +183,9 @@ pub fn render(
                     format!("    Fix: ≥{}", fix),
                     theme::SAFE,
                 )));
-                if let Some(cmd) = crate::providers::upgrade_command(
-                    node.kind,
-                    &extract_package_name(&node.name),
-                    fix,
-                ) {
+                if let Some(name) = command_pkg_name.as_ref()
+                    && let Some(cmd) = crate::providers::upgrade_command(node.kind, name, fix)
+                {
                     lines.push(Line::from(Span::styled(
                         format!("    → {}", cmd),
                         theme::DIM,
@@ -212,11 +221,9 @@ pub fn render(
                 "  ↓ Update available",
                 theme::CAUTION,
             )));
-            if let Some(cmd) = crate::providers::upgrade_command(
-                node.kind,
-                &extract_package_name(&node.name),
-                &ver.latest,
-            ) {
+            if let Some(name) = command_pkg_name.as_ref()
+                && let Some(cmd) = crate::providers::upgrade_command(node.kind, name, &ver.latest)
+            {
                 lines.push(Line::from(Span::styled(format!("  → {}", cmd), theme::DIM)));
             }
         }
@@ -713,6 +720,91 @@ mod tests {
             out.contains("force re-download"),
             "expected re-download hint:\n{out}"
         );
+    }
+
+    // ---- render: scoped npm remediation commands (issue #98) -------------------
+
+    /// A real `node_modules/@babel/core` dir whose package.json says `manifest`,
+    /// as a one-node tree labelled with the directory basename (`core`), plus a
+    /// fixable advisory and an outdated version so BOTH command lines render.
+    /// Returns the tempdir (kept alive by the caller) and the rendered panel.
+    fn render_babel_core(manifest: &str) -> (tempfile::TempDir, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("node_modules/@babel/core");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("package.json"), manifest).unwrap();
+
+        let mut node = TreeNode::new(dir.clone(), 0, None);
+        node.name = "core".to_string();
+        node.kind = CacheKind::Npm;
+        node.size = 1024;
+        node.has_children = false;
+        node.children_loaded = true;
+        let mut tree = TreeState::new(SortField::Size, true);
+        tree.set_roots(vec![node]);
+
+        let mut vuln = HashMap::new();
+        vuln.insert(
+            dir.clone(),
+            SecurityInfo {
+                vulns: vec![Vulnerability {
+                    id: "GHSA-test".into(),
+                    summary: "test advisory".into(),
+                    severity: Some("HIGH".into()),
+                    fix_version: Some("7.0.5".into()),
+                }],
+            },
+        );
+        let mut ver = HashMap::new();
+        ver.insert(
+            dir,
+            VersionInfo {
+                current: "7.0.0".into(),
+                latest: "7.1.0".into(),
+                is_outdated: true,
+            },
+        );
+        let out = render_to_string(&tree, &vuln, &ver, &HashMap::new());
+        (tmp, out)
+    }
+
+    #[test]
+    fn render_scoped_npm_package_commands_keep_the_scope() {
+        // Both command lines (advisory fix and outdated version) must name
+        // `@babel/core`, not the directory basename `core` (an unrelated pkg).
+        let (_tmp, out) = render_babel_core(r#"{"name":"@babel/core","version":"7.0.0"}"#);
+        assert!(
+            out.contains("npm install @babel/core@7.0.5"),
+            "advisory fix command:\n{out}"
+        );
+        assert!(
+            out.contains("npm install @babel/core@7.1.0"),
+            "outdated-version command:\n{out}"
+        );
+        assert!(
+            !out.contains("npm install core@"),
+            "must never target the bare basename:\n{out}"
+        );
+    }
+
+    #[test]
+    fn render_npm_commands_suppressed_when_manifest_contradicts_layout() {
+        // A manifest name that doesn't match node_modules/@babel/core (here a
+        // different scope, and an unscoped `core`) must produce no command on
+        // either line, rather than a command for another package.
+        for manifest in [
+            r#"{"name":"@evil/core","version":"7.0.0"}"#,
+            r#"{"name":"core","version":"7.0.0"}"#,
+        ] {
+            let (_tmp, out) = render_babel_core(manifest);
+            assert!(
+                !out.contains("npm install"),
+                "no command expected for {manifest}:\n{out}"
+            );
+            // The advisory and version info themselves must still render.
+            assert!(out.contains("Fix: \u{2265}7.0.5"), "fix line:\n{out}");
+            assert!(out.contains("Update available"), "version line:\n{out}");
+        }
     }
 
     #[test]
