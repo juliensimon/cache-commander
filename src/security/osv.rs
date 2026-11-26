@@ -119,8 +119,23 @@ pub struct OsvPackage {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct OsvRange {
+    /// `SEMVER`, `ECOSYSTEM` or `GIT`. Only the first two carry package
+    /// versions; a `GIT` range's events are commit hashes.
+    #[serde(rename = "type", default)]
+    pub range_type: Option<String>,
     #[serde(default)]
     pub events: Vec<OsvEvent>,
+}
+
+impl OsvRange {
+    /// True for ranges whose events are package versions. A missing `type` is
+    /// tolerated (older/hand-written data); `GIT` ranges are not versions.
+    pub fn is_version_range(&self) -> bool {
+        !self
+            .range_type
+            .as_deref()
+            .is_some_and(|t| t.eq_ignore_ascii_case("GIT"))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -153,7 +168,7 @@ pub fn extract_fix_version(
         {
             // Collect all (introduced, fixed) pairs from ranges
             let mut candidates: Vec<(&str, &str)> = Vec::new();
-            for range in &affected.ranges {
+            for range in affected.ranges.iter().filter(|r| r.is_version_range()) {
                 let mut intro: Option<&str> = None;
                 let mut fix: Option<&str> = None;
                 for event in &range.events {
@@ -299,6 +314,23 @@ fn normalize_version(v: &str) -> (Vec<u64>, u8, Vec<u64>) {
     (core_nums, stage, stage_nums)
 }
 
+/// True if `v` looks like a concrete version that can be ordered against an
+/// installed version: it starts with a digit (after an optional Go-style `v`)
+/// and is not a commit hash. Tags and branch names (`main`, `latest`) and
+/// hashes (`a1b2c3d...`) are not versions, and must never be read as "fixed".
+/// All-digit strings such as date versions (`20240101`) are versions.
+pub fn is_concrete_version(v: &str) -> bool {
+    let v = v.trim();
+    let digits = v.strip_prefix(['v', 'V']).unwrap_or(v);
+    if !digits.starts_with(|c: char| c.is_ascii_digit()) {
+        return false;
+    }
+    let looks_like_hash = v.len() >= 7
+        && v.bytes().all(|b| b.is_ascii_hexdigit())
+        && v.bytes().any(|b| b.is_ascii_alphabetic());
+    !looks_like_hash
+}
+
 /// Check if version a <= version b.
 pub fn version_lte(a: &str, b: &str) -> bool {
     compare_versions(a, b) != std::cmp::Ordering::Greater
@@ -425,6 +457,55 @@ mod tests {
             !query.contains('%'),
             "no percent-encoding should appear in JSON body, got: {query}"
         );
+    }
+
+    // ---- range `type`: only package-version ranges carry a fix version (#102) ----
+
+    const GIT_HASH: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+
+    fn detail_with_ranges(ranges_json: &str) -> OsvVulnDetail {
+        let json = format!(
+            r#"{{"id":"GHSA-test","affected":[{{"package":{{"name":"pkg","ecosystem":"npm"}},"ranges":{ranges_json}}}]}}"#
+        );
+        parse_vuln_detail(&json).unwrap()
+    }
+
+    #[test]
+    fn git_range_commit_hash_is_not_a_fix_version() {
+        // A GIT range's `fixed` is a commit hash. Treated as a version it sorted
+        // below everything, which made the advisory look already fixed.
+        let detail = detail_with_ranges(&format!(
+            r#"[{{"type":"GIT","repo":"https://example.test/r","events":[{{"introduced":"0"}},{{"fixed":"{GIT_HASH}"}}]}}]"#
+        ));
+        assert_eq!(extract_fix_version(&detail, "pkg", "npm", "1.0.0"), None);
+    }
+
+    #[test]
+    fn git_range_is_ignored_when_a_semver_range_exists() {
+        let detail = detail_with_ranges(&format!(
+            r#"[
+              {{"type":"GIT","events":[{{"introduced":"0"}},{{"fixed":"{GIT_HASH}"}}]}},
+              {{"type":"SEMVER","events":[{{"introduced":"0"}},{{"fixed":"1.4.0"}}]}}
+            ]"#
+        ));
+        assert_eq!(
+            extract_fix_version(&detail, "pkg", "npm", "1.0.0"),
+            Some("1.4.0".to_string())
+        );
+    }
+
+    #[test]
+    fn ecosystem_and_semver_ranges_still_yield_fixes_and_missing_type_is_tolerated() {
+        for ty in [r#""type":"ECOSYSTEM","#, r#""type":"SEMVER","#, ""] {
+            let detail = detail_with_ranges(&format!(
+                r#"[{{{ty}"events":[{{"introduced":"0"}},{{"fixed":"2.0.0"}}]}}]"#
+            ));
+            assert_eq!(
+                extract_fix_version(&detail, "pkg", "npm", "1.0.0"),
+                Some("2.0.0".to_string()),
+                "type {ty:?}"
+            );
+        }
     }
 
     #[test]

@@ -59,8 +59,10 @@ pub struct VersionCheckOutcome {
 /// Returns true if a vulnerability is still active (not fixed) for the given package version.
 fn is_vuln_active(fix_version: &Option<String>, pkg_version: &str) -> bool {
     match fix_version {
-        Some(fix) if !fix.is_empty() => !osv::version_lte(fix, pkg_version),
-        _ => true, // unknown or empty fix = assume still affected
+        // A fix that is not a concrete version (commit hash, branch, tag)
+        // cannot be ordered against the installed version: fail closed.
+        Some(fix) if osv::is_concrete_version(fix) => !osv::version_lte(fix, pkg_version),
+        _ => true, // unknown, empty or non-version fix = assume still affected
     }
 }
 
@@ -445,6 +447,30 @@ mod tests {
     #[test]
     fn is_vuln_active_no_fix_version() {
         assert!(is_vuln_active(&None, "1.0.0"));
+    }
+
+    #[test]
+    fn is_vuln_active_fails_closed_on_a_fix_that_is_not_a_version() {
+        // Anything that is not a concrete version (a commit hash from a GIT
+        // range, a branch name) cannot be ordered against the installed version,
+        // so it must never be read as "already fixed".
+        for fix in [
+            "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+            "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
+            "main",
+            "HEAD",
+            "latest",
+        ] {
+            assert!(is_vuln_active(&Some(fix.into()), "1.0.0"), "fix {fix}");
+        }
+    }
+
+    #[test]
+    fn is_vuln_active_still_clears_real_versions_including_dates() {
+        assert!(!is_vuln_active(&Some("1.2.3".into()), "1.2.3"));
+        assert!(!is_vuln_active(&Some("2.0.0a1".into()), "2.0.0"));
+        // Date-style versions are all hex digits but are real versions.
+        assert!(!is_vuln_active(&Some("20240101".into()), "20240201"));
     }
 
     #[test]
