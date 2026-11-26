@@ -466,6 +466,55 @@ mod tests {
     }
 
     #[test]
+    fn is_vuln_active_keeps_advisory_for_digit_prefixed_selectors() {
+        // `1.x` starts with a digit but is a selector, not a version; ordering
+        // it below 2.0.0 used to read an affected package as already fixed.
+        for fix in ["1.x", "1.2.x", "1.*", "2.x"] {
+            assert!(is_vuln_active(&Some(fix.into()), "2.5.0"), "fix {fix}");
+        }
+    }
+
+    #[test]
+    fn backfill_clears_a_rejected_fix_instead_of_offering_it() {
+        // An ECOSYSTEM range with `fixed: "main"` keeps the advisory active, but
+        // `fix_version` must not stay `Some("main")`: the UI and upgrade action
+        // would offer it, and MCP would count the vuln as fixable.
+        let mut results = HashMap::new();
+        results.insert(
+            PathBuf::from("/a"),
+            SecurityInfo {
+                vulns: vec![Vulnerability {
+                    id: "CVE-1".into(),
+                    summary: "x".into(),
+                    severity: None,
+                    fix_version: Some("main".into()),
+                }],
+            },
+        );
+        let packages = vec![(PathBuf::from("/a"), pkg("requests", "2.31.0"))];
+        let detail_json = r#"{
+            "id": "CVE-1",
+            "affected": [{
+                "package": {"name": "requests", "ecosystem": "PyPI"},
+                "ranges": [{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"main"}]}]
+            }]
+        }"#;
+        let mut detail_cache = HashMap::new();
+        detail_cache.insert(
+            "CVE-1".to_string(),
+            osv::parse_vuln_detail(detail_json).unwrap(),
+        );
+
+        backfill_and_filter_vulns(&mut results, &packages, &detail_cache);
+
+        let info = results.get(&PathBuf::from("/a")).expect("still active");
+        assert_eq!(
+            info.vulns[0].fix_version, None,
+            "rejected fix must be cleared"
+        );
+    }
+
+    #[test]
     fn is_vuln_active_still_clears_real_versions_including_dates() {
         assert!(!is_vuln_active(&Some("1.2.3".into()), "1.2.3"));
         assert!(!is_vuln_active(&Some("2.0.0a1".into()), "2.0.0"));

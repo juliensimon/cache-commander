@@ -180,7 +180,7 @@ pub fn extract_fix_version(
                     }
                 }
                 if let (Some(i), Some(f)) = (intro, fix)
-                    && !f.is_empty()
+                    && is_concrete_version(f)
                 {
                     candidates.push((i, f));
                 }
@@ -314,15 +314,29 @@ fn normalize_version(v: &str) -> (Vec<u64>, u8, Vec<u64>) {
     (core_nums, stage, stage_nums)
 }
 
-/// True if `v` looks like a concrete version that can be ordered against an
-/// installed version: it starts with a digit (after an optional Go-style `v`)
-/// and is not a commit hash. Tags and branch names (`main`, `latest`) and
-/// hashes (`a1b2c3d...`) are not versions, and must never be read as "fixed".
-/// All-digit strings such as date versions (`20240101`) are versions.
+/// True if `v` is a concrete version that can be ordered against an installed
+/// version. It must be made only of version characters (`A-Za-z0-9` and
+/// `._+~-`, so ranges, wildcards and spaces are out), start with a digit after
+/// an optional Go-style `v`, have no standalone `x` component (`1.x`, `1.2.x`
+/// are selectors that the comparator would rank below `2.0.0`), and not be a
+/// commit hash. Tags and branches (`main`, `latest`), selectors and hashes
+/// must never be read as "fixed". All-digit strings such as date versions
+/// (`20240101`) are versions.
 pub fn is_concrete_version(v: &str) -> bool {
-    let v = v.trim();
+    if v.is_empty() || v != v.trim() {
+        return false;
+    }
+    if !v
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"._+~-".contains(&b))
+    {
+        return false;
+    }
     let digits = v.strip_prefix(['v', 'V']).unwrap_or(v);
     if !digits.starts_with(|c: char| c.is_ascii_digit()) {
+        return false;
+    }
+    if v.split('.').any(|part| part.eq_ignore_ascii_case("x")) {
         return false;
     }
     let looks_like_hash = v.len() >= 7
@@ -468,6 +482,64 @@ mod tests {
             r#"{{"id":"GHSA-test","affected":[{{"package":{{"name":"pkg","ecosystem":"npm"}},"ranges":{ranges_json}}}]}}"#
         );
         parse_vuln_detail(&json).unwrap()
+    }
+
+    #[test]
+    fn is_concrete_version_accepts_real_versions_and_rejects_selectors() {
+        for ok in [
+            "0",
+            "1.2.3",
+            "v1.2.3",
+            "2.0.0a1",
+            "1.0.0-rc.1",
+            "1.2.3+build.5",
+            "20240101",
+            "1.0.0.Final",
+            "2.0.0.post1",
+            "1.26.17",
+        ] {
+            assert!(is_concrete_version(ok), "must accept {ok}");
+        }
+        // Digit-prefixed but NOT a concrete version: selectors, ranges,
+        // wildcards. The comparator would rank `1.x` below `2.0.0`, which
+        // reads an affected package as already fixed.
+        for bad in [
+            "1.x",
+            "1.X",
+            "1.2.x",
+            "1.*",
+            "1.2.*",
+            "x",
+            "*",
+            "main",
+            "HEAD",
+            "latest",
+            "^1.2.3",
+            "~1.2",
+            ">=1.0",
+            "1.0 - 2.0",
+            "1.0,2.0",
+            "[1.0,2.0)",
+            "1.2.3 ",
+            "",
+            "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+        ] {
+            assert!(!is_concrete_version(bad), "must reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn selector_fix_is_not_extracted_as_a_fix_version() {
+        for bad in ["1.x", "main", "*"] {
+            let detail = detail_with_ranges(&format!(
+                r#"[{{"type":"ECOSYSTEM","events":[{{"introduced":"0"}},{{"fixed":"{bad}"}}]}}]"#
+            ));
+            assert_eq!(
+                extract_fix_version(&detail, "pkg", "npm", "1.0.0"),
+                None,
+                "fixed {bad:?} must not surface as a fix"
+            );
+        }
     }
 
     #[test]
