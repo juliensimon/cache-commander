@@ -557,11 +557,12 @@ impl App {
     ///   containment the candidate is refused (fail closed).
     ///
     /// Returns `(target, logical)`. `target` is what to size, hook and remove.
-    /// `logical` is that same location expressed under each matching root's
-    /// LOGICAL path (the configured root, not its symlink target). Provider
+    /// `logical` is that same location re-expressed (a) under each matching
+    /// root's LOGICAL path (the configured root, not its symlink target) and
+    /// (b) through every symlinked ancestor in the displayed path. Provider
     /// classification is path-based, so with `.bun -> /data/storage` the
     /// resolved `/data/storage/bin/bun` has lost the `.bun` that marks it
-    /// Unsafe; its logical form `.bun/bin/bun` has not.
+    /// Unsafe; its logical forms `.bun/bin/bun` have not.
     fn scoped_delete_target(
         &self,
         path: &std::path::Path,
@@ -600,6 +601,24 @@ impl App {
                     .join(relative)
                     .join(normalized.file_name()?),
             );
+            // The same location spelled through each symlinked ancestor of the
+            // displayed path. With `root/.bun -> root/storage`, the resolved
+            // `root/storage/bin/bun` is also `root/.bun/bin/bun`, and that
+            // spelling is the one the Unsafe classification recognizes.
+            let mut ancestor = std::path::PathBuf::new();
+            for component in normalized.parent()?.components() {
+                ancestor.push(component.as_os_str());
+                let is_link =
+                    std::fs::symlink_metadata(&ancestor).is_ok_and(|m| m.file_type().is_symlink());
+                if !is_link {
+                    continue;
+                }
+                if let Ok(link_target) = std::fs::canonicalize(&ancestor)
+                    && let Ok(below) = parent.strip_prefix(&link_target)
+                {
+                    logical.push(ancestor.join(below).join(normalized.file_name()?));
+                }
+            }
             canonical_parent = Some(parent);
         }
         match canonical_parent {
@@ -2232,6 +2251,87 @@ mod tests {
         );
         app.tree.insert_children(
             1,
+            vec![mk_node_with_path("bun", displayed.clone(), CacheKind::Bun)],
+        );
+        assert!(app.tree.nodes.iter().any(|n| n.path == displayed));
+        app.delete_candidates = vec![displayed];
+
+        app.perform_delete();
+
+        assert!(bin.join("bun").exists(), "the Unsafe runtime must survive");
+        assert!(app.status_msg.as_deref().unwrap_or("").contains("refused"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn perform_delete_classifies_under_a_symlink_that_is_inside_the_root() {
+        // The symlink is INSIDE the configured root, not the root itself:
+        //   <root>/.bun          -> <root>/storage
+        //   <root>/storage/alias -> <root>/storage/bin
+        // Selecting `<root>/.bun/alias/bun` resolves to
+        // `<root>/storage/bin/bun`. Re-rooting that at the configured root still
+        // gives `<root>/storage/bin/bun` (no `.bun`); only spelling it through
+        // the symlinked ancestor, `<root>/.bun/bin/bun`, shows it is Unsafe.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let storage = root.join("storage");
+        let bin = storage.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("bun"), b"runtime").unwrap();
+        std::os::unix::fs::symlink(&bin, storage.join("alias")).unwrap();
+        std::os::unix::fs::symlink(&storage, root.join(".bun")).unwrap();
+        let displayed = root.join(".bun/alias/bun");
+
+        let unsafe_at = |p: &std::path::Path| {
+            crate::providers::safety(crate::providers::detect(p), p)
+                == crate::providers::SafetyLevel::Unsafe
+        };
+        assert!(!unsafe_at(&displayed), "fixture: safe by displayed path");
+        assert!(
+            !unsafe_at(&std::fs::canonicalize(&displayed).unwrap()),
+            "fixture: the resolved path alone looks safe"
+        );
+        assert!(
+            !unsafe_at(&root.join("storage/bin/bun")),
+            "fixture: re-rooting at the configured root also loses `.bun`"
+        );
+        assert!(
+            unsafe_at(&root.join(".bun/bin/bun")),
+            "fixture: spelled through the symlinked ancestor it is Unsafe"
+        );
+
+        let (mut app, _tx, _rx) = build_app(bare_config());
+        app.tree.set_roots(vec![expandable_node(
+            "root",
+            root.clone(),
+            CacheKind::Cargo,
+        )]);
+        app.tree.insert_children(
+            0,
+            vec![expandable_node(".bun", root.join(".bun"), CacheKind::Bun)],
+        );
+        let bun_idx = app
+            .tree
+            .nodes
+            .iter()
+            .position(|n| n.path == root.join(".bun"))
+            .unwrap();
+        app.tree.insert_children(
+            bun_idx,
+            vec![expandable_node(
+                "alias",
+                root.join(".bun/alias"),
+                CacheKind::Bun,
+            )],
+        );
+        let alias_idx = app
+            .tree
+            .nodes
+            .iter()
+            .position(|n| n.path == root.join(".bun/alias"))
+            .unwrap();
+        app.tree.insert_children(
+            alias_idx,
             vec![mk_node_with_path("bun", displayed.clone(), CacheKind::Bun)],
         );
         assert!(app.tree.nodes.iter().any(|n| n.path == displayed));
