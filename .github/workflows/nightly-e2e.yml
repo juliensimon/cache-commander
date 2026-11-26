@@ -38,4 +38,4 @@ jobs:
       - name: Run all e2e-gated tests
         # --test-threads=1 because js provider tests spin real CLIs that
         # share a PATH and tempdirs; parallel runs flake on lockfile contention.
-        run: cargo test --features e2e -- --test-threads=1
+        run: cargo test --locked --features e2e -- --test-threads=1
