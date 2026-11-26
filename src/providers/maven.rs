@@ -1,16 +1,22 @@
 use super::MetadataField;
 use std::path::Path;
 
-/// The path's components with each `..` resolved lexically against the
-/// component before it. Configured scan roots are only tilde-expanded, so a
-/// root like `~/proj/../.m2/repository` carries `..` into every artifact path;
-/// left unresolved it would end up in the group id, and rejecting it would
-/// silently drop every package under that root. Returns `None` when a `..`
-/// has nothing to resolve against (it would climb above the start or the
-/// filesystem root), rather than guessing.
+/// The path's components with each `..` resolved against the component before
+/// it. Configured scan roots are only tilde-expanded, so a root like
+/// `~/proj/../.m2/repository` carries `..` into every artifact path; left
+/// unresolved it would end up in the group id, and rejecting it would silently
+/// drop every package under that root.
+///
+/// Lexical resolution is only valid when the component before `..` is not a
+/// symlink (`link/..` is the parent of the link's TARGET, not of the link), so
+/// that case returns `None`. A component that does not exist cannot be a
+/// symlink, so it still resolves lexically. Also `None` when a `..` has nothing
+/// to resolve against (it would climb above the start or the filesystem root).
 fn resolve_parent_dirs(path: &Path) -> Option<Vec<String>> {
-    use std::path::Component;
+    use std::path::{Component, PathBuf};
     let mut comps: Vec<String> = Vec::new();
+    // The same components as a real path, to ask the filesystem about them.
+    let mut prefix = PathBuf::new();
     // Index of the first component that `..` may remove: everything after a
     // root/prefix marker, so `/..` is never "resolved" away.
     let mut floor = 0;
@@ -20,11 +26,21 @@ fn resolve_parent_dirs(path: &Path) -> Option<Vec<String>> {
                 if comps.len() <= floor {
                     return None;
                 }
+                let is_symlink =
+                    std::fs::symlink_metadata(&prefix).is_ok_and(|m| m.file_type().is_symlink());
+                if is_symlink {
+                    return None;
+                }
                 comps.pop();
+                prefix.pop();
             }
-            Component::Normal(s) => comps.push(s.to_string_lossy().into_owned()),
+            Component::Normal(s) => {
+                comps.push(s.to_string_lossy().into_owned());
+                prefix.push(s);
+            }
             Component::RootDir | Component::Prefix(_) | Component::CurDir => {
                 comps.push(c.as_os_str().to_string_lossy().into_owned());
+                prefix.push(c.as_os_str());
                 floor = comps.len();
             }
         }
@@ -221,6 +237,38 @@ mod tests {
             let id = package_id(&PathBuf::from(p));
             assert_eq!(id.map(|i| i.name).as_deref(), Some(expected), "{p}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parent_dir_after_a_symlink_is_not_resolved_lexically() {
+        // `alias/..` on a real filesystem is the PARENT OF THE SYMLINK TARGET,
+        // not the directory holding the link, so dropping `alias` lexically
+        // would report the wrong package (`com.acme:widget` instead of the one
+        // at `org/com/acme`). Where `..` cannot be resolved safely: no coordinates.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join(".m2/repository");
+        std::fs::create_dir_all(repo.join("org/vendor")).unwrap();
+        let widget = repo.join("org/com/acme/widget/1.0");
+        std::fs::create_dir_all(&widget).unwrap();
+        std::fs::write(widget.join("widget-1.0.jar"), b"").unwrap();
+        std::os::unix::fs::symlink("org/vendor", repo.join("alias")).unwrap();
+        std::fs::create_dir_all(repo.join("real")).unwrap();
+        std::fs::create_dir_all(repo.join("com/acme/widget/1.0")).unwrap();
+        std::fs::write(repo.join("com/acme/widget/1.0/widget-1.0.jar"), b"").unwrap();
+
+        // Reached through the symlink: exists on disk, but `..` is symlink-relative.
+        let via_link = repo.join("alias/../com/acme/widget/1.0/widget-1.0.jar");
+        assert!(
+            std::fs::metadata(&via_link).is_ok(),
+            "fixture must exist: {}",
+            via_link.display()
+        );
+        assert!(package_id(&via_link).is_none(), "{}", via_link.display());
+
+        // Control: `..` after a real directory still resolves.
+        let via_dir = repo.join("real/../com/acme/widget/1.0/widget-1.0.jar");
+        assert_eq!(package_id(&via_dir).unwrap().name, "com.acme:widget");
     }
 
     #[test]
