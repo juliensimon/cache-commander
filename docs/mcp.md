@@ -136,7 +136,7 @@ This prevents accidental deletion of entries that may be shared, actively in use
 
 ### Deletion scope
 
-Before any safety level is considered, `preview_delete` and `delete_packages` only accept entries that the listing tools (`list_caches`, `search_packages`) would return: the individual packages and cache entries under a configured root. They refuse, with a reason in `skipped`:
+Before any safety level is considered, `preview_delete` and `delete_packages` only accept the individual packages and cache entries that `search_packages` returns (its `path` field). Note that `list_caches` returns provider-level summaries, and the `path` in each summary is a provider container, which is not deletable. Anything else is refused: `delete_packages` reports it in `skipped` with a `reason`, and `preview_delete` reports it in `items` with `would_delete: false` and a `reason`. Refused:
 
 - a configured cache root itself, an entry that is or contains another configured root (roots may overlap), and provider containers such as `~/.cache/huggingface/hub` (delete the packages inside instead)
 - files and directories *inside* a package

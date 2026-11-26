@@ -104,8 +104,8 @@ fn canonical_under_roots(path: &std::path::Path, roots: &[PathBuf]) -> Option<Pa
 const NOT_A_DISCOVERED_ENTRY: &str = "Not a discovered cache entry: configured roots, provider containers, symlinks and paths inside a package cannot be deleted via MCP";
 
 /// The canonical paths a client may delete: exactly the entries discovery
-/// lists (`walk_root_nodes`, the same set `list_caches` and `search_packages`
-/// return). A path being under a root is not enough: that also covers the
+/// lists (`walk_root_nodes`, the set `search_packages` returns one by one;
+/// `list_caches` only summarizes them per provider). A path being under a root is not enough: that also covers the
 /// root itself, provider containers and everything inside a package. Entries
 /// that are symlinks are excluded so a link can never stand in for whatever it
 /// points at (a container, another package, or a root).
@@ -762,7 +762,7 @@ impl CcmdMcp {
     }
 
     #[tool(
-        description = "Delete cache entries returned by list_caches/search_packages (roots, provider containers, symlinks and paths inside a package are refused). Safe items are deleted directly. Caution items require confirm_caution=true. Unsafe items are always rejected (use the TUI instead)."
+        description = "Delete cache entries returned by search_packages (configured roots, provider containers such as the path shown by list_caches, symlinks and paths inside a package are refused). Safe items are deleted directly. Caution items require confirm_caution=true. Unsafe items are always rejected (use the TUI instead)."
     )]
     async fn delete_packages(
         &self,
