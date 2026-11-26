@@ -603,6 +603,49 @@ mod tests {
     }
 
     #[test]
+    fn semver_rejects_malformed_build_metadata() {
+        // SemVer 2.0 section 10: build metadata is one or more dot-separated
+        // identifiers, each non-empty and made of [0-9A-Za-z-]. Anything else is
+        // not a version and must be unorderable, for npm, crates.io and Go alike.
+        for eco in ["npm", "crates.io", "Go"] {
+            for bad in [
+                "1.2.3+",
+                "1.2.3+.",
+                "1.2.3+a..b",
+                "1.2.3+a.",
+                "1.2.3+.a",
+                "1.2.3+a_b",
+                "1.2.3+a+b",
+                "1.2.3+\u{e9}",
+                "1.2.3+a b",
+                "1.2.3-rc.1+",
+            ] {
+                assert_eq!(compare(eco, bad, "1.2.3"), None, "{eco} {bad:?}");
+                assert_eq!(compare(eco, "1.2.3", bad), None, "{eco} {bad:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn semver_accepts_well_formed_build_metadata_in_any_form() {
+        // Build identifiers MAY have leading zeros and may be all hyphens, unlike
+        // pre-release numerics; over-rejecting these would make real versions
+        // unorderable. And build metadata never affects ordering.
+        for ok in [
+            "1.2.3+001",
+            "1.2.3+-",
+            "1.2.3+a-b.c",
+            "1.2.3+0.0",
+            "1.2.3-rc.1+exp.sha.5114f85",
+        ] {
+            assert!(compare("npm", ok, "1.2.3").is_some(), "{ok:?}");
+        }
+        eq("npm", "1.2.3+001", "1.2.3+1");
+        eq("npm", "1.2.3+a", "1.2.3");
+        lt("npm", "1.2.3-rc.1+zzz", "1.2.3+aaa");
+    }
+
+    #[test]
     fn go_pseudo_versions_order_by_their_timestamp() {
         lt(
             "Go",
@@ -669,6 +712,58 @@ mod tests {
         lt("PyPI", "1.0", "1.0+local");
         lt("PyPI", "1.0+a", "1.0+b");
         lt("PyPI", "1.0+local", "1.0.post1");
+    }
+
+    #[test]
+    fn pep440_local_segments_follow_the_spec_ordering() {
+        // PEP 440 "Local version identifiers": split on `.`, `-`, `_`; compare
+        // segment by segment; a numeric segment is above an alphanumeric one;
+        // numbers compare as integers, text case-insensitively; the longer of two
+        // otherwise-equal labels is greater. Expectations are from the spec, not
+        // from this implementation.
+        lt("PyPI", "1.0+abc", "1.0+1"); // alphanumeric < numeric
+        lt("PyPI", "1.0+2", "1.0+10"); // integers, not text
+        lt("PyPI", "1.0+1", "1.0+1.0"); // longer wins on a shared prefix
+        lt("PyPI", "1.0+1.abc", "1.0+1.1"); // decided at the second segment
+        lt("PyPI", "1.0+abc", "1.0+abd");
+        eq("PyPI", "1.0+a-b", "1.0+a.b"); // separators are interchangeable
+        eq("PyPI", "1.0+a_b", "1.0+a.b");
+        eq("PyPI", "1.0+ABC", "1.0+abc"); // case-insensitive
+        eq("PyPI", "1.0+00", "1.0+0"); // numeric segments compare as integers
+    }
+
+    #[test]
+    fn pep440_local_part_never_outranks_a_different_public_version() {
+        // The public part is compared first; the local part only breaks ties.
+        lt("PyPI", "1.0+zzz", "1.0.post1");
+        lt("PyPI", "1.0+99", "1.1");
+        lt("PyPI", "1.0.dev1+zzz", "1.0");
+        lt("PyPI", "1.0a1+zzz", "1.0");
+        lt("PyPI", "1.0", "1.0+0"); // any local label is above the bare version
+        lt("PyPI", "1!1.0", "2!0.1+a"); // epoch before everything
+    }
+
+    #[test]
+    fn pep440_rejects_malformed_local_versions() {
+        // A local label is one or more [A-Za-z0-9] segments joined by `.`/`-`/`_`.
+        // Empty segments, a second `+`, or anything else is not PEP 440, and an
+        // unparseable version must be unorderable, never guessed.
+        for bad in [
+            "1.0+",
+            "1.0+.",
+            "1.0+-",
+            "1.0+_",
+            "1.0+a..b",
+            "1.0+a.",
+            "1.0+.a",
+            "1.0+a+b",
+            "1.0+\u{e9}",
+            "1.0+a/b",
+            "1.0+a b",
+        ] {
+            assert_eq!(compare("PyPI", bad, "1.0"), None, "{bad:?}");
+            assert_eq!(compare("PyPI", "1.0", bad), None, "{bad:?}");
+        }
     }
 
     #[test]
