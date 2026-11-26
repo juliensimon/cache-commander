@@ -22,7 +22,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
-      - run: cargo check --features mcp
+      - run: cargo check --locked --features mcp
 
   msrv:
     name: MSRV (1.88)
@@ -41,7 +41,7 @@ jobs:
           # v2 denies warnings via CARGO_BUILD_WARNINGS, which cargo only
           # honors from 1.97; keep the v1 behavior explicitly on the MSRV job.
           rustflags: "-D warnings"
-      - run: cargo check --features mcp
+      - run: cargo check --locked --features mcp
 
   test:
     name: Test
@@ -57,7 +57,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
-      - run: cargo test --features mcp
+      - run: cargo test --locked --features mcp
 
   fmt:
     name: Format
@@ -81,7 +81,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
         with:
           components: clippy
-      - run: cargo clippy --features mcp -- -D warnings
+      - run: cargo clippy --locked --features mcp -- -D warnings
 
   deny:
     name: Deny (advisories, licenses, bans, sources)
@@ -109,7 +109,7 @@ jobs:
           tool: cargo-llvm-cov
       - name: Generate lcov report
         run: |
-          cargo llvm-cov --features mcp \
+          cargo llvm-cov --locked --features mcp \
             --workspace \
             --lcov --output-path lcov.info \
             --ignore-filename-regex '(tests/|target/)'
@@ -162,7 +162,7 @@ jobs:
         run: corepack enable
 
       - name: Run E2E tests
-        run: cargo test --features e2e --test e2e_js_providers -- --test-threads=1
+        run: cargo test --locked --features e2e --test e2e_js_providers -- --test-threads=1
 
   e2e-jvm-providers:
     name: E2E JVM Provider Tests
@@ -190,4 +190,4 @@ jobs:
         uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
 
       - name: Run JVM E2E tests
-        run: cargo test --features e2e --test e2e_jvm_providers -- --test-threads=1
+        run: cargo test --locked --features e2e --test e2e_jvm_providers -- --test-threads=1
