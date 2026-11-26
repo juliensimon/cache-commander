@@ -176,13 +176,22 @@ struct Interval<'a> {
 }
 
 impl Interval<'_> {
+    /// Whether the interval has begun by `version`. An `introduced` that is not
+    /// a real version (`9.x`, `main`) cannot be ordered against it, so the
+    /// interval is treated as possibly applicable rather than skipped (the
+    /// mirror of an unknown upper bound): skipping it would let another
+    /// interval's fix clear an advisory that may still apply.
+    fn started_by(&self, version: &str) -> bool {
+        !is_concrete_version(self.introduced) || version_lte(self.introduced, version)
+    }
+
     /// Whether `version` lies in this interval. The `fixed` bound is treated
     /// as inclusive here, so an installed version equal to the fix still picks
     /// this interval and reports that fix; `is_vuln_active` is what then
     /// recognizes it as fixed. (A version below `introduced` or past the end is
     /// handled by the second stage of `extract_fix_version`.)
     fn contains(&self, version: &str) -> bool {
-        version_lte(self.introduced, version)
+        self.started_by(version)
             && match self.end {
                 IntervalEnd::Fixed(bound)
                 | IntervalEnd::LastAffected(bound)
@@ -207,7 +216,7 @@ impl Interval<'_> {
     /// already means "not affected" (unlike `contains`, which is boundary
     /// tolerant so an installed version equal to the fix still reports it).
     fn affects(&self, version: &str) -> bool {
-        version_lte(self.introduced, version)
+        self.started_by(version)
             && match self.end {
                 IntervalEnd::Fixed(bound) | IntervalEnd::Limit(bound)
                     if is_concrete_version(bound) =>
@@ -345,7 +354,9 @@ pub fn extract_fix_version(
             // fix and drops the advisory instead of raising a false alarm.
             let governing = intervals
                 .iter()
-                .filter(|iv| version_lte(iv.introduced, pkg_version))
+                .filter(|iv| {
+                    is_concrete_version(iv.introduced) && version_lte(iv.introduced, pkg_version)
+                })
                 .max_by(|a, b| compare_versions(a.introduced, b.introduced));
             return match governing.map(|iv| &iv.end) {
                 Some(IntervalEnd::Fixed(f)) if is_concrete_version(f) => Some(f.to_string()),
@@ -810,6 +821,40 @@ mod tests {
             with_third(r#"{"introduced":"3.0"},{"fixed":"4.0"}"#),
             Some("4.0".to_string())
         );
+    }
+
+    #[test]
+    fn an_unrecognized_introduced_bound_is_treated_as_possibly_applicable() {
+        // `introduced: "9.x"` is not a version, so comparing it as text ranked it
+        // above 2.0 and the interval was skipped; the first range's fix then
+        // cleared the advisory. An unknown lower bound must fail toward affected.
+        for bad in ["9.x", "main", "latest", "*"] {
+            let detail = detail_with_ranges(&format!(
+                r#"[{{"type":"ECOSYSTEM","events":[{{"introduced":"0"}},{{"fixed":"1.0"}}]}},
+                    {{"type":"ECOSYSTEM","events":[{{"introduced":"{bad}"}}]}}]"#
+            ));
+            assert_eq!(
+                extract_fix_version(&detail, "pkg", "npm", "2.0.0"),
+                None,
+                "introduced {bad:?}: possibly applicable, so no known fix"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unrecognized_introduced_bound_also_blocks_a_candidate_upgrade() {
+        // Installed 1.0 is in [0, 4.0), candidate fix 4.0. A second interval with
+        // an unrecognized `introduced` and an open end might cover 4.0, so 4.0
+        // must not be offered as a safe upgrade. (It is rejected at stage 1: that
+        // interval also "contains" the installed version, since an unknown lower
+        // bound counts as started. `affects` shares the same `started_by`, but any
+        // interval that affects a candidate above the installed version also
+        // contains the installed one, so its use there is not separately testable.)
+        let detail = detail_with_ranges(
+            r#"[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"4.0"}]},
+                {"type":"ECOSYSTEM","events":[{"introduced":"9.x"}]}]"#,
+        );
+        assert_eq!(extract_fix_version(&detail, "pkg", "npm", "1.0.0"), None);
     }
 
     #[test]
