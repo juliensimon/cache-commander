@@ -555,7 +555,17 @@ impl App {
     ///   wins if NO match is a descendant: matching just the first node would
     ///   let a descendant borrow a root's trust. If any descendant match fails
     ///   containment the candidate is refused (fail closed).
-    fn scoped_delete_target(&self, path: &std::path::Path) -> Option<std::path::PathBuf> {
+    ///
+    /// Returns `(target, logical)`. `target` is what to size, hook and remove.
+    /// `logical` is that same location expressed under each matching root's
+    /// LOGICAL path (the configured root, not its symlink target). Provider
+    /// classification is path-based, so with `.bun -> /data/storage` the
+    /// resolved `/data/storage/bin/bun` has lost the `.bun` that marks it
+    /// Unsafe; its logical form `.bun/bin/bun` has not.
+    fn scoped_delete_target(
+        &self,
+        path: &std::path::Path,
+    ) -> Option<(std::path::PathBuf, Vec<std::path::PathBuf>)> {
         let normalized: std::path::PathBuf = path.components().collect();
         if std::fs::symlink_metadata(&normalized).is_ok_and(|m| m.file_type().is_symlink()) {
             return None;
@@ -572,6 +582,7 @@ impl App {
             return None;
         }
         let mut canonical_parent: Option<std::path::PathBuf> = None;
+        let mut logical: Vec<std::path::PathBuf> = Vec::new();
         for idx in matches {
             let mut root = idx;
             while let Some(parent) = self.tree.nodes[root].parent {
@@ -582,14 +593,18 @@ impl App {
             }
             let canonical_root = std::fs::canonicalize(&self.tree.nodes[root].path).ok()?;
             let parent = std::fs::canonicalize(normalized.parent()?).ok()?;
-            if !parent.starts_with(&canonical_root) {
-                return None;
-            }
+            let relative = parent.strip_prefix(&canonical_root).ok()?;
+            logical.push(
+                self.tree.nodes[root]
+                    .path
+                    .join(relative)
+                    .join(normalized.file_name()?),
+            );
             canonical_parent = Some(parent);
         }
         match canonical_parent {
-            Some(parent) => Some(parent.join(normalized.file_name()?)),
-            None => Some(normalized),
+            Some(parent) => Some((parent.join(normalized.file_name()?), logical)),
+            None => Some((normalized, logical)),
         }
     }
 
@@ -613,7 +628,7 @@ impl App {
             // #90: validate immediately before mutating, and from here on use
             // the validated location for the size walk, the pre-delete hook
             // and the removal (not the tree's possibly symlink-routed path).
-            let Some(target) = self.scoped_delete_target(path) else {
+            let Some((target, logical)) = self.scoped_delete_target(path) else {
                 refused_scope += 1;
                 continue;
             };
@@ -624,10 +639,16 @@ impl App {
             // Safe while resolving to the Unsafe runtime), so enforce the
             // safety policy on it too, before the size walk, hook or removal.
             // The original-path refusal above stays.
-            let target_kind = crate::providers::detect(target);
-            if crate::providers::safety(target_kind, target)
-                == crate::providers::SafetyLevel::Unsafe
-            {
+            // Also classify it under each matching root's logical path: with a
+            // symlinked root (`.bun -> /data/storage`) the resolved path has
+            // lost the component that marks it Unsafe, the logical one has not.
+            let unsafe_target = std::iter::once(target)
+                .chain(logical.iter().map(|p| p.as_path()))
+                .any(|candidate| {
+                    crate::providers::safety(crate::providers::detect(candidate), candidate)
+                        == crate::providers::SafetyLevel::Unsafe
+                });
+            if unsafe_target {
                 refused_unsafe += 1;
                 continue;
             }
@@ -2126,6 +2147,73 @@ mod tests {
             crate::providers::safety(kind, &displayed),
             crate::providers::SafetyLevel::Unsafe,
             "fixture must look safe by its displayed path"
+        );
+
+        let (mut app, _tx, _rx) = build_app(bare_config());
+        app.tree.set_roots(vec![expandable_node(
+            ".bun",
+            bun_root.clone(),
+            CacheKind::Bun,
+        )]);
+        app.tree.insert_children(
+            0,
+            vec![expandable_node(
+                "alias",
+                bun_root.join("alias"),
+                CacheKind::Bun,
+            )],
+        );
+        app.tree.insert_children(
+            1,
+            vec![mk_node_with_path("bun", displayed.clone(), CacheKind::Bun)],
+        );
+        assert!(app.tree.nodes.iter().any(|n| n.path == displayed));
+        app.delete_candidates = vec![displayed];
+
+        app.perform_delete();
+
+        assert!(bin.join("bun").exists(), "the Unsafe runtime must survive");
+        assert!(app.status_msg.as_deref().unwrap_or("").contains("refused"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn perform_delete_classifies_the_resolved_target_under_a_symlinked_root() {
+        // `.bun` itself is a symlink to `storage/` (a common setup). The
+        // resolved path `<tmp>/storage/bin/bun` has no `.bun` component, so
+        // classifying it on its own looks harmless and the runtime would be
+        // deleted. The location must also be classified under the root's
+        // LOGICAL path (`.bun/bin/bun`), where it is Unsafe.
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = tmp.path().join("storage");
+        let bin = storage.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("bun"), b"runtime").unwrap();
+        std::os::unix::fs::symlink(&bin, storage.join("alias")).unwrap();
+        let bun_root = tmp.path().join(".bun");
+        std::os::unix::fs::symlink(&storage, &bun_root).unwrap();
+        let displayed = bun_root.join("alias/bun");
+
+        // Preconditions: Safe by its displayed path, and the resolved path
+        // alone is also not Unsafe (otherwise this would not be the bug).
+        let kind = crate::providers::detect(&displayed);
+        assert_ne!(
+            crate::providers::safety(kind, &displayed),
+            crate::providers::SafetyLevel::Unsafe
+        );
+        let resolved = std::fs::canonicalize(&displayed).unwrap();
+        assert_ne!(
+            crate::providers::safety(crate::providers::detect(&resolved), &resolved),
+            crate::providers::SafetyLevel::Unsafe,
+            "fixture: the resolved path alone must look safe"
+        );
+        assert_eq!(
+            crate::providers::safety(
+                crate::providers::detect(&bun_root.join("bin/bun")),
+                &bun_root.join("bin/bun")
+            ),
+            crate::providers::SafetyLevel::Unsafe,
+            "fixture: the logical location of the runtime must be Unsafe"
         );
 
         let (mut app, _tx, _rx) = build_app(bare_config());
