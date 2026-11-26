@@ -151,6 +151,35 @@ mod control_sequence_tests {
     }
 
     #[test]
+    fn ratatui_itself_drops_control_characters_before_they_reach_the_terminal() {
+        // The fields that do NOT go through `printable` (versions, vulnerability
+        // text, metadata, commands) rely on ratatui alone. Render the RAW hostile
+        // text through an ordinary widget, bypassing `printable`, and require the
+        // bytes to equal those of the same text with the controls removed. This is
+        // the test that fails if a ratatui upgrade stops filtering.
+        for hostile in HOSTILE {
+            let stripped: String = hostile.chars().filter(|c| !c.is_control()).collect();
+            assert_ne!(*hostile, stripped, "fixture must actually contain controls");
+            let render = |text: &str| {
+                let text = text.to_owned();
+                emitted(move |f| {
+                    let area = f.area();
+                    let line = ratatui::text::Line::from(vec![
+                        ratatui::text::Span::raw(text.clone()),
+                        ratatui::text::Span::raw(" tail"),
+                    ]);
+                    f.render_widget(ratatui::widgets::Paragraph::new(line), area);
+                })
+            };
+            assert_eq!(
+                render(hostile),
+                render(&stripped),
+                "ratatui let a control character from {hostile:?} through"
+            );
+        }
+    }
+
+    #[test]
     fn printable_replaces_each_control_one_for_one_and_borrows_clean_text() {
         assert_eq!(
             super::printable("a\x1bb\u{9b}c\r\n"),
