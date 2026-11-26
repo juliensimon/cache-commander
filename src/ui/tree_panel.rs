@@ -69,7 +69,7 @@ pub fn render(
             })
             .unwrap_or("");
 
-        let name = &node.name;
+        let name = &*crate::ui::printable(&node.name);
 
         // Calculate available space for name
         // Use char count for display width: arrow (▾/▸), marker (●), and status
