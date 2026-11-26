@@ -23,6 +23,15 @@ pub const DEFAULT_TTL_SECS: u64 = 24 * 60 * 60;
 /// (or no) schema is discarded on load and rebuilt by a fresh scan.
 pub const VULN_CACHE_SCHEMA: u32 = 4;
 
+/// Version of the ordering semantics behind the version cache. Unlike the
+/// vulnerability cache it does not hold OSV filtering output, but each entry
+/// stores a COMPUTED `is_outdated`, derived with `osv::compare_versions`; when
+/// that comparator changes, entries computed with the old one (e.g. installed
+/// `v2.0.0` vs latest `1.9.9`) must not be replayed for the rest of the TTL. Bump
+/// this whenever `compare_versions`/`normalize_version` change; a file with a
+/// different (or no) schema is discarded on load.
+pub const VERSION_CACHE_SCHEMA: u32 = 1;
+
 fn key(pkg: &PackageId) -> String {
     format!("{}|{}|{}", pkg.ecosystem, pkg.name, pkg.version)
 }
@@ -92,6 +101,8 @@ struct VulnCacheFile {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct VersionCacheFile {
+    #[serde(default)]
+    schema: u32,
     #[serde(default)]
     entries: HashMap<String, VersionEntry>,
 }
@@ -254,6 +265,9 @@ impl VersionCache {
             Err(_) => return Self::new(ttl_secs),
         };
         let file: VersionCacheFile = serde_json::from_str(&content).unwrap_or_default();
+        if file.schema != VERSION_CACHE_SCHEMA {
+            return Self::new(ttl_secs);
+        }
         Self {
             entries: file.entries,
             ttl_secs,
@@ -271,6 +285,7 @@ impl VersionCache {
             std::fs::create_dir_all(parent)?;
         }
         let file = VersionCacheFile {
+            schema: VERSION_CACHE_SCHEMA,
             entries: self.entries.clone(),
         };
         let json = serde_json::to_string_pretty(&file)
@@ -342,6 +357,60 @@ mod tests {
             "a pre-versioning negative entry must not be served"
         );
         assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn version_cache_from_an_older_comparator_is_discarded_on_load() {
+        // The version cache stores a COMPUTED `is_outdated`, derived with
+        // `compare_versions`. After the comparator changed (Go's `v` prefix),
+        // an entry such as installed v2.0.0 vs latest 1.9.9 cached as outdated
+        // would be replayed for up to the TTL. A file with no/old schema must
+        // not be reused.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("version-cache.json");
+        let fresh = now_secs();
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"entries":{{"PyPI|requests|2.31.0":{{"cached_at":{fresh},"current":"v2.0.0","latest":"1.9.9","is_outdated":true}}}}}}"#
+            ),
+        )
+        .unwrap();
+        let cache = VersionCache::load(&path);
+        assert!(
+            cache.get(&pkg("requests", "2.31.0")).is_none(),
+            "a pre-versioning computed result must not be served"
+        );
+    }
+
+    #[test]
+    fn version_cache_current_schema_round_trips_and_other_schemas_are_discarded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("version-cache.json");
+        let p = pkg("requests", "2.31.0");
+        let info = VersionInfo {
+            current: "2.31.0".into(),
+            latest: "2.32.0".into(),
+            is_outdated: true,
+        };
+        let mut cache = VersionCache::new(DEFAULT_TTL_SECS);
+        cache.insert(&p, &info);
+        cache.save(&path).unwrap();
+        assert!(
+            VersionCache::load(&path).get(&p).is_some(),
+            "same schema is reused"
+        );
+
+        let fresh = now_secs();
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"schema":{},"entries":{{"PyPI|requests|2.31.0":{{"cached_at":{fresh},"current":"2.31.0","latest":"2.32.0","is_outdated":true}}}}}}"#,
+                VERSION_CACHE_SCHEMA + 1
+            ),
+        )
+        .unwrap();
+        assert!(VersionCache::load(&path).get(&p).is_none());
     }
 
     #[test]
