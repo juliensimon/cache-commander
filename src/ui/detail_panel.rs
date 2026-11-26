@@ -174,7 +174,11 @@ pub fn render(
                 )));
                 if let Some(cmd) = crate::providers::upgrade_command(
                     node.kind,
-                    &extract_package_name(&node.name),
+                    &crate::providers::command_package_name(
+                        node.kind,
+                        &node.path,
+                        &extract_package_name(&node.name),
+                    ),
                     fix,
                 ) {
                     lines.push(Line::from(Span::styled(
@@ -214,7 +218,11 @@ pub fn render(
             )));
             if let Some(cmd) = crate::providers::upgrade_command(
                 node.kind,
-                &extract_package_name(&node.name),
+                &crate::providers::command_package_name(
+                    node.kind,
+                    &node.path,
+                    &extract_package_name(&node.name),
+                ),
                 &ver.latest,
             ) {
                 lines.push(Line::from(Span::styled(format!("  → {}", cmd), theme::DIM)));

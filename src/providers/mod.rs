@@ -233,6 +233,16 @@ pub struct PackageId {
     pub version: String,
 }
 
+/// Package name to put in a remediation command. Prefers the authoritative
+/// name from `package_id` (the one OSV was queried with, scope included), and
+/// only falls back to the tree label, which for e.g. `node_modules/@scope/pkg`
+/// is just the directory basename (`pkg`).
+pub fn command_package_name(kind: CacheKind, path: &Path, label_fallback: &str) -> String {
+    package_id(kind, path)
+        .map(|id| id.name)
+        .unwrap_or_else(|| label_fallback.to_string())
+}
+
 pub fn package_id(kind: CacheKind, path: &Path) -> Option<PackageId> {
     match kind {
         CacheKind::Uv => uv::package_id(path),
@@ -905,6 +915,34 @@ mod tests {
         assert_ne!(icons[0], icons[1]);
         assert_ne!(icons[1], icons[2]);
         assert_ne!(icons[0], icons[2]);
+    }
+
+    #[test]
+    fn command_package_name_prefers_package_json_name_over_label() {
+        // Issue #98: label is the dir basename; the real (scoped) name lives
+        // in package.json and must win, otherwise the suggested command
+        // installs a different package.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("node_modules/@scope/pkg");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"@scope/pkg","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            command_package_name(CacheKind::Npm, &dir, "pkg"),
+            "@scope/pkg"
+        );
+    }
+
+    #[test]
+    fn command_package_name_falls_back_to_label_without_package_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(
+            command_package_name(CacheKind::Npm, tmp.path(), "some-label"),
+            "some-label"
+        );
     }
 
     #[test]
