@@ -134,6 +134,17 @@ Most tools accept optional filters:
 
 This prevents accidental deletion of entries that may be shared, actively in use, or otherwise risky to remove through an automated interface.
 
+### Deletion scope
+
+Before any safety level is considered, `preview_delete` and `delete_packages` only accept entries that the listing tools (`list_caches`, `search_packages`) would return: the individual packages and cache entries under a configured root. They refuse, with a reason in `skipped`:
+
+- a configured cache root itself, and provider containers such as `~/.cache/huggingface/hub` (delete the packages inside instead)
+- files and directories *inside* a package
+- symlinks, even ones that point inside a root (a link is never allowed to stand in for what it points at)
+- anything outside the configured roots
+
+`confirm_caution=true` only confirms a Caution-level item that is already in scope; it never widens the scope.
+
 ## Cache roots
 
 The MCP server scans the same default cache locations as the TUI:
