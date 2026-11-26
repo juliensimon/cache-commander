@@ -536,9 +536,44 @@ impl App {
         }
     }
 
+    /// The path to actually act on for a delete candidate, or `None` if it must
+    /// be refused. The tree can expand through directory symlinks, so a node
+    /// that looks like `root/link/pkg` may really live outside the cache root
+    /// (`link -> /elsewhere`), and `remove_dir_all` would delete it there.
+    ///
+    /// - A candidate that is itself a symlink is refused: the size walk and the
+    ///   provider pre-delete hook (e.g. Go's recursive chmod) would follow it.
+    ///   The path is normalized first, since on Unix a trailing `/` makes stat
+    ///   follow the link.
+    /// - A tree root node is trusted: its scope comes from the user's config.
+    /// - Any other node must live inside its own tree root once symlinks in its
+    ///   parent chain are resolved. The returned path is the canonical parent
+    ///   plus the final name, so the checked location is the one mutated.
+    fn scoped_delete_target(&self, path: &std::path::Path) -> Option<std::path::PathBuf> {
+        let normalized: std::path::PathBuf = path.components().collect();
+        if std::fs::symlink_metadata(&normalized).is_ok_and(|m| m.file_type().is_symlink()) {
+            return None;
+        }
+        let idx = self.tree.nodes.iter().position(|n| n.path == path)?;
+        let mut root = idx;
+        while let Some(parent) = self.tree.nodes[root].parent {
+            root = parent;
+        }
+        if root == idx {
+            return Some(normalized);
+        }
+        let canonical_root = std::fs::canonicalize(&self.tree.nodes[root].path).ok()?;
+        let canonical_parent = std::fs::canonicalize(normalized.parent()?).ok()?;
+        if !canonical_parent.starts_with(&canonical_root) {
+            return None;
+        }
+        Some(canonical_parent.join(normalized.file_name()?))
+    }
+
     fn perform_delete(&mut self) {
         let mut deleted_count = 0usize;
         let mut refused_unsafe = 0usize;
+        let mut refused_scope = 0usize;
         let mut errored = 0usize;
         let mut freed = 0u64;
         let mut deleted_paths = Vec::new();
@@ -552,22 +587,31 @@ impl App {
                 continue;
             }
 
+            // #90: validate immediately before mutating, and from here on use
+            // the validated location for the size walk, the pre-delete hook
+            // and the removal (not the tree's possibly symlink-routed path).
+            let Some(target) = self.scoped_delete_target(path) else {
+                refused_scope += 1;
+                continue;
+            };
+            let target = target.as_path();
+
             // Measure size before deleting
-            let size = crate::scanner::walker::dir_size(path);
+            let size = crate::scanner::walker::dir_size(target);
 
             // Provider-specific pre-delete hook (e.g. chmod +w on Go's
             // read-only module cache). Default is a no-op. Hook errors
             // count as failures — the subsequent remove_dir_all would
             // just hit the same problem.
-            if crate::providers::pre_delete(kind, path).is_err() {
+            if crate::providers::pre_delete(kind, target).is_err() {
                 errored += 1;
                 continue;
             }
 
-            let outcome = if path.is_dir() {
-                std::fs::remove_dir_all(path)
+            let outcome = if target.is_dir() {
+                std::fs::remove_dir_all(target)
             } else {
-                std::fs::remove_file(path)
+                std::fs::remove_file(target)
             };
             match outcome {
                 Ok(()) => {
@@ -607,6 +651,13 @@ impl App {
                 "refused {} Unsafe item{}",
                 refused_unsafe,
                 if refused_unsafe == 1 { "" } else { "s" }
+            ));
+        }
+        if refused_scope > 0 {
+            parts.push(format!(
+                "refused {} item{} that are symlinks or resolve outside their cache root",
+                refused_scope,
+                if refused_scope == 1 { "" } else { "s" }
             ));
         }
         if errored > 0 {
@@ -1098,6 +1149,16 @@ mod tests {
         n.size = 1024;
         n.has_children = false;
         n.children_loaded = true;
+        n
+    }
+
+    /// Like `mk_node_with_path`, but a directory whose children have NOT been
+    /// loaded yet, so `TreeState::insert_children` (a silent no-op on a node
+    /// with `children_loaded`) will actually attach children to it.
+    fn expandable_node(name: &str, path: PathBuf, kind: CacheKind) -> TreeNode {
+        let mut n = mk_node_with_path(name, path, kind);
+        n.has_children = true;
+        n.children_loaded = false;
         n
     }
 
@@ -1857,6 +1918,155 @@ mod tests {
             msg.contains("refused") || msg.contains("skipped") || msg.contains("Unsafe"),
             "status should surface the refusal: {msg}"
         );
+    }
+
+    // --- #90: deletion must stay inside the candidate's own cache root -----
+
+    /// `<tmp>/root` (tree root) with `root/link -> <tmp>/outside`, where
+    /// `outside/victim/data.txt` is data that must never be deleted. Returns
+    /// the app with the tree root loaded, and the paths.
+    #[cfg(unix)]
+    fn app_with_symlink_escape() -> (tempfile::TempDir, App, PathBuf, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(outside.join("victim")).unwrap();
+        std::fs::write(outside.join("victim/data.txt"), b"precious").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+
+        let (mut app, _tx, _rx) = build_app(bare_config());
+        app.tree.set_roots(vec![expandable_node(
+            "root",
+            root.clone(),
+            CacheKind::Cargo,
+        )]);
+        (tmp, app, root, outside)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn perform_delete_refuses_a_candidate_reached_through_a_symlinked_directory() {
+        // The tree can expand through `root/link -> outside`, so a node like
+        // `root/link/victim` looks like it is inside the root but is not.
+        // remove_dir_all on that path deletes the REAL outside directory.
+        let (_tmp, mut app, root, outside) = app_with_symlink_escape();
+        let link = root.join("link");
+        app.tree.insert_children(
+            0,
+            vec![expandable_node("link", link.clone(), CacheKind::Cargo)],
+        );
+        let victim = link.join("victim");
+        app.tree.insert_children(
+            1,
+            vec![mk_node_with_path(
+                "victim",
+                victim.clone(),
+                CacheKind::Cargo,
+            )],
+        );
+        assert!(
+            app.tree.nodes.iter().any(|n| n.path == victim),
+            "precondition: the candidate must be a tree node (else it is refused for the wrong reason)"
+        );
+        app.delete_candidates = vec![victim];
+
+        app.perform_delete();
+
+        assert!(
+            outside.join("victim/data.txt").exists(),
+            "data outside the cache root must survive"
+        );
+        let msg = app.status_msg.as_deref().unwrap_or("");
+        assert!(msg.contains("refused"), "refusal must be surfaced: {msg}");
+        assert!(!msg.contains("Deleted"), "nothing was deleted: {msg}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn perform_delete_refuses_a_symlink_candidate() {
+        // Deleting a symlink node must not touch its target, and the size and
+        // provider pre-delete hooks must not follow it either; refuse it.
+        let (_tmp, mut app, root, outside) = app_with_symlink_escape();
+        let link = root.join("link");
+        app.tree.insert_children(
+            0,
+            vec![mk_node_with_path("link", link.clone(), CacheKind::Cargo)],
+        );
+        assert!(
+            app.tree.nodes.iter().any(|n| n.path == link),
+            "precondition: the candidate must be a tree node"
+        );
+        app.delete_candidates = vec![link.clone()];
+
+        app.perform_delete();
+
+        assert!(
+            std::fs::symlink_metadata(&link).is_ok(),
+            "the symlink itself is left alone"
+        );
+        assert!(outside.join("victim/data.txt").exists());
+        assert!(app.status_msg.as_deref().unwrap_or("").contains("refused"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn perform_delete_still_deletes_children_and_in_root_symlink_paths() {
+        // Controls: a plain child is deleted, and a path through a symlink that
+        // stays INSIDE the root is the same entry and still works.
+        let (_tmp, mut app, root, _outside) = app_with_symlink_escape();
+        std::fs::create_dir_all(root.join("real/pkg")).unwrap();
+        std::fs::write(root.join("real/pkg/f"), b"x").unwrap();
+        std::fs::create_dir_all(root.join("plain")).unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("alias")).unwrap();
+        app.tree.insert_children(
+            0,
+            vec![
+                mk_node_with_path("plain", root.join("plain"), CacheKind::Cargo),
+                expandable_node("alias", root.join("alias"), CacheKind::Cargo),
+            ],
+        );
+        // Candidates always come from the tree: expand `alias` so that
+        // `alias/pkg` is a real node beneath it.
+        let alias_idx = app
+            .tree
+            .nodes
+            .iter()
+            .position(|n| n.path == root.join("alias"))
+            .unwrap();
+        let via_alias = root.join("alias/pkg");
+        app.tree.insert_children(
+            alias_idx,
+            vec![mk_node_with_path(
+                "pkg",
+                via_alias.clone(),
+                CacheKind::Cargo,
+            )],
+        );
+        app.delete_candidates = vec![root.join("plain"), via_alias];
+
+        app.perform_delete();
+
+        assert!(!root.join("plain").exists(), "plain child deleted");
+        assert!(
+            !root.join("real/pkg").exists(),
+            "in-root alias path deleted"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn perform_delete_refuses_a_candidate_that_is_not_a_tree_node() {
+        // Candidates come from the tree. A path with no node cannot be tied to
+        // a cache root, so it is refused rather than trusted.
+        let (_tmp, mut app, _root, outside) = app_with_symlink_escape();
+        let stray = outside.join("victim");
+        app.delete_candidates = vec![stray.clone()];
+
+        app.perform_delete();
+
+        assert!(stray.join("data.txt").exists(), "stray path must survive");
+        assert!(app.status_msg.as_deref().unwrap_or("").contains("refused"));
     }
 
     // --- M3: perform_delete error paths -----------------------------------
