@@ -9,8 +9,19 @@ use std::path::Path;
 /// a path as Maven. Taking the first one (not the nearest to the artifact) is
 /// what keeps a group id that itself contains `repository`
 /// (`com.repository.acme`) intact. Returns `None` when there is no `.m2`
-/// ancestor or no `repository` directory below it, rather than guessing a group.
+/// ancestor or no `repository` directory below it, rather than guessing a group,
+/// and when the path contains an unresolved `..` (it would end up in the group).
+///
+/// Known limit: the root is inferred from the path alone, so a custom root not
+/// named `repository` (e.g. `.m2/custom-repo/com/repository/acme/...`) cannot be
+/// told apart from a nested `.m2/work/repository`; see #118 (needs the scan root).
 fn parse_coordinates(path: &Path) -> Option<(String, String, String)> {
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return None;
+    }
     let comps: Vec<String> = path
         .components()
         .map(|c| c.as_os_str().to_string_lossy().into_owned())
@@ -154,6 +165,22 @@ mod tests {
         assert!(package_id(&path).is_none());
         let no_root = PathBuf::from("/com/acme/widget/1.0/widget-1.0.jar");
         assert!(package_id(&no_root).is_none());
+    }
+
+    #[test]
+    fn parent_dir_components_fail_closed() {
+        // `Path::components()` keeps `..` and configured roots are only
+        // tilde-expanded, so an unresolved `..` would leak into the group
+        // (`...repository.com.acme`) and query OSV for the wrong package.
+        for p in [
+            "/home/user/.m2/repository/../repository/com/acme/widget/1.0/widget-1.0.jar",
+            "/home/user/.m2/repository/com/../acme/widget/1.0/widget-1.0.jar",
+            "/home/user/../user/.m2/repository/com/acme/widget/1.0/widget-1.0.jar",
+        ] {
+            let path = PathBuf::from(p);
+            assert_eq!(semantic_name(&path), None, "{p}");
+            assert!(package_id(&path).is_none(), "{p}");
+        }
     }
 
     #[test]
