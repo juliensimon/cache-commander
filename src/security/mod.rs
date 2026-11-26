@@ -497,19 +497,18 @@ mod tests {
 
     #[test]
     fn an_unorderable_outdated_check_is_unchecked_not_up_to_date() {
-        // Maven `1.0-1` vs `1.0-2` is a form the comparator deliberately cannot
-        // order. That must not be recorded (and cached) as a successful
-        // "not outdated" result: it is an unchecked package, so the UI says so
-        // instead of "all up to date".
+        // An ecosystem the comparator does not support cannot be ordered. That must
+        // not be recorded (and cached) as a successful "not outdated" result: it
+        // is an unchecked package, so the UI says so instead of "all up to date".
         let packages = vec![(
             PathBuf::from("/a"),
             PackageId {
-                ecosystem: "Maven",
-                name: "g:a".into(),
-                version: "1.0-1".into(),
+                ecosystem: "RubyGems",
+                name: "g".into(),
+                version: "1.0".into(),
             },
         )];
-        let outcome = check_versions_inner(&packages, |_| Ok(Some("1.0-2".to_string())));
+        let outcome = check_versions_inner(&packages, |_| Ok(Some("2.0".to_string())));
         assert!(
             outcome.results.is_empty(),
             "no result for an unorderable pair"

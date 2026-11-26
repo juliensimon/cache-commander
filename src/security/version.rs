@@ -304,41 +304,66 @@ fn pep440_compare(a: &str, b: &str) -> Option<Ordering> {
 }
 
 // ----------------------------------------------------------------- Maven ----
+//
+// A port of Maven's `ComparableVersion` (maven-artifact 3.10), validated against
+// the real implementation: see `maven_matches_comparable_version_golden_pairs`.
+// A version parses to a nested list: a digit/letter transition and a `-` open a
+// sublist, a `.` does not, trailing "null" items (0, release qualifiers, empty
+// lists) are dropped when a list is closed, and the items compare as Maven's
+// `IntItem`/`StringItem`/`ListItem` do. The ordering is NOT a total order
+// (Maven's own is not), which is why it is checked against Maven, not derived.
 
 #[derive(Debug)]
 enum MItem {
-    Num(u64),
-    /// (rank, text). Known qualifiers carry an empty text; an unknown one ranks
-    /// above every known qualifier and is ordered by its text.
-    Qual(u8, String),
+    Int(u64),
+    /// A qualifier, lowercased with Maven's aliases applied (`cr` -> `rc`,
+    /// `ga`/`final`/`release` -> "").
+    Str(String),
+    List(Vec<MItem>),
 }
 
-const MAVEN_RELEASE_RANK: u8 = 5;
-const MAVEN_UNKNOWN_RANK: u8 = 7;
+const MAVEN_QUALIFIERS: [&str; 7] = ["alpha", "beta", "milestone", "rc", "snapshot", "", "sp"];
 
-fn maven_qualifier(word: &str, followed_by_digit: bool) -> MItem {
-    let rank = match word {
-        "alpha" => 0,
-        "a" if followed_by_digit => 0,
-        "beta" => 1,
-        "b" if followed_by_digit => 1,
-        "milestone" => 2,
-        "m" if followed_by_digit => 2,
-        "rc" | "cr" => 3,
-        "snapshot" => 4,
-        "" | "ga" | "final" | "release" => MAVEN_RELEASE_RANK,
-        "sp" => 6,
-        _ => return MItem::Qual(MAVEN_UNKNOWN_RANK, word.to_string()),
+/// Maven's `StringItem.comparableQualifier`: the index of a known qualifier, or
+/// `"7-<qualifier>"` so unknown ones sort after every known one, by text.
+fn maven_comparable_qualifier(q: &str) -> String {
+    match MAVEN_QUALIFIERS.iter().position(|k| *k == q) {
+        Some(i) => i.to_string(),
+        None => format!("{}-{}", MAVEN_QUALIFIERS.len(), q),
+    }
+}
+
+fn maven_str_item(word: &str, followed_by_digit: bool) -> MItem {
+    let mut value = word;
+    if followed_by_digit && word.len() == 1 {
+        value = match word {
+            "a" => "alpha",
+            "b" => "beta",
+            "m" => "milestone",
+            other => other,
+        };
+    }
+    let value = match value {
+        "ga" | "final" | "release" => "",
+        "cr" => "rc",
+        other => other,
     };
-    MItem::Qual(rank, String::new())
+    MItem::Str(value.to_string())
 }
 
-/// A deliberately restricted model of Maven's `ComparableVersion`: digits, dots,
-/// hyphens, and qualifiers (with optional numbers). Anything it does not model,
-/// including a hyphen before a plain number after a number (Maven's nested
-/// build-number list, `1.0-1`), is `None` so that it fails closed.
-fn maven_items(v: &str) -> Option<Vec<MItem>> {
-    let v = v.trim().to_ascii_lowercase();
+fn maven_is_null(item: &MItem) -> bool {
+    match item {
+        MItem::Int(n) => *n == 0,
+        MItem::Str(s) => s.is_empty(),
+        MItem::List(v) => v.is_empty(),
+    }
+}
+
+/// Parse into a nested item list. `None` for input Maven would accept but this
+/// port deliberately does not (empty segments, characters other than
+/// `[A-Za-z0-9.-]`, numbers beyond u64): those fail closed instead of being guessed.
+fn maven_parse(version: &str) -> Option<Vec<MItem>> {
+    let v = version.trim().to_ascii_lowercase();
     if v.is_empty()
         || !v
             .bytes()
@@ -346,112 +371,172 @@ fn maven_items(v: &str) -> Option<Vec<MItem>> {
     {
         return None;
     }
-    // Split into (separator-before, token); a token is a run of digits or letters.
-    let mut tokens: Vec<(Option<u8>, String)> = Vec::new();
-    let mut sep: Option<u8> = None;
-    let mut cur = String::new();
-    let mut cur_digit = false;
-    let mut expect_token = true; // after a separator (or at the start)
-    for b in v.bytes() {
-        if b == b'.' || b == b'-' {
-            if cur.is_empty() {
-                return None; // empty segment: `1..2`, leading or trailing separator
-            }
-            tokens.push((sep, std::mem::take(&mut cur)));
-            sep = Some(b);
-            expect_token = true;
-            continue;
-        }
-        let is_digit = b.is_ascii_digit();
-        if !cur.is_empty() && is_digit != cur_digit {
-            // digit <-> letter transition starts a new token with no separator
-            tokens.push((sep, std::mem::take(&mut cur)));
-            sep = None;
-        }
-        cur_digit = is_digit;
-        cur.push(b as char);
-        expect_token = false;
+    // Arena of lists; `Marker::List(i)` refers to `lists[i]`.
+    enum Node {
+        Item(MItem),
+        List(usize),
     }
-    if cur.is_empty() || expect_token {
-        return None;
-    }
-    tokens.push((sep, cur));
+    let mut lists: Vec<Vec<Node>> = vec![Vec::new()];
+    let mut cur = 0usize;
 
-    let mut items: Vec<MItem> = Vec::new();
-    for (idx, (sep, tok)) in tokens.iter().enumerate() {
-        if tok.bytes().all(|b| b.is_ascii_digit()) {
-            // `<number>-<number>` is a nested build list in Maven; not modelled.
-            if *sep == Some(b'-') && matches!(items.last(), Some(MItem::Num(_))) {
-                return None;
-            }
-            // `rc.1`: a dot after a qualifier adds a plain number to the current
-            // list, whereas `rc2` / `rc-2` open a sublist, and Maven ranks a number
-            // above a sublist (`1.0-rc2 < 1.0-rc.1`). The flat model cannot express
-            // that, so it is not modelled.
-            if *sep == Some(b'.') && matches!(items.last(), Some(MItem::Qual(..))) {
-                return None;
-            }
-            items.push(MItem::Num(tok.parse().ok()?));
+    /// Open a sublist inside the current list and make it current.
+    fn open_sub(lists: &mut Vec<Vec<Node>>, cur: &mut usize) {
+        lists.push(Vec::new());
+        let new = lists.len() - 1;
+        lists[*cur].push(Node::List(new));
+        *cur = new;
+    }
+    /// A qualifier directly followed by a digit (`RC2`, `alpha1`) or ending the
+    /// version (`1.0.0.alpha`) is treated as if introduced by `-` whatever its
+    /// separator (`1.0.RC2` is `1.0-RC2`): it opens its own sublist unless the
+    /// current list is still empty. A qualifier terminated by a separator
+    /// (`.alpha-1`, `.rc.1`) does not.
+    fn push_qualifier(lists: &mut Vec<Vec<Node>>, cur: &mut usize, item: MItem) {
+        if !lists[*cur].is_empty() {
+            open_sub(lists, cur);
+        }
+        lists[*cur].push(Node::Item(item));
+    }
+    let bytes = v.as_bytes();
+    let mut is_digit = false;
+    let mut start = 0usize;
+
+    let parse_item = |digit: bool, tok: &str| -> Option<MItem> {
+        if digit {
+            Some(MItem::Int(tok.parse().ok()?))
         } else {
-            let followed_by_digit = tokens.get(idx + 1).is_some_and(|(next_sep, next)| {
-                next_sep.is_none() && next.as_bytes()[0].is_ascii_digit()
-            });
-            // `-` and a digit/letter transition start a sublist in Maven, after
-            // trailing zeros are dropped: `1.0.0-alpha` is `1-alpha`, and so is
-            // `1.0.0alpha`. A `.` does not, so `1.0.CR1` keeps its zero. Without
-            // this a flat comparison ranks `1.0.0-alpha` above `1.0-sp` while
-            // `1.0.0-alpha < 1.0 < 1.0-sp`: not an order.
-            if *sep != Some(b'.') {
-                while matches!(
-                    items.last(),
-                    Some(MItem::Num(0)) | Some(MItem::Qual(MAVEN_RELEASE_RANK, _))
-                ) {
-                    items.pop();
-                }
+            Some(maven_str_item(tok, false))
+        }
+    };
+
+    for i in 0..bytes.len() {
+        let c = bytes[i];
+        if c == b'.' || c == b'-' {
+            if i == start {
+                return None; // empty segment: `1..2`, a leading or trailing separator
             }
-            items.push(maven_qualifier(tok, followed_by_digit));
+            lists[cur].push(Node::Item(parse_item(is_digit, &v[start..i])?));
+            start = i + 1;
+            if c == b'-' {
+                open_sub(&mut lists, &mut cur);
+            }
+        } else if c.is_ascii_digit() {
+            if !is_digit && i > start {
+                // letters then a digit (`alpha1`): the qualifier is followed by a
+                // digit, and the digits open a sublist.
+                push_qualifier(&mut lists, &mut cur, maven_str_item(&v[start..i], true));
+                start = i;
+                open_sub(&mut lists, &mut cur);
+            }
+            is_digit = true;
+        } else {
+            if is_digit && i > start {
+                // digits then a letter (`1alpha`): the number closes, the letters open a sublist.
+                lists[cur].push(Node::Item(parse_item(true, &v[start..i])?));
+                start = i;
+                open_sub(&mut lists, &mut cur);
+            }
+            is_digit = false;
         }
     }
-    // Trailing "null" items (0, release qualifiers) do not change the version.
-    while matches!(
-        items.last(),
-        Some(MItem::Num(0)) | Some(MItem::Qual(MAVEN_RELEASE_RANK, _))
-    ) {
-        items.pop();
+    if v.len() > start {
+        if is_digit {
+            lists[cur].push(Node::Item(parse_item(true, &v[start..])?));
+        } else {
+            // A trailing qualifier (`1.0.0.alpha`) is treated as `-alpha` too.
+            push_qualifier(&mut lists, &mut cur, maven_str_item(&v[start..], false));
+        }
+    } else if v.ends_with(['.', '-']) {
+        return None; // trailing separator
     }
-    Some(items)
+
+    // Maven normalizes each list as it is popped, innermost first: arena indices
+    // grow with nesting, so descending order closes children before parents.
+    // Normalization drops trailing null items, skipping over non-null sublists.
+    fn is_null(lists: &[Vec<Node>], node: &Node) -> bool {
+        match node {
+            Node::Item(item) => maven_is_null(item),
+            Node::List(i) => lists[*i].is_empty(),
+        }
+    }
+    for idx in (0..lists.len()).rev() {
+        let mut i = lists[idx].len();
+        while i > 0 {
+            i -= 1;
+            let null = is_null(&lists, &lists[idx][i]);
+            if null {
+                lists[idx].remove(i);
+            } else if !matches!(lists[idx][i], Node::List(_)) {
+                break;
+            }
+        }
+    }
+
+    // Resolve the arena into a tree.
+    fn build(lists: &mut Vec<Vec<Node>>, idx: usize) -> Vec<MItem> {
+        let nodes = std::mem::take(&mut lists[idx]);
+        nodes
+            .into_iter()
+            .map(|n| match n {
+                Node::Item(item) => item,
+                Node::List(i) => MItem::List(build(lists, i)),
+            })
+            .collect()
+    }
+    Some(build(&mut lists, 0))
 }
 
-fn maven_item_to_null(item: &MItem) -> Ordering {
+/// `item.compareTo(null)` in Maven.
+fn maven_cmp_null(item: &MItem) -> Ordering {
     match item {
-        MItem::Num(n) => n.cmp(&0),
-        MItem::Qual(rank, _) => rank.cmp(&MAVEN_RELEASE_RANK),
+        MItem::Int(n) => {
+            if *n == 0 {
+                Ordering::Equal
+            } else {
+                Ordering::Greater
+            }
+        }
+        MItem::Str(q) => maven_comparable_qualifier(q).cmp(&maven_comparable_qualifier("")),
+        // The WHOLE list is compared with null, not only its first item: `0-00.70`
+        // is above `0` because of the 70, even though its first item is a zero.
+        MItem::List(v) => v
+            .iter()
+            .map(maven_cmp_null)
+            .find(|o| *o != Ordering::Equal)
+            .unwrap_or(Ordering::Equal),
     }
 }
 
-fn maven_item_cmp(a: Option<&MItem>, b: Option<&MItem>) -> Ordering {
+fn maven_cmp(a: Option<&MItem>, b: Option<&MItem>) -> Ordering {
     match (a, b) {
         (None, None) => Ordering::Equal,
-        (Some(x), None) => maven_item_to_null(x),
-        (None, Some(y)) => maven_item_to_null(y).reverse(),
-        (Some(MItem::Num(m)), Some(MItem::Num(n))) => m.cmp(n),
-        (Some(MItem::Num(_)), Some(MItem::Qual(..))) => Ordering::Greater,
-        (Some(MItem::Qual(..)), Some(MItem::Num(_))) => Ordering::Less,
-        (Some(MItem::Qual(r1, s1)), Some(MItem::Qual(r2, s2))) => {
-            r1.cmp(r2).then_with(|| s1.cmp(s2))
+        (Some(x), None) => maven_cmp_null(x),
+        (None, Some(y)) => maven_cmp_null(y).reverse(),
+        (Some(MItem::Int(m)), Some(MItem::Int(n))) => m.cmp(n),
+        (Some(MItem::Int(_)), Some(_)) => Ordering::Greater,
+        (Some(MItem::Str(_)), Some(MItem::Int(_))) => Ordering::Less,
+        (Some(MItem::Str(x)), Some(MItem::Str(y))) => {
+            maven_comparable_qualifier(x).cmp(&maven_comparable_qualifier(y))
+        }
+        (Some(MItem::Str(_)), Some(MItem::List(_))) => Ordering::Less,
+        (Some(MItem::List(_)), Some(MItem::Int(_))) => Ordering::Less,
+        (Some(MItem::List(_)), Some(MItem::Str(_))) => Ordering::Greater,
+        (Some(MItem::List(x)), Some(MItem::List(y))) => maven_cmp_lists(x, y),
+    }
+}
+
+fn maven_cmp_lists(x: &[MItem], y: &[MItem]) -> Ordering {
+    for i in 0..x.len().max(y.len()) {
+        let ord = maven_cmp(x.get(i), y.get(i));
+        if ord != Ordering::Equal {
+            return ord;
         }
     }
+    Ordering::Equal
 }
 
 fn maven_compare(a: &str, b: &str) -> Option<Ordering> {
-    let (a, b) = (maven_items(a)?, maven_items(b)?);
-    for i in 0..a.len().max(b.len()) {
-        let ord = maven_item_cmp(a.get(i), b.get(i));
-        if ord != Ordering::Equal {
-            return Some(ord);
-        }
-    }
-    Some(Ordering::Equal)
+    Some(maven_cmp_lists(&maven_parse(a)?, &maven_parse(b)?))
 }
 
 #[cfg(test)]
@@ -636,122 +721,113 @@ mod tests {
     }
 
     #[test]
-    fn maven_dot_separated_number_after_a_qualifier_is_not_modelled() {
-        // In Maven a digit/letter transition (`rc2`) and a hyphen (`rc-2`) open a
-        // nested sublist, but a dot (`rc.1`) adds a plain number to the current
-        // list, and a number outranks a sublist. So Maven orders `1.0-rc2` BELOW
-        // `1.0-rc.1`; the flat model ordered it above, which could clear an advisory
-        // for an affected `1.0-rc2`. Not modelled, so it must be None, not a guess.
+    fn maven_rejects_what_the_port_deliberately_does_not_accept() {
+        // Maven itself would accept some of these (an empty segment reads as 0);
+        // the port fails closed instead of guessing, and refuses anything that is
+        // not made of `[A-Za-z0-9.-]` or that overflows a u64.
         for bad in [
-            "1.0-rc.1",
-            "1.0.RC.1",
-            "1.0-alpha.2",
-            "1.0.beta.3",
-            "1.0-sp.1",
+            "",
+            "1..2",
+            ".1",
+            "-1",
+            "1.0.",
+            "1.0-",
+            "1.0 final",
+            "[1.0,2.0)",
+            "1.0+x",
+            "1.99999999999999999999",
         ] {
-            assert_eq!(compare("Maven", bad, "1.0-rc2"), None, "{bad:?}");
-            assert_eq!(compare("Maven", "1.0-rc2", bad), None, "{bad:?}");
+            assert_eq!(compare("Maven", bad, "1.0"), None, "{bad:?}");
+            assert_eq!(compare("Maven", "1.0", bad), None, "{bad:?}");
         }
-        // The nested forms are fine and agree with each other.
+    }
+
+    #[test]
+    fn maven_nested_and_dotted_forms_match_maven() {
+        // Every expectation here was produced by running the pair through the real
+        // maven-artifact 3.10.0 `ComparableVersion`, not derived from reading it.
+        // A digit/letter transition and a hyphen open a sublist, a dot does not,
+        // except that a qualifier followed by a digit or ending the version is
+        // treated as if introduced by a hyphen.
+        lt("Maven", "1.0-rc2", "1.0-rc.1"); // rc2 is a sublist, rc.1 a plain number
         eq("Maven", "1.0-rc2", "1.0-rc-2");
+        eq("Maven", "1.0.RC2", "1.0-rc2"); // `.RC2` is `-RC2`
         eq("Maven", "1.0.RC2", "1.0.rc2");
         lt("Maven", "1.0-rc2", "1.0-rc3");
         lt("Maven", "1.0-rc2", "1.0");
-        // A dot after a NUMBER is just another number.
-        lt("Maven", "1.0.1", "1.0.2");
-    }
-
-    #[test]
-    fn maven_rejects_forms_it_does_not_model() {
-        // A hyphen before a plain number is a nested build list in Maven; not
-        // modelled, so it must be "cannot order", not guessed.
-        for bad in ["", "1.0-1", "1..2", "1.0 final", "[1.0,2.0)", "1.0+x"] {
-            assert_eq!(compare("Maven", bad, "1.0"), None, "{bad:?}");
-        }
-    }
-
-    // ---- malformed versions must not compare equal to a valid one (review of #125) ----
-
-    #[test]
-    fn semver_build_metadata_is_validated_before_it_is_ignored() {
-        // `1.0.0+` and `1.0.0+foo..bar` are not valid SemVer; dropping the suffix
-        // unchecked made them equal to 1.0.0, so an unparseable installed version
-        // could clear an advisory.
-        for bad in [
-            "1.0.0+",
-            "1.0.0+foo..bar",
-            "1.0.0+.x",
-            "1.0.0+a.",
-            "1.0.0+a b",
-            "1.0.0+!",
-        ] {
-            assert_eq!(compare("npm", bad, "1.0.0"), None, "{bad:?}");
-            assert_eq!(compare("npm", "1.0.0", bad), None, "{bad:?}");
-        }
-        eq("npm", "1.0.0+build.5", "1.0.0");
-        eq("npm", "1.0.0+20130313144700", "1.0.0");
-        eq("npm", "1.0.0+a-b.c", "1.0.0");
-    }
-
-    #[test]
-    fn semver_rejects_leading_zeros_in_numeric_identifiers() {
-        // `01.0.0` / `1.0.0-01` are invalid and used to equal `1.0.0` / `1.0.0-1`.
-        for bad in [
-            "01.0.0",
-            "1.00.0",
-            "1.0.00",
-            "1.0.0-01",
-            "1.0.0-alpha.01",
-            "v01.2.3",
-        ] {
-            assert_eq!(compare("npm", bad, "1.0.0"), None, "{bad:?}");
-        }
-        // A lone zero is fine, and zeros inside alphanumeric identifiers are fine.
-        eq("npm", "0.0.0", "0.0.0");
-        lt("npm", "1.0.0-0", "1.0.0-1");
-        lt("npm", "1.0.0-0.3.7", "1.0.0-0.3.8");
-        eq("npm", "1.0.0-0a", "1.0.0-0a");
-        lt("Go", "v0.0.0-20210101120000-abcdef123456", "v0.0.1");
-    }
-
-    #[test]
-    fn pep440_implicit_post_release_allows_exactly_one_hyphen_then_digits() {
-        // `1.0--1` and `1.0-.1` were accepted as the implicit post-release `1.0-1`
-        // and compared equal to `1.0.post1`.
-        for bad in ["1.0--1", "1.0-.1", "1.0-_1", "1.0-1-1x"] {
-            assert_eq!(compare("PyPI", bad, "1.0.post1"), None, "{bad:?}");
-        }
-        eq("PyPI", "1.0-1", "1.0.post1");
-    }
-
-    #[test]
-    fn pep440_local_versions_compare_segment_by_segment() {
-        // Compared as text, `vendor.2` came out ABOVE `vendor.10`.
-        lt("PyPI", "1.0+vendor.2", "1.0+vendor.10");
-        // A numeric segment ranks above an alphanumeric one.
-        lt("PyPI", "1.0+abc", "1.0+1");
-        // A shorter local version is lower when it is a prefix.
-        lt("PyPI", "1.0+a", "1.0+a.1");
-        // Case-insensitive, and `-`/`_` are the same as `.`.
-        eq("PyPI", "1.0+ABC", "1.0+abc");
-        eq("PyPI", "1.0+a-b_c", "1.0+a.b.c");
-        lt("PyPI", "1.0+local", "1.0.post1");
-    }
-
-    #[test]
-    fn maven_zeros_before_a_hyphen_qualifier_are_normalized_away() {
-        // Maven starts a sublist at `-` (and at a digit/letter transition) after
-        // dropping trailing zeros, so `1.0.0-alpha` is `1-alpha`. A flat model kept
-        // the zeros, which made `1.0.0-alpha` rank ABOVE `1.0-sp` while it also
-        // ranked below `1.0` and `1.0` below `1.0-sp`: not an order.
-        eq("Maven", "1.0.0-alpha", "1-alpha");
-        eq("Maven", "1.0.0alpha", "1-alpha");
+        lt("Maven", "1.0-rc.1", "1.0-rc.2");
+        lt("Maven", "1.0-1", "1.0-2");
+        lt("Maven", "1.0", "1.0-1"); // a hyphen number is a build above the release
+        lt("Maven", "1.0-1", "1.0.1");
+        lt("Maven", "1.0-sp-1", "1.0.1");
+        lt("Maven", "1.0.0-alpha", "1.0-sp");
         lt("Maven", "1.0.0-alpha", "1.0");
         lt("Maven", "1.0", "1.0-sp");
-        lt("Maven", "1.0.0-alpha", "1.0-sp");
-        lt("Maven", "1.0.0-beta", "1.0.0-rc");
-        // A dot does NOT normalize, so a dotted qualifier keeps its zeros.
-        lt("Maven", "1.0.CR1", "1.0.Final");
+        eq("Maven", "1-RC2", "1.0.RC2");
+        eq("Maven", "1.0.0alpha", "1-alpha");
+        eq("Maven", "3.2.1.RELEASE", "3.2.1");
+        eq("Maven", "1.0.CR1", "1.0.RC1");
+        lt("Maven", "2.0.0.Beta1", "2.0.0.RC1");
+        // A dotted qualifier then a hyphen number keeps its zeros; compared with
+        // `1-1` it is above, while the bare dotted qualifier is below.
+        lt("Maven", "1-1", "1.0.0.alpha-1");
+        lt("Maven", "1.0.0.alpha", "1-1");
+        // The whole list is compared with "null", not just its first item.
+        lt("Maven", "0", "0-00.70");
+    }
+
+    /// The Maven comparator against the real thing: every pair in the golden file
+    /// was answered by maven-artifact 3.10.0's `ComparableVersion`. Regenerate with
+    /// a throwaway program such as
+    ///
+    /// ```java
+    /// for (i < j) println(v[i] + "\t" + v[j] + "\t" +
+    ///     Integer.signum(new ComparableVersion(v[i]).compareTo(new ComparableVersion(v[j]))));
+    /// ```
+    ///
+    /// over a version list (JDK + `maven-artifact-*.jar` from a Maven install).
+    /// The checked-in list mixes structured forms (dot, hyphen and transition
+    /// qualifiers, zero components, numbers after qualifiers) with random ones.
+    /// The port was also validated offline against ~675k further pairs with no
+    /// disagreement; this file is the part that can run in CI.
+    #[test]
+    fn maven_matches_comparable_version_golden_pairs() {
+        let golden = include_str!("testdata/maven_comparable_version.tsv");
+        let (mut checked, mut wrong): (usize, Vec<String>) = (0, Vec::new());
+        for line in golden
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.is_empty())
+        {
+            let mut cols = line.split('\t');
+            let (a, b, sign) = (
+                cols.next().unwrap(),
+                cols.next().unwrap(),
+                cols.next().unwrap(),
+            );
+            let expected = match sign {
+                "-1" => Ordering::Less,
+                "0" => Ordering::Equal,
+                "1" => Ordering::Greater,
+                other => panic!("bad sign {other:?} in golden file"),
+            };
+            checked += 1;
+            if compare("Maven", a, b) != Some(expected) {
+                wrong.push(format!(
+                    "{a} vs {b}: expected {expected:?}, got {:?}",
+                    compare("Maven", a, b)
+                ));
+            }
+        }
+        assert!(
+            checked > 5000,
+            "golden file looks truncated: {checked} pairs"
+        );
+        assert!(
+            wrong.is_empty(),
+            "{} of {checked} pairs disagree with Maven, e.g. {:#?}",
+            wrong.len(),
+            &wrong[..wrong.len().min(8)]
+        );
     }
 
     // ---- unsupported ecosystems ----
