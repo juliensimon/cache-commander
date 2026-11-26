@@ -384,6 +384,13 @@ fn maven_items(v: &str) -> Option<Vec<MItem>> {
             if *sep == Some(b'-') && matches!(items.last(), Some(MItem::Num(_))) {
                 return None;
             }
+            // `rc.1`: a dot after a qualifier adds a plain number to the current
+            // list, whereas `rc2` / `rc-2` open a sublist, and Maven ranks a number
+            // above a sublist (`1.0-rc2 < 1.0-rc.1`). The flat model cannot express
+            // that, so it is not modelled.
+            if *sep == Some(b'.') && matches!(items.last(), Some(MItem::Qual(..))) {
+                return None;
+            }
             items.push(MItem::Num(tok.parse().ok()?));
         } else {
             let followed_by_digit = tokens.get(idx + 1).is_some_and(|(next_sep, next)| {
@@ -626,6 +633,32 @@ mod tests {
         lt("Maven", "1.0a1", "1.0b1");
         lt("Maven", "1.0a1", "1.0");
         lt("Maven", "1.0m1", "1.0rc1");
+    }
+
+    #[test]
+    fn maven_dot_separated_number_after_a_qualifier_is_not_modelled() {
+        // In Maven a digit/letter transition (`rc2`) and a hyphen (`rc-2`) open a
+        // nested sublist, but a dot (`rc.1`) adds a plain number to the current
+        // list, and a number outranks a sublist. So Maven orders `1.0-rc2` BELOW
+        // `1.0-rc.1`; the flat model ordered it above, which could clear an advisory
+        // for an affected `1.0-rc2`. Not modelled, so it must be None, not a guess.
+        for bad in [
+            "1.0-rc.1",
+            "1.0.RC.1",
+            "1.0-alpha.2",
+            "1.0.beta.3",
+            "1.0-sp.1",
+        ] {
+            assert_eq!(compare("Maven", bad, "1.0-rc2"), None, "{bad:?}");
+            assert_eq!(compare("Maven", "1.0-rc2", bad), None, "{bad:?}");
+        }
+        // The nested forms are fine and agree with each other.
+        eq("Maven", "1.0-rc2", "1.0-rc-2");
+        eq("Maven", "1.0.RC2", "1.0.rc2");
+        lt("Maven", "1.0-rc2", "1.0-rc3");
+        lt("Maven", "1.0-rc2", "1.0");
+        // A dot after a NUMBER is just another number.
+        lt("Maven", "1.0.1", "1.0.2");
     }
 
     #[test]
