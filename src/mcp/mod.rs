@@ -133,13 +133,17 @@ fn deletable_paths(roots: &[PathBuf]) -> HashSet<PathBuf> {
 ///
 /// The REQUESTED path must not itself be a symlink: the allowlist holds the
 /// canonical path of each package, so a link to a package would otherwise
-/// canonicalize into the set and stand in for it.
+/// canonicalize into the set and stand in for it. The path is normalized first
+/// (`components()` drops trailing separators and `.`) because on Unix a
+/// trailing `/` or `/.` makes the OS follow the link when stat'ing, so
+/// `alias/` would look like a directory and slip past the check.
 fn resolve_deletable(
     path: &Path,
     roots: &[PathBuf],
     deletable: &HashSet<PathBuf>,
 ) -> Result<PathBuf, &'static str> {
-    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+    let normalized: PathBuf = path.components().collect();
+    if std::fs::symlink_metadata(&normalized).is_ok_and(|m| m.file_type().is_symlink()) {
         return Err(NOT_A_DISCOVERED_ENTRY);
     }
     let canonical =
@@ -1048,17 +1052,45 @@ mod tests {
         let pkg = hub.join("models--org--m");
         let alias = dir.path().join("alias-to-pkg");
         symlink(&pkg, &alias).unwrap();
+        let a = alias.to_string_lossy().to_string();
 
-        let preview = tools::PreviewDeleteInput {
-            paths: vec![alias.to_string_lossy().to_string()],
-        };
-        let out = server.preview_delete(Parameters(preview)).await.unwrap();
-        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(v["items"][0]["would_delete"], false, "{v}");
+        // On Unix a trailing separator (or `/.`) makes the OS follow the link
+        // when the path is stat'ed, so `alias/` would look like a directory
+        // and slip past a naive symlink check. Every spelling must be refused.
+        for spelling in [
+            a.clone(),
+            format!("{a}/"),
+            format!("{a}//"),
+            format!("{a}/."),
+        ] {
+            let preview = tools::PreviewDeleteInput {
+                paths: vec![spelling.clone()],
+            };
+            let out = server.preview_delete(Parameters(preview)).await.unwrap();
+            let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(
+                v["items"][0]["would_delete"], false,
+                "preview {spelling}: {v}"
+            );
 
-        let result = call_delete(&server, &[&alias], true).await;
-        assert_eq!(result["deleted_count"], 0, "{result}");
-        assert!(pkg.exists(), "the package behind the link must survive");
+            let result = call_delete(&server, &[Path::new(&spelling)], true).await;
+            assert_eq!(result["deleted_count"], 0, "delete {spelling}: {result}");
+            assert!(pkg.exists(), "package must survive {spelling}");
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_accepts_a_real_package_spelled_with_a_trailing_slash() {
+        // Control for the normalization above: a trailing slash on a genuine
+        // discovered package is still that package and must keep working.
+        let (dir, server) = hf_layout();
+        let pkg = dir.path().join("huggingface/hub/models--org--m");
+        let spelled = format!("{}/", pkg.display());
+
+        let result = call_delete(&server, &[Path::new(&spelled)], true).await;
+
+        assert_eq!(result["deleted_count"], 1, "{result}");
+        assert!(!pkg.exists());
     }
 
     fn server_with_roots(roots: Vec<PathBuf>) -> CcmdMcp {
