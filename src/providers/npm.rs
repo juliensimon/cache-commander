@@ -132,13 +132,34 @@ fn is_valid_npm_name(name: &str) -> bool {
     }
 }
 
-/// Semver-shaped: non-empty, at most 256 bytes, `A-Za-z0-9` and `.+-` only.
+/// A concrete semver version, `MAJOR.MINOR.PATCH[-prerelease][+build]`, at most
+/// 256 bytes. The three core parts are all digits; prerelease and build are
+/// dot-separated, non-empty identifiers of `A-Za-z0-9-`. Tags (`latest`),
+/// ranges, `v`-prefixed and partial versions (`1.2`, `1..2`) are rejected:
+/// the installed version feeds dedup and OSV queries, so it must be exact.
 fn is_valid_npm_version(version: &str) -> bool {
-    !version.is_empty()
-        && version.len() <= 256
-        && version
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b".+-".contains(&b))
+    let identifiers_ok = |s: &str| {
+        s.split('.')
+            .all(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+    };
+    if version.len() > 256 {
+        return false;
+    }
+    let (rest, build) = match version.split_once('+') {
+        Some((rest, build)) => (rest, Some(build)),
+        None => (version, None),
+    };
+    let (core, pre) = match rest.split_once('-') {
+        Some((core, pre)) => (core, Some(pre)),
+        None => (rest, None),
+    };
+    let mut parts = core.split('.');
+    let core_ok = (0..3).all(|_| {
+        parts
+            .next()
+            .is_some_and(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+    }) && parts.next().is_none();
+    core_ok && pre.is_none_or(identifiers_ok) && build.is_none_or(identifiers_ok)
 }
 
 pub fn metadata(path: &Path) -> Vec<MetadataField> {
@@ -447,7 +468,27 @@ mod tests {
             let json = format!(r#"{{"name":"{name}","version":"1.0.0"}}"#);
             assert!(package_id_of(&json).is_none(), "must reject name: {name}");
         }
-        for version in ["1.0 0", "1.0.0;ls", "../1", "1.0.0\\n2"] {
+        for version in [
+            "1.0 0",
+            "1.0.0;ls",
+            "../1",
+            "1.0.0\\n2",
+            // Tags and malformed versions pass a charset check but are not
+            // concrete versions; they must not reach dedup/OSV queries.
+            "latest",
+            "banana",
+            ".",
+            "1..2",
+            "1.2",
+            "1.2.3.4",
+            "1.2.x",
+            "v1.2.3",
+            "-1.2.3",
+            "1.2.3-",
+            "1.2.3+",
+            "1.2.3-a..b",
+            "1.2.3-+b",
+        ] {
             let json = format!(r#"{{"name":"ok","version":"{version}"}}"#);
             assert!(
                 package_id_of(&json).is_none(),
@@ -469,6 +510,10 @@ mod tests {
             package_id_of(r#"{"name":"@babel/core","version":"7.0.0-beta.1+build.5"}"#).unwrap();
         assert_eq!(id.name, "@babel/core");
         assert_eq!(id.version, "7.0.0-beta.1+build.5");
+        for version in ["0.0.0", "1.2.3-rc.1", "1.2.3+build.5", "2.0.0-x-y.1-2+a-b"] {
+            let json = format!(r#"{{"name":"ok","version":"{version}"}}"#);
+            assert!(package_id_of(&json).is_some(), "must accept: {version}");
+        }
         // Legacy packages may contain uppercase and dots.
         assert!(package_id_of(r#"{"name":"JSONStream","version":"1.3.5"}"#).is_some());
         assert!(package_id_of(r#"{"name":"lodash.get","version":"4.4.2"}"#).is_some());
