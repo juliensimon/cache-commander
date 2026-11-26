@@ -83,7 +83,10 @@ pub fn parse_go_proxy_list(body: &str) -> Option<String> {
     let pick = |candidates: Vec<&str>| -> Option<String> {
         candidates
             .into_iter()
-            .max_by(|a, b| crate::security::osv::compare_versions(a, b))
+            // Go module versions, by Go's (SemVer) ordering.
+            .max_by(|a, b| {
+                crate::security::version::compare("Go", a, b).unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|s| s.to_string())
     };
 
@@ -468,7 +471,7 @@ mod tests {
         // L3: pre-release (-alpha.1) must compare less than stable.
         let body = "v1.5.0\nv1.6.0-alpha.1\nv1.5.1\n";
         // v1.5.0 < v1.5.1 < v1.6.0-alpha.1 (in lex/semver sort).
-        // compare_versions treats -alpha as pre-release of 1.6.0,
+        // Go (SemVer) ordering treats -alpha as pre-release of 1.6.0,
         // which is *less* than the eventual 1.6.0 but *greater* than
         // 1.5.x. So the max is v1.6.0-alpha.1.
         assert_eq!(parse_go_proxy_list(body), Some("v1.6.0-alpha.1".into()));

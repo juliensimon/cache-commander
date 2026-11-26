@@ -1,6 +1,7 @@
 pub mod cache;
 pub mod osv;
 pub mod registry;
+pub mod version;
 
 use crate::providers::PackageId;
 use std::collections::HashMap;
@@ -57,7 +58,7 @@ pub struct VersionCheckOutcome {
 }
 
 /// Returns true if a vulnerability is still active (not fixed) for the given package version.
-fn is_vuln_active(fix_version: &Option<String>, pkg_version: &str) -> bool {
+fn is_vuln_active(ecosystem: &str, fix_version: &Option<String>, pkg_version: &str) -> bool {
     // The installed version takes part in the comparison too. One that is not a
     // concrete version (`9.x`, `(devel)`, free text) cannot be ordered against a
     // fix, and the comparator can rank it above the fix by accident: fail closed.
@@ -67,7 +68,15 @@ fn is_vuln_active(fix_version: &Option<String>, pkg_version: &str) -> bool {
     match fix_version {
         // A fix that is not a concrete version (commit hash, branch, tag)
         // cannot be ordered against the installed version: fail closed.
-        Some(fix) if osv::is_concrete_version(fix) => !osv::version_lte(fix, pkg_version),
+        // Concrete ones are ordered by the ECOSYSTEM's own rules, and a pair
+        // that cannot be ordered (unparseable for it, or an unsupported
+        // ecosystem) also stays affected.
+        Some(fix) if osv::is_concrete_version(fix) => {
+            match version::lte(ecosystem, fix, pkg_version) {
+                Some(fixed) => !fixed,
+                None => true,
+            }
+        }
         _ => true, // unknown, empty or non-version fix = assume still affected
     }
 }
@@ -129,7 +138,7 @@ fn backfill_and_filter_vulns(
                 }
             }
             info.vulns
-                .retain(|vuln| is_vuln_active(&vuln.fix_version, &pkg.version));
+                .retain(|vuln| is_vuln_active(pkg.ecosystem, &vuln.fix_version, &pkg.version));
         }
     }
     results.retain(|_, info| !info.vulns.is_empty());
@@ -382,8 +391,10 @@ where
                 let unchecked = Arc::clone(&unchecked);
                 std::thread::spawn(move || match checker(&pkg) {
                     Ok(Some(latest)) => {
-                        let is_outdated = osv::compare_versions(&pkg.version, &latest)
-                            == std::cmp::Ordering::Less;
+                        // By the ecosystem's rules; a pair that cannot be ordered
+                        // is not claimed to be outdated.
+                        let is_outdated = version::compare(pkg.ecosystem, &pkg.version, &latest)
+                            == Some(std::cmp::Ordering::Less);
                         if let Ok(mut map) = results.lock() {
                             map.insert(
                                 path,
@@ -436,23 +447,23 @@ mod tests {
 
     #[test]
     fn is_vuln_active_fix_greater_than_installed() {
-        assert!(is_vuln_active(&Some("2.0.0".into()), "1.0.0"));
+        assert!(is_vuln_active("PyPI", &Some("2.0.0".into()), "1.0.0"));
     }
 
     #[test]
     fn is_vuln_active_fix_equal_to_installed() {
         // fix == installed means the installed version has the fix
-        assert!(!is_vuln_active(&Some("1.0.0".into()), "1.0.0"));
+        assert!(!is_vuln_active("PyPI", &Some("1.0.0".into()), "1.0.0"));
     }
 
     #[test]
     fn is_vuln_active_fix_less_than_installed() {
-        assert!(!is_vuln_active(&Some("1.0.0".into()), "2.0.0"));
+        assert!(!is_vuln_active("PyPI", &Some("1.0.0".into()), "2.0.0"));
     }
 
     #[test]
     fn is_vuln_active_no_fix_version() {
-        assert!(is_vuln_active(&None, "1.0.0"));
+        assert!(is_vuln_active("PyPI", &None, "1.0.0"));
     }
 
     #[test]
@@ -467,22 +478,98 @@ mod tests {
             "HEAD",
             "latest",
         ] {
-            assert!(is_vuln_active(&Some(fix.into()), "1.0.0"), "fix {fix}");
+            assert!(
+                is_vuln_active("PyPI", &Some(fix.into()), "1.0.0"),
+                "fix {fix}"
+            );
         }
+    }
+
+    // ---- ecosystem-aware ordering (#100) ----
+
+    #[test]
+    fn maven_release_candidate_is_before_final() {
+        // `CR1` and `Final` are qualifiers, not garbage: CR1 < Final. A universal
+        // comparator read both as unknown pre-release text and ranked them by
+        // their trailing digits, so a vulnerable CR1 looked fixed by Final.
+        assert!(is_vuln_active(
+            "Maven",
+            &Some("1.0.Final".into()),
+            "1.0.CR1"
+        ));
+        assert!(is_vuln_active(
+            "Maven",
+            &Some("2.0.0.RC1".into()),
+            "2.0.0.Beta1"
+        ));
+        // Installed Final is at/after a CR fix.
+        assert!(!is_vuln_active(
+            "Maven",
+            &Some("1.0.CR1".into()),
+            "1.0.Final"
+        ));
+        assert!(!is_vuln_active("Maven", &Some("1.0.Final".into()), "1.0"));
+    }
+
+    #[test]
+    fn semver_prerelease_identifiers_are_ordered_by_the_spec() {
+        // alpha.1 < alpha.beta (numeric identifiers rank below alphanumeric).
+        assert!(is_vuln_active(
+            "npm",
+            &Some("1.0.0-alpha.beta".into()),
+            "1.0.0-alpha.1"
+        ));
+        assert!(!is_vuln_active(
+            "npm",
+            &Some("1.0.0-alpha.1".into()),
+            "1.0.0-alpha.beta"
+        ));
+        // beta.2 < beta.11 (numeric, not lexical).
+        assert!(is_vuln_active(
+            "crates.io",
+            &Some("1.0.0-beta.11".into()),
+            "1.0.0-beta.2"
+        ));
+        assert!(!is_vuln_active(
+            "crates.io",
+            &Some("1.0.0-beta.2".into()),
+            "1.0.0-beta.11"
+        ));
+    }
+
+    #[test]
+    fn pep440_epoch_and_dev_releases_are_ordered_correctly() {
+        // An epoch outranks the release segment: 1!1.0 > 2.0.
+        assert!(!is_vuln_active("PyPI", &Some("2.0".into()), "1!1.0"));
+        assert!(is_vuln_active("PyPI", &Some("1!1.0".into()), "2.0"));
+        // A dev release is before the release it precedes.
+        assert!(is_vuln_active("PyPI", &Some("1.0".into()), "1.0.dev1"));
+    }
+
+    #[test]
+    fn an_unorderable_pair_keeps_the_advisory_active() {
+        // Unsupported ecosystem: cannot order, so assume affected (this used to
+        // fall through to the universal comparator and read as fixed).
+        assert!(is_vuln_active("RubyGems", &Some("1.0".into()), "2.0"));
+        // A fix that is not valid for the ecosystem (4-part SemVer) is not
+        // comparable, however plausible it looks.
+        assert!(is_vuln_active("npm", &Some("1.2.3.4".into()), "9.0.0"));
+        // Same for the installed side.
+        assert!(is_vuln_active("npm", &Some("1.0.0".into()), "9.0.0.0"));
     }
 
     #[test]
     fn is_vuln_active_handles_go_style_v_prefixes_on_either_side() {
         // Installed Go versions are `v`-prefixed, OSV fixes usually are not.
         // A prefixed release candidate is BEFORE the fix, so still affected.
-        assert!(is_vuln_active(&Some("1.2.3".into()), "v1.2.3-rc.1"));
+        assert!(is_vuln_active("Go", &Some("1.2.3".into()), "v1.2.3-rc.1"));
         // A prefixed fix above the installed version leaves it affected.
-        assert!(is_vuln_active(&Some("v1.6.0".into()), "1.5.0"));
-        assert!(is_vuln_active(&Some("1.6.0".into()), "v1.5.0"));
+        assert!(is_vuln_active("Go", &Some("v1.6.0".into()), "1.5.0"));
+        assert!(is_vuln_active("Go", &Some("1.6.0".into()), "v1.5.0"));
         // Installed at or above the fix is fixed, however either is spelled.
-        assert!(!is_vuln_active(&Some("1.0.0".into()), "v1.2.3"));
-        assert!(!is_vuln_active(&Some("v1.2.3".into()), "1.2.3"));
-        assert!(!is_vuln_active(&Some("1.2.3".into()), "v1.2.3"));
+        assert!(!is_vuln_active("Go", &Some("1.0.0".into()), "v1.2.3"));
+        assert!(!is_vuln_active("Go", &Some("v1.2.3".into()), "1.2.3"));
+        assert!(!is_vuln_active("Go", &Some("1.2.3".into()), "v1.2.3"));
     }
 
     #[test]
@@ -496,7 +583,7 @@ mod tests {
             "", "unknown", "latest", "main", "(devel)", "9.x", "9.9.9 x", "2.*",
         ] {
             assert!(
-                is_vuln_active(&Some("1.0.0".into()), installed),
+                is_vuln_active("PyPI", &Some("1.0.0".into()), installed),
                 "installed {installed:?}"
             );
         }
@@ -507,7 +594,10 @@ mod tests {
         // `1.x` starts with a digit but is a selector, not a version; ordering
         // it below 2.0.0 used to read an affected package as already fixed.
         for fix in ["1.x", "1.2.x", "1.*", "2.x"] {
-            assert!(is_vuln_active(&Some(fix.into()), "2.5.0"), "fix {fix}");
+            assert!(
+                is_vuln_active("PyPI", &Some(fix.into()), "2.5.0"),
+                "fix {fix}"
+            );
         }
     }
 
@@ -644,16 +734,20 @@ mod tests {
 
     #[test]
     fn is_vuln_active_still_clears_real_versions_including_dates() {
-        assert!(!is_vuln_active(&Some("1.2.3".into()), "1.2.3"));
-        assert!(!is_vuln_active(&Some("2.0.0a1".into()), "2.0.0"));
+        assert!(!is_vuln_active("PyPI", &Some("1.2.3".into()), "1.2.3"));
+        assert!(!is_vuln_active("PyPI", &Some("2.0.0a1".into()), "2.0.0"));
         // Date-style versions are all hex digits but are real versions.
-        assert!(!is_vuln_active(&Some("20240101".into()), "20240201"));
+        assert!(!is_vuln_active(
+            "PyPI",
+            &Some("20240101".into()),
+            "20240201"
+        ));
     }
 
     #[test]
     fn is_vuln_active_empty_fix_version() {
         // Empty fix string should be treated as unknown = still active
-        assert!(is_vuln_active(&Some("".into()), "1.0.0"));
+        assert!(is_vuln_active("PyPI", &Some("".into()), "1.0.0"));
     }
 
     #[test]
@@ -674,7 +768,7 @@ mod tests {
         // Simulate the retain + remove logic from scan_vulns
         for info in results.values_mut() {
             info.vulns
-                .retain(|v| is_vuln_active(&v.fix_version, "2.0.0"));
+                .retain(|v| is_vuln_active("PyPI", &v.fix_version, "2.0.0"));
         }
         results.retain(|_, info| !info.vulns.is_empty());
 
@@ -1192,7 +1286,7 @@ mod tests {
         let pkg_version = "2.0.0";
         for info in results.values_mut() {
             info.vulns
-                .retain(|v| is_vuln_active(&v.fix_version, pkg_version));
+                .retain(|v| is_vuln_active("PyPI", &v.fix_version, pkg_version));
         }
         results.retain(|_, info| !info.vulns.is_empty());
 
