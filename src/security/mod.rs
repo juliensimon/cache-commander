@@ -59,8 +59,10 @@ pub struct VersionCheckOutcome {
 /// Returns true if a vulnerability is still active (not fixed) for the given package version.
 fn is_vuln_active(fix_version: &Option<String>, pkg_version: &str) -> bool {
     match fix_version {
-        Some(fix) if !fix.is_empty() => !osv::version_lte(fix, pkg_version),
-        _ => true, // unknown or empty fix = assume still affected
+        // A fix that is not a concrete version (commit hash, branch, tag)
+        // cannot be ordered against the installed version: fail closed.
+        Some(fix) if osv::is_concrete_version(fix) => !osv::version_lte(fix, pkg_version),
+        _ => true, // unknown, empty or non-version fix = assume still affected
     }
 }
 
@@ -445,6 +447,132 @@ mod tests {
     #[test]
     fn is_vuln_active_no_fix_version() {
         assert!(is_vuln_active(&None, "1.0.0"));
+    }
+
+    #[test]
+    fn is_vuln_active_fails_closed_on_a_fix_that_is_not_a_version() {
+        // Anything that is not a concrete version (a commit hash from a GIT
+        // range, a branch name) cannot be ordered against the installed version,
+        // so it must never be read as "already fixed".
+        for fix in [
+            "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+            "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
+            "main",
+            "HEAD",
+            "latest",
+        ] {
+            assert!(is_vuln_active(&Some(fix.into()), "1.0.0"), "fix {fix}");
+        }
+    }
+
+    #[test]
+    fn is_vuln_active_keeps_advisory_for_digit_prefixed_selectors() {
+        // `1.x` starts with a digit but is a selector, not a version; ordering
+        // it below 2.0.0 used to read an affected package as already fixed.
+        for fix in ["1.x", "1.2.x", "1.*", "2.x"] {
+            assert!(is_vuln_active(&Some(fix.into()), "2.5.0"), "fix {fix}");
+        }
+    }
+
+    #[test]
+    fn backfill_keeps_the_advisory_when_the_matching_range_has_no_usable_fix() {
+        // End to end through the filter that actually drops advisories. Ranges
+        // `[0, 1.4.0)` and `[2.0.0, "main")`; installed 2.5.0 is in the SECOND.
+        // Rejecting the second range's fix must not fall back to 1.4.0 (which
+        // would make `is_vuln_active` clear the advisory. Control: 1.0.0 is in
+        // the first range, so it keeps that range's fix, 1.4.0.
+        let detail_json = r#"{
+            "id": "CVE-1",
+            "affected": [{
+                "package": {"name": "requests", "ecosystem": "PyPI"},
+                "ranges": [
+                    {"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"1.4.0"}]},
+                    {"type":"ECOSYSTEM","events":[{"introduced":"2.0.0"},{"fixed":"main"}]}
+                ]
+            }]
+        }"#;
+        let run = |installed: &str| {
+            let mut results = HashMap::new();
+            results.insert(
+                PathBuf::from("/a"),
+                SecurityInfo {
+                    vulns: vec![Vulnerability {
+                        id: "CVE-1".into(),
+                        summary: "x".into(),
+                        severity: None,
+                        fix_version: None,
+                    }],
+                },
+            );
+            let packages = vec![(PathBuf::from("/a"), pkg("requests", installed))];
+            let mut detail_cache = HashMap::new();
+            detail_cache.insert(
+                "CVE-1".to_string(),
+                osv::parse_vuln_detail(detail_json).unwrap(),
+            );
+            backfill_and_filter_vulns(&mut results, &packages, &detail_cache);
+            results
+        };
+
+        // In the second range: the advisory must survive, with no fix offered.
+        let in_second = run("2.5.0");
+        let info = in_second
+            .get(&PathBuf::from("/a"))
+            .expect("must stay active");
+        assert_eq!(info.vulns[0].fix_version, None);
+
+        // In the first range and below its fix: active, with that range's fix.
+        let in_first = run("1.0.0");
+        let info = in_first.get(&PathBuf::from("/a")).expect("still affected");
+        assert_eq!(info.vulns[0].fix_version.as_deref(), Some("1.4.0"));
+    }
+
+    #[test]
+    fn backfill_clears_a_rejected_fix_instead_of_offering_it() {
+        // An ECOSYSTEM range with `fixed: "main"` keeps the advisory active, but
+        // `fix_version` must not stay `Some("main")`: the UI and upgrade action
+        // would offer it, and MCP would count the vuln as fixable.
+        let mut results = HashMap::new();
+        results.insert(
+            PathBuf::from("/a"),
+            SecurityInfo {
+                vulns: vec![Vulnerability {
+                    id: "CVE-1".into(),
+                    summary: "x".into(),
+                    severity: None,
+                    fix_version: Some("main".into()),
+                }],
+            },
+        );
+        let packages = vec![(PathBuf::from("/a"), pkg("requests", "2.31.0"))];
+        let detail_json = r#"{
+            "id": "CVE-1",
+            "affected": [{
+                "package": {"name": "requests", "ecosystem": "PyPI"},
+                "ranges": [{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"main"}]}]
+            }]
+        }"#;
+        let mut detail_cache = HashMap::new();
+        detail_cache.insert(
+            "CVE-1".to_string(),
+            osv::parse_vuln_detail(detail_json).unwrap(),
+        );
+
+        backfill_and_filter_vulns(&mut results, &packages, &detail_cache);
+
+        let info = results.get(&PathBuf::from("/a")).expect("still active");
+        assert_eq!(
+            info.vulns[0].fix_version, None,
+            "rejected fix must be cleared"
+        );
+    }
+
+    #[test]
+    fn is_vuln_active_still_clears_real_versions_including_dates() {
+        assert!(!is_vuln_active(&Some("1.2.3".into()), "1.2.3"));
+        assert!(!is_vuln_active(&Some("2.0.0a1".into()), "2.0.0"));
+        // Date-style versions are all hex digits but are real versions.
+        assert!(!is_vuln_active(&Some("20240101".into()), "20240201"));
     }
 
     #[test]

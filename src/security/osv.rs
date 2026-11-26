@@ -119,8 +119,23 @@ pub struct OsvPackage {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct OsvRange {
+    /// `SEMVER`, `ECOSYSTEM` or `GIT`. Only the first two carry package
+    /// versions; a `GIT` range's events are commit hashes.
+    #[serde(rename = "type", default)]
+    pub range_type: Option<String>,
     #[serde(default)]
     pub events: Vec<OsvEvent>,
+}
+
+impl OsvRange {
+    /// True for ranges whose events are package versions. A missing `type` is
+    /// tolerated (older/hand-written data); `GIT` ranges are not versions.
+    pub fn is_version_range(&self) -> bool {
+        !self
+            .range_type
+            .as_deref()
+            .is_some_and(|t| t.eq_ignore_ascii_case("GIT"))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -151,9 +166,13 @@ pub fn extract_fix_version(
             && pkg.name == package_name
             && pkg.ecosystem == ecosystem
         {
-            // Collect all (introduced, fixed) pairs from ranges
-            let mut candidates: Vec<(&str, &str)> = Vec::new();
-            for range in &affected.ranges {
+            // One candidate per range that has an `introduced` event, WITH its
+            // own optional fix. A range must stay a candidate even when it has
+            // no fix or a non-version one: dropping it here would let the
+            // selection below fall through to a DIFFERENT range's fix and read
+            // an installed version that sits in this range as already fixed.
+            let mut candidates: Vec<(&str, Option<&str>)> = Vec::new();
+            for range in affected.ranges.iter().filter(|r| r.is_version_range()) {
                 let mut intro: Option<&str> = None;
                 let mut fix: Option<&str> = None;
                 for event in &range.events {
@@ -164,10 +183,8 @@ pub fn extract_fix_version(
                         fix = Some(f);
                     }
                 }
-                if let (Some(i), Some(f)) = (intro, fix)
-                    && !f.is_empty()
-                {
-                    candidates.push((i, f));
+                if let Some(i) = intro {
+                    candidates.push((i, fix.filter(|f| !f.is_empty())));
                 }
             }
 
@@ -183,8 +200,13 @@ pub fn extract_fix_version(
                 .filter(|(intro, _)| version_lte(intro, pkg_version))
                 .max_by(|(a, _), (b, _)| compare_versions(a, b));
 
+            // Only now look at THIS range's fix: it must be a concrete version.
+            // Missing or non-version (`main`, `1.x`, a hash) means unknown, and
+            // unknown keeps the advisory active; never borrow another range's.
             if let Some((_, fix)) = best {
-                return Some(fix.to_string());
+                return fix
+                    .filter(|f| is_concrete_version(f))
+                    .map(|f| f.to_string());
             }
 
             // No range matched — we don't know which range applies
@@ -297,6 +319,37 @@ fn normalize_version(v: &str) -> (Vec<u64>, u8, Vec<u64>) {
         .collect();
 
     (core_nums, stage, stage_nums)
+}
+
+/// True if `v` is a concrete version that can be ordered against an installed
+/// version. It must be made only of version characters (`A-Za-z0-9` and
+/// `._+~-`, so ranges, wildcards and spaces are out), start with a digit after
+/// an optional Go-style `v`, have no standalone `x` component (`1.x`, `1.2.x`
+/// are selectors that the comparator would rank below `2.0.0`), and not be a
+/// commit hash. Tags and branches (`main`, `latest`), selectors and hashes
+/// must never be read as "fixed". All-digit strings such as date versions
+/// (`20240101`) are versions.
+pub fn is_concrete_version(v: &str) -> bool {
+    if v.is_empty() || v != v.trim() {
+        return false;
+    }
+    if !v
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"._+~-".contains(&b))
+    {
+        return false;
+    }
+    let digits = v.strip_prefix(['v', 'V']).unwrap_or(v);
+    if !digits.starts_with(|c: char| c.is_ascii_digit()) {
+        return false;
+    }
+    if v.split('.').any(|part| part.eq_ignore_ascii_case("x")) {
+        return false;
+    }
+    let looks_like_hash = v.len() >= 7
+        && v.bytes().all(|b| b.is_ascii_hexdigit())
+        && v.bytes().any(|b| b.is_ascii_alphabetic());
+    !looks_like_hash
 }
 
 /// Check if version a <= version b.
@@ -425,6 +478,149 @@ mod tests {
             !query.contains('%'),
             "no percent-encoding should appear in JSON body, got: {query}"
         );
+    }
+
+    // ---- range `type`: only package-version ranges carry a fix version (#102) ----
+
+    const GIT_HASH: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+
+    fn detail_with_ranges(ranges_json: &str) -> OsvVulnDetail {
+        let json = format!(
+            r#"{{"id":"GHSA-test","affected":[{{"package":{{"name":"pkg","ecosystem":"npm"}},"ranges":{ranges_json}}}]}}"#
+        );
+        parse_vuln_detail(&json).unwrap()
+    }
+
+    #[test]
+    fn is_concrete_version_accepts_real_versions_and_rejects_selectors() {
+        for ok in [
+            "0",
+            "1.2.3",
+            "v1.2.3",
+            "2.0.0a1",
+            "1.0.0-rc.1",
+            "1.2.3+build.5",
+            "20240101",
+            "1.0.0.Final",
+            "2.0.0.post1",
+            "1.26.17",
+        ] {
+            assert!(is_concrete_version(ok), "must accept {ok}");
+        }
+        // Digit-prefixed but NOT a concrete version: selectors, ranges,
+        // wildcards. The comparator would rank `1.x` below `2.0.0`, which
+        // reads an affected package as already fixed.
+        for bad in [
+            "1.x",
+            "1.X",
+            "1.2.x",
+            "1.*",
+            "1.2.*",
+            "x",
+            "*",
+            "main",
+            "HEAD",
+            "latest",
+            "^1.2.3",
+            "~1.2",
+            ">=1.0",
+            "1.0 - 2.0",
+            "1.0,2.0",
+            "[1.0,2.0)",
+            "1.2.3 ",
+            "",
+            "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+        ] {
+            assert!(!is_concrete_version(bad), "must reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_range_without_a_usable_fix_does_not_fall_back_to_another_ranges_fix() {
+        // Ranges: [0, 1.0) and [1.5, <no usable fix>). Installed 1.6 is inside
+        // the SECOND range. Choosing the range by `introduced` must not skip a
+        // range just because its fix is missing or not a version and then fall
+        // back to the first range's fix `1.0`, which would read 1.6 as fixed.
+        for second in [
+            r#"{"type":"ECOSYSTEM","events":[{"introduced":"1.5"},{"fixed":"main"}]}"#,
+            r#"{"type":"ECOSYSTEM","events":[{"introduced":"1.5"},{"fixed":"1.x"}]}"#,
+            r#"{"type":"ECOSYSTEM","events":[{"introduced":"1.5"}]}"#,
+        ] {
+            let detail = detail_with_ranges(&format!(
+                r#"[{{"type":"ECOSYSTEM","events":[{{"introduced":"0"}},{{"fixed":"1.0"}}]}},{second}]"#
+            ));
+            assert_eq!(
+                extract_fix_version(&detail, "pkg", "npm", "1.6.0"),
+                None,
+                "installed 1.6.0 is in the second range: {second}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_matching_range_still_supplies_its_own_fix() {
+        // Control: installed 0.5 is only in the first range, so its fix is used
+        // even though a later range has no usable fix.
+        let detail = detail_with_ranges(
+            r#"[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"1.0"}]},
+                {"type":"ECOSYSTEM","events":[{"introduced":"1.5"},{"fixed":"main"}]}]"#,
+        );
+        assert_eq!(
+            extract_fix_version(&detail, "pkg", "npm", "0.5.0"),
+            Some("1.0".to_string())
+        );
+    }
+
+    #[test]
+    fn selector_fix_is_not_extracted_as_a_fix_version() {
+        for bad in ["1.x", "main", "*"] {
+            let detail = detail_with_ranges(&format!(
+                r#"[{{"type":"ECOSYSTEM","events":[{{"introduced":"0"}},{{"fixed":"{bad}"}}]}}]"#
+            ));
+            assert_eq!(
+                extract_fix_version(&detail, "pkg", "npm", "1.0.0"),
+                None,
+                "fixed {bad:?} must not surface as a fix"
+            );
+        }
+    }
+
+    #[test]
+    fn git_range_commit_hash_is_not_a_fix_version() {
+        // A GIT range's `fixed` is a commit hash. Treated as a version it sorted
+        // below everything, which made the advisory look already fixed.
+        let detail = detail_with_ranges(&format!(
+            r#"[{{"type":"GIT","repo":"https://example.test/r","events":[{{"introduced":"0"}},{{"fixed":"{GIT_HASH}"}}]}}]"#
+        ));
+        assert_eq!(extract_fix_version(&detail, "pkg", "npm", "1.0.0"), None);
+    }
+
+    #[test]
+    fn git_range_is_ignored_when_a_semver_range_exists() {
+        let detail = detail_with_ranges(&format!(
+            r#"[
+              {{"type":"GIT","events":[{{"introduced":"0"}},{{"fixed":"{GIT_HASH}"}}]}},
+              {{"type":"SEMVER","events":[{{"introduced":"0"}},{{"fixed":"1.4.0"}}]}}
+            ]"#
+        ));
+        assert_eq!(
+            extract_fix_version(&detail, "pkg", "npm", "1.0.0"),
+            Some("1.4.0".to_string())
+        );
+    }
+
+    #[test]
+    fn ecosystem_and_semver_ranges_still_yield_fixes_and_missing_type_is_tolerated() {
+        for ty in [r#""type":"ECOSYSTEM","#, r#""type":"SEMVER","#, ""] {
+            let detail = detail_with_ranges(&format!(
+                r#"[{{{ty}"events":[{{"introduced":"0"}},{{"fixed":"2.0.0"}}]}}]"#
+            ));
+            assert_eq!(
+                extract_fix_version(&detail, "pkg", "npm", "1.0.0"),
+                Some("2.0.0".to_string()),
+                "type {ty:?}"
+            );
+        }
     }
 
     #[test]

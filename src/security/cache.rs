@@ -15,6 +15,14 @@ use std::path::{Path, PathBuf};
 
 pub const DEFAULT_TTL_SECS: u64 = 24 * 60 * 60;
 
+/// Version of the filtering logic whose OUTPUT the vulnerability cache stores.
+/// The cache holds post-filter results, so when what counts as "fixed" changes,
+/// older entries (including cached "clean" results for advisories that used to
+/// be filtered out wrongly) must not be served. Bump this whenever the
+/// OSV extraction/filtering semantics change; a cache file with a different
+/// (or no) schema is discarded on load and rebuilt by a fresh scan.
+pub const VULN_CACHE_SCHEMA: u32 = 2;
+
 fn key(pkg: &PackageId) -> String {
     format!("{}|{}|{}", pkg.ecosystem, pkg.name, pkg.version)
 }
@@ -76,6 +84,8 @@ struct VersionEntry {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct VulnCacheFile {
+    #[serde(default)]
+    schema: u32,
     #[serde(default)]
     entries: HashMap<String, VulnEntry>,
 }
@@ -145,6 +155,9 @@ impl VulnCache {
             Err(_) => return Self::new(ttl_secs),
         };
         let file: VulnCacheFile = serde_json::from_str(&content).unwrap_or_default();
+        if file.schema != VULN_CACHE_SCHEMA {
+            return Self::new(ttl_secs);
+        }
         Self {
             entries: file.entries,
             ttl_secs,
@@ -166,6 +179,7 @@ impl VulnCache {
             std::fs::create_dir_all(parent)?;
         }
         let file = VulnCacheFile {
+            schema: VULN_CACHE_SCHEMA,
             entries: self.entries.clone(),
         };
         let json = serde_json::to_string_pretty(&file)
@@ -304,6 +318,59 @@ mod tests {
             name: name.into(),
             version: version.into(),
         }
+    }
+
+    #[test]
+    fn vuln_cache_from_older_filtering_logic_is_discarded_on_load() {
+        // The cache stores POST-filter results. An entry written by code that
+        // wrongly filtered an advisory out (e.g. a GIT-range hash read as a
+        // fix) is a cached "clean" result that would hide it for up to the TTL
+        // after upgrading. A file with no/old schema version must not be reused.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vuln-cache.json");
+        let fresh = now_secs();
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"entries":{{"PyPI|requests|2.31.0":{{"cached_at":{fresh},"vulns":[]}}}}}}"#
+            ),
+        )
+        .unwrap();
+        let cache = VulnCache::load(&path);
+        assert!(
+            cache.get(&pkg("requests", "2.31.0")).is_none(),
+            "a pre-versioning negative entry must not be served"
+        );
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn vuln_cache_current_schema_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vuln-cache.json");
+        let p = pkg("requests", "2.31.0");
+        let mut cache = VulnCache::new(DEFAULT_TTL_SECS);
+        cache.insert(&p, &SecurityInfo { vulns: vec![] });
+        cache.save(&path).unwrap();
+
+        let loaded = VulnCache::load(&path);
+        assert!(loaded.get(&p).is_some(), "same-schema entries are reused");
+    }
+
+    #[test]
+    fn vuln_cache_with_a_different_schema_version_is_discarded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vuln-cache.json");
+        let fresh = now_secs();
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"schema":{},"entries":{{"PyPI|requests|2.31.0":{{"cached_at":{fresh},"vulns":[]}}}}}}"#,
+                VULN_CACHE_SCHEMA + 1
+            ),
+        )
+        .unwrap();
+        assert!(VulnCache::load(&path).is_empty());
     }
 
     #[test]
