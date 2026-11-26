@@ -1,3 +1,4 @@
+use super::version;
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -181,8 +182,9 @@ impl Interval<'_> {
     /// interval is treated as possibly applicable rather than skipped (the
     /// mirror of an unknown upper bound): skipping it would let another
     /// interval's fix clear an advisory that may still apply.
-    fn started_by(&self, version: &str) -> bool {
-        !is_concrete_version(self.introduced) || version_lte(self.introduced, version)
+    fn started_by(&self, eco: &str, version: &str) -> bool {
+        !is_concrete_version(self.introduced)
+            || version::lte(eco, self.introduced, version).unwrap_or(true)
     }
 
     /// Whether `version` lies in this interval. The `fixed` bound is treated
@@ -190,15 +192,17 @@ impl Interval<'_> {
     /// this interval and reports that fix; `is_vuln_active` is what then
     /// recognizes it as fixed. (A version below `introduced` or past the end is
     /// handled by the second stage of `extract_fix_version`.)
-    fn contains(&self, version: &str) -> bool {
-        self.started_by(version)
+    fn contains(&self, eco: &str, version: &str) -> bool {
+        self.started_by(eco, version)
             && match self.end {
                 IntervalEnd::Fixed(bound)
                 | IntervalEnd::LastAffected(bound)
                 | IntervalEnd::Limit(bound)
                     if is_concrete_version(bound) =>
                 {
-                    version_lte(version, bound)
+                    // Ordered by the ecosystem's rules; a pair it cannot order
+                    // is possibly affected.
+                    version::lte(eco, version, bound).unwrap_or(true)
                 }
                 // An end that is not a real version (`main`, `1.x`, a hash)
                 // cannot be compared; the interval's extent is unknown, and for
@@ -215,16 +219,17 @@ impl Interval<'_> {
     /// Used to check a candidate upgrade target, where being AT a `fixed` bound
     /// already means "not affected" (unlike `contains`, which is boundary
     /// tolerant so an installed version equal to the fix still reports it).
-    fn affects(&self, version: &str) -> bool {
-        self.started_by(version)
+    fn affects(&self, eco: &str, version: &str) -> bool {
+        self.started_by(eco, version)
             && match self.end {
                 IntervalEnd::Fixed(bound) | IntervalEnd::Limit(bound)
                     if is_concrete_version(bound) =>
                 {
-                    compare_versions(version, bound) == std::cmp::Ordering::Less
+                    version::compare(eco, version, bound)
+                        .is_none_or(|o| o == std::cmp::Ordering::Less)
                 }
                 IntervalEnd::LastAffected(bound) if is_concrete_version(bound) => {
-                    version_lte(version, bound)
+                    version::lte(eco, version, bound).unwrap_or(true)
                 }
                 _ => true,
             }
@@ -312,7 +317,7 @@ pub fn extract_fix_version(
             // intervals the fix must leave all of them, so take the highest.
             let containing: Vec<&Interval<'_>> = intervals
                 .iter()
-                .filter(|iv| iv.contains(pkg_version))
+                .filter(|iv| iv.contains(ecosystem, pkg_version))
                 .collect();
             if !containing.is_empty() {
                 let mut fixes: Vec<&str> = Vec::new();
@@ -327,16 +332,37 @@ pub fn extract_fix_version(
                 // `[3.0,open)` give 4.0 for 1.5, which is still affected), so
                 // advance through concrete fixes until no interval affects it,
                 // or give up if one has no concrete end.
-                let mut candidate = fixes.into_iter().max_by(|a, b| compare_versions(a, b))?;
+                // Ordered by the ecosystem's rules; a fix that cannot be ordered
+                // against the others is not a known fix.
+                let mut candidate = fixes[0];
+                for &f in &fixes[1..] {
+                    if version::compare(ecosystem, f, candidate)? == std::cmp::Ordering::Greater {
+                        candidate = f;
+                    }
+                }
                 for _ in 0..=intervals.len() {
-                    let Some(blocker) = intervals.iter().find(|iv| iv.affects(candidate)) else {
-                        return Some(candidate.to_string());
+                    let Some(blocker) =
+                        intervals.iter().find(|iv| iv.affects(ecosystem, candidate))
+                    else {
+                        // `contains` is inclusive of the `fixed` bound, so the
+                        // candidate is normally at or above the installed version
+                        // (equal means "already fixed", and `is_vuln_active` clears
+                        // it). With a non-transitive ordering such as Maven's the
+                        // walk can end BELOW it, or at something that cannot be
+                        // ordered against it; that is not a known fix, and
+                        // offering it would make `is_vuln_active` drop an advisory
+                        // that still applies.
+                        return matches!(
+                            version::compare(ecosystem, candidate, pkg_version),
+                            Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+                        )
+                        .then(|| candidate.to_string());
                     };
                     match blocker.end {
                         IntervalEnd::Fixed(f)
                             if is_concrete_version(f)
-                                && compare_versions(f, candidate)
-                                    == std::cmp::Ordering::Greater =>
+                                && version::compare(ecosystem, f, candidate)
+                                    == Some(std::cmp::Ordering::Greater) =>
                         {
                             candidate = f;
                         }
@@ -363,12 +389,13 @@ pub fn extract_fix_version(
                     // `fixed` bound (malformed `[5.0, fixed 1.0]` would otherwise
                     // clear an advisory from inconsistent data).
                     if is_concrete_version(iv.introduced) {
-                        version_lte(iv.introduced, pkg_version)
+                        version::lte(ecosystem, iv.introduced, pkg_version) == Some(true)
                     } else {
                         matches!(
                             iv.end,
                             IntervalEnd::Fixed(f)
-                                if is_concrete_version(f) && version_lte(f, pkg_version)
+                                if is_concrete_version(f)
+                                    && version::lte(ecosystem, f, pkg_version) == Some(true)
                         )
                     }
                 })
@@ -379,7 +406,8 @@ pub fn extract_fix_version(
                         is_concrete_version(a.introduced),
                         is_concrete_version(b.introduced),
                     ) {
-                        (true, true) => compare_versions(a.introduced, b.introduced),
+                        (true, true) => version::compare(ecosystem, a.introduced, b.introduced)
+                            .unwrap_or(std::cmp::Ordering::Equal),
                         (true, false) => std::cmp::Ordering::Greater,
                         (false, true) => std::cmp::Ordering::Less,
                         (false, false) => std::cmp::Ordering::Equal,
@@ -394,123 +422,10 @@ pub fn extract_fix_version(
     None
 }
 
-/// Compare two version strings with semver + PEP 440 pre-release semantics.
-///
-/// M5: previously this was a pure numeric component compare, which meant
-/// `1.0.0-rc1 == 1.0.0` and `2.0.0a1 == 2.0.0`, silently producing false-
-/// negative vuln matches near the fix boundary. We now normalize each
-/// input to `(core_nums, stage, stage_nums)` and order lexicographically.
-///
-/// Build metadata (everything after `+`) is stripped (semver §10: build
-/// metadata does not affect precedence).
-pub fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
-    let (a_core, a_stage, a_stage_nums) = normalize_version(a);
-    let (b_core, b_stage, b_stage_nums) = normalize_version(b);
-    // Pad the shorter core with zeros so `1.2` == `1.2.0`.
-    let len = a_core.len().max(b_core.len());
-    for i in 0..len {
-        let av = a_core.get(i).copied().unwrap_or(0);
-        let bv = b_core.get(i).copied().unwrap_or(0);
-        match av.cmp(&bv) {
-            std::cmp::Ordering::Equal => continue,
-            other => return other,
-        }
-    }
-    match a_stage.cmp(&b_stage) {
-        std::cmp::Ordering::Equal => a_stage_nums.cmp(&b_stage_nums),
-        other => other,
-    }
-}
-
-/// Ordered tuple key for a version string.
-fn normalize_version(v: &str) -> (Vec<u64>, u8, Vec<u64>) {
-    // 0. Strip a Go-style `v` prefix (`v1.2.3`). Left in, `v1` is not a number,
-    //    so the numeric core came out empty or lost its first component
-    //    (`v1.2.3-rc.1` became [2,3] and outranked 1.2.3). Only before a digit,
-    //    so a word such as `dev` is never eaten.
-    let v = v
-        .strip_prefix(['v', 'V'])
-        .filter(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
-        .unwrap_or(v);
-
-    // 1. Strip build metadata (everything after '+').
-    let v = v.split('+').next().unwrap_or(v);
-
-    // 2. Split at '-' for semver-style pre-release tail.
-    let (head, tail_dash) = match v.split_once('-') {
-        Some((h, t)) => (h, Some(t)),
-        None => (v, None),
-    };
-
-    // 3. If no '-', try PEP 440 inline suffix: find the first non-numeric,
-    //    non-dot char in `head` and split there.
-    let (core, tail_inline) = if tail_dash.is_some() {
-        (head, None)
-    } else {
-        let mut split_at = head.len();
-        for (i, c) in head.char_indices() {
-            if !c.is_ascii_digit() && c != '.' {
-                split_at = i;
-                break;
-            }
-        }
-        if split_at == head.len() {
-            (head, None)
-        } else {
-            (&head[..split_at], Some(&head[split_at..]))
-        }
-    };
-
-    let core_nums: Vec<u64> = core.split('.').filter_map(|s| s.parse().ok()).collect();
-
-    // Stage rank: dev < alpha < beta < rc < stable < post
-    const STAGE_DEV: u8 = 0;
-    const STAGE_ALPHA: u8 = 1;
-    const STAGE_BETA: u8 = 2;
-    const STAGE_RC: u8 = 3;
-    const STAGE_STABLE: u8 = 4;
-    const STAGE_POST: u8 = 5;
-
-    let tail = tail_dash
-        .or(tail_inline)
-        .unwrap_or("")
-        .trim_start_matches('.');
-    if tail.is_empty() {
-        return (core_nums, STAGE_STABLE, Vec::new());
-    }
-    let tail_lower = tail.to_ascii_lowercase();
-    let (stage, rest) = if let Some(r) = tail_lower.strip_prefix("post") {
-        (STAGE_POST, r)
-    } else if let Some(r) = tail_lower.strip_prefix("dev") {
-        (STAGE_DEV, r)
-    } else if let Some(r) = tail_lower.strip_prefix("alpha") {
-        (STAGE_ALPHA, r)
-    } else if let Some(r) = tail_lower.strip_prefix("beta") {
-        (STAGE_BETA, r)
-    } else if let Some(r) = tail_lower.strip_prefix("rc") {
-        (STAGE_RC, r)
-    } else if let Some(r) = tail_lower.strip_prefix('a') {
-        (STAGE_ALPHA, r)
-    } else if let Some(r) = tail_lower.strip_prefix('b') {
-        (STAGE_BETA, r)
-    } else {
-        // Unknown tail — treat as pre-release of lowest precedence so we
-        // never falsely upgrade an unparseable version above stable.
-        (STAGE_DEV, tail_lower.as_str())
-    };
-
-    let stage_nums: Vec<u64> = rest
-        .split(|c: char| !c.is_ascii_digit())
-        .filter(|s| !s.is_empty())
-        .filter_map(|s| s.parse().ok())
-        .collect();
-
-    (core_nums, stage, stage_nums)
-}
-
 /// True if `v` is a concrete version that can be ordered against an installed
 /// version. It must be made only of version characters (`A-Za-z0-9` and
-/// `._+~-`, so ranges, wildcards and spaces are out), start with a digit after
+/// `._+~-!`, the `!` being a PEP 440 epoch as in `1!2.0`; ranges, wildcards and
+/// spaces are out), start with a digit after
 /// an optional Go-style `v`, have no standalone `x` component (`1.x`, `1.2.x`
 /// are selectors that the comparator would rank below `2.0.0`), and not be a
 /// commit hash. Tags and branches (`main`, `latest`), selectors and hashes
@@ -522,7 +437,7 @@ pub fn is_concrete_version(v: &str) -> bool {
     }
     if !v
         .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b"._+~-".contains(&b))
+        .all(|b| b.is_ascii_alphanumeric() || b"._+~-!".contains(&b))
     {
         return false;
     }
@@ -537,11 +452,6 @@ pub fn is_concrete_version(v: &str) -> bool {
         && v.bytes().all(|b| b.is_ascii_hexdigit())
         && v.bytes().any(|b| b.is_ascii_alphabetic());
     !looks_like_hash
-}
-
-/// Check if version a <= version b.
-pub fn version_lte(a: &str, b: &str) -> bool {
-    compare_versions(a, b) != std::cmp::Ordering::Greater
 }
 
 pub fn fetch_vuln_detail(vuln_id: &str) -> Result<OsvVulnDetail, String> {
@@ -691,6 +601,8 @@ mod tests {
             "1.0.0.Final",
             "2.0.0.post1",
             "1.26.17",
+            "1!2.0",
+            "2!1.0.0rc1",
         ] {
             assert!(is_concrete_version(ok), "must accept {ok}");
         }
@@ -856,6 +768,78 @@ mod tests {
         assert_eq!(
             with_third(r#"{"introduced":"3.0"},{"fixed":"4.0"}"#),
             Some("4.0".to_string())
+        );
+    }
+
+    #[test]
+    fn a_fix_that_is_not_valid_for_the_ecosystem_is_not_offered() {
+        // `1.2.3.4` passes the generic "looks like a version" check but is not
+        // SemVer, so it cannot be ordered against npm versions; offering it as a
+        // fix (or using it to clear the advisory) would be a guess.
+        let detail = detail_with_ranges(
+            r#"[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"1.2.3.4"}]}]"#,
+        );
+        assert_eq!(extract_fix_version(&detail, "pkg", "npm", "1.0.0"), None);
+    }
+
+    #[test]
+    fn a_fix_is_not_offered_when_it_cannot_be_ordered_against_the_installed_version() {
+        // The installed version `9.0.0.0` is not SemVer, so it is treated as
+        // possibly affected (inside [0, 1.0.0)), but the fix 1.0.0 cannot be
+        // ordered against it: offering it as the upgrade target would be a guess.
+        let detail = detail_with_ranges(
+            r#"[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"1.0.0"}]}]"#,
+        );
+        assert_eq!(extract_fix_version(&detail, "pkg", "npm", "9.0.0.0"), None);
+    }
+
+    #[test]
+    fn interval_bounds_are_ordered_by_the_ecosystems_rules() {
+        // [0, 1.0.0) for npm: installed 1.0.0-rc.1 is a PRE-release of 1.0.0, so
+        // it is inside the interval and gets the fix; 1.0.0 itself is the fix.
+        let detail = detail_with_ranges(
+            r#"[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"1.0.0"}]}]"#,
+        );
+        assert_eq!(
+            extract_fix_version(&detail, "pkg", "npm", "1.0.0-rc.1"),
+            Some("1.0.0".to_string())
+        );
+        // Maven: 1.0.CR1 is before 1.0.Final, so [0, 1.0.Final) contains it.
+        let maven = parse_vuln_detail(
+            r#"{"id":"X","affected":[{"package":{"name":"g:a","ecosystem":"Maven"},
+                "ranges":[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"1.0.Final"}]}]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            extract_fix_version(&maven, "g:a", "Maven", "1.0.CR1"),
+            Some("1.0.Final".to_string())
+        );
+    }
+
+    #[test]
+    fn a_final_fix_that_orders_below_the_installed_version_is_not_offered() {
+        // Maven's ordering is not transitive. Installed `1.0.0.alpha-1` is inside
+        // `[0, 1)`, so it is affected. The walk then moves from `1` (blocked by
+        // `[1, 1-1)`) to `1-1`, and Maven orders `1-1` BELOW `1.0.0.alpha-1`.
+        // Offering it makes `is_vuln_active` see installed >= fix and drop an
+        // advisory that still applies. A fix must not order below the installed version
+        // (equal is allowed: that is the already-fixed case), otherwise there is no
+        // known fix and the advisory stays active.
+        let detail = parse_vuln_detail(
+            r#"{"id":"X","affected":[{"package":{"name":"g:a","ecosystem":"Maven"},
+                "ranges":[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"1"}]},
+                          {"type":"ECOSYSTEM","events":[{"introduced":"1"},{"fixed":"1-1"}]}]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            extract_fix_version(&detail, "g:a", "Maven", "1.0.0.alpha-1"),
+            None
+        );
+        // Control: a well-ordered installed version in the same advisory still
+        // gets the chained fix.
+        assert_eq!(
+            extract_fix_version(&detail, "g:a", "Maven", "0.5"),
+            Some("1-1".to_string())
         );
     }
 
@@ -1177,224 +1161,7 @@ mod tests {
         assert_eq!(fix, None);
     }
 
-    // --- Group 1: compare_versions ---
-
-    // ---- Go-style `v` prefix (#99) ----
-
-    #[test]
-    fn leading_v_is_ignored_when_ordering_versions() {
-        use std::cmp::Ordering::*;
-        // Go module versions are `v`-prefixed; OSV fixed versions usually are not.
-        // The `v` was parsed as a tail, so `v1.2.3` had an empty numeric core and
-        // sorted below every unprefixed version.
-        for (a, b, expected) in [
-            ("v1.2.3", "1.2.3", Equal),
-            ("V1.2.3", "1.2.3", Equal),
-            ("v1.2.3", "v1.2.3", Equal),
-            ("v1.2.3", "1.2.4", Less),
-            ("v1.2.3", "1.0.0", Greater),
-            ("v1.6.0", "1.5.0", Greater),
-            ("1.5.0", "v1.6.0", Less),
-            ("v2.0.0", "1.9.9", Greater),
-        ] {
-            assert_eq!(compare_versions(a, b), expected, "{a} vs {b}");
-            assert_eq!(compare_versions(b, a), expected.reverse(), "{b} vs {a}");
-        }
-    }
-
-    #[test]
-    fn a_prefixed_release_candidate_sorts_before_its_release() {
-        use std::cmp::Ordering::*;
-        // `v1.2.3-rc.1` dropped its leading `1` (`v1` is not a number), became
-        // `[2,3]`, and ranked ABOVE 1.2.3, so a release candidate looked fixed.
-        for (rc, release) in [
-            ("v1.2.3-rc.1", "1.2.3"),
-            ("v1.2.3-rc.1", "v1.2.3"),
-            ("1.2.3-rc.1", "v1.2.3"),
-            ("v1.2.3-beta.2", "1.2.3"),
-        ] {
-            assert_eq!(compare_versions(rc, release), Less, "{rc} vs {release}");
-        }
-    }
-
-    #[test]
-    fn v_only_counts_as_a_prefix_before_a_digit() {
-        use std::cmp::Ordering::*;
-        // `dev`/`v` words must not be eaten: `1.0.0.dev1` is a pre-release.
-        assert_eq!(compare_versions("1.0.0.dev1", "1.0.0"), Less);
-        assert_eq!(compare_versions("1.0.0-v2", "1.0.0"), Less);
-        // A `v` that is not followed by a digit is not a Go prefix: `vrc1` is
-        // not `rc1` (stripping it would make them Equal).
-        assert_ne!(compare_versions("vrc1", "rc1"), Equal);
-    }
-
-    #[test]
-    fn compare_versions_basic_less() {
-        assert_eq!(compare_versions("1.2.3", "1.2.4"), std::cmp::Ordering::Less);
-    }
-
-    #[test]
-    fn compare_versions_basic_greater() {
-        assert_eq!(
-            compare_versions("2.0.0", "1.9.9"),
-            std::cmp::Ordering::Greater
-        );
-    }
-
-    #[test]
-    fn compare_versions_equal() {
-        assert_eq!(
-            compare_versions("2.0.0", "2.0.0"),
-            std::cmp::Ordering::Equal
-        );
-    }
-
-    #[test]
-    fn compare_versions_major_dominates() {
-        assert_eq!(compare_versions("1.9.9", "2.0.0"), std::cmp::Ordering::Less);
-    }
-
-    #[test]
-    fn compare_versions_different_lengths_equal() {
-        // "1.2" treated as "1.2.0"
-        assert_eq!(compare_versions("1.2", "1.2.0"), std::cmp::Ordering::Equal);
-    }
-
-    #[test]
-    fn compare_versions_different_lengths_less() {
-        assert_eq!(compare_versions("1.2", "1.2.1"), std::cmp::Ordering::Less);
-    }
-
     // M5: pre-release / build-metadata ordering — semver + PEP 440 rules.
-    #[test]
-    fn compare_versions_semver_prerelease_less_than_stable() {
-        assert_eq!(
-            compare_versions("1.0.0-rc1", "1.0.0"),
-            std::cmp::Ordering::Less,
-            "semver pre-release must rank below the stable release"
-        );
-    }
-
-    #[test]
-    fn compare_versions_semver_prerelease_progression() {
-        // alpha < beta < rc < stable
-        assert_eq!(
-            compare_versions("1.0.0-alpha", "1.0.0-beta"),
-            std::cmp::Ordering::Less
-        );
-        assert_eq!(
-            compare_versions("1.0.0-beta", "1.0.0-rc"),
-            std::cmp::Ordering::Less
-        );
-        assert_eq!(
-            compare_versions("1.0.0-rc1", "1.0.0-rc2"),
-            std::cmp::Ordering::Less
-        );
-    }
-
-    #[test]
-    fn compare_versions_pep440_alpha_less_than_stable() {
-        // PEP 440 inline style — no dash
-        assert_eq!(
-            compare_versions("2.0.0a1", "2.0.0"),
-            std::cmp::Ordering::Less,
-            "PEP 440 alpha must rank below stable"
-        );
-        assert_eq!(
-            compare_versions("1.0.0rc1", "1.0.0"),
-            std::cmp::Ordering::Less,
-            "PEP 440 rc must rank below stable"
-        );
-    }
-
-    #[test]
-    fn compare_versions_build_metadata_ignored() {
-        // Build metadata after '+' does not affect precedence (semver §10).
-        assert_eq!(
-            compare_versions("1.0.0+build1", "1.0.0"),
-            std::cmp::Ordering::Equal,
-        );
-        assert_eq!(
-            compare_versions("1.0.0+a", "1.0.0+b"),
-            std::cmp::Ordering::Equal,
-        );
-    }
-
-    #[test]
-    fn compare_versions_pep440_post_greater_than_stable() {
-        assert_eq!(
-            compare_versions("1.0.0.post1", "1.0.0"),
-            std::cmp::Ordering::Greater
-        );
-    }
-
-    #[test]
-    fn compare_versions_non_semantic() {
-        // "latest" has no numeric parts → []
-        assert_eq!(
-            compare_versions("latest", "1.0.0"),
-            std::cmp::Ordering::Less
-        );
-    }
-
-    #[test]
-    fn compare_versions_both_non_semantic() {
-        assert_eq!(
-            compare_versions("latest", "main"),
-            std::cmp::Ordering::Equal
-        );
-    }
-
-    #[test]
-    fn compare_versions_empty_strings() {
-        assert_eq!(compare_versions("", ""), std::cmp::Ordering::Equal);
-    }
-
-    #[test]
-    fn compare_versions_empty_vs_version() {
-        assert_eq!(compare_versions("", "1.0.0"), std::cmp::Ordering::Less);
-    }
-
-    #[test]
-    fn compare_versions_long_versions() {
-        assert_eq!(
-            compare_versions("1.2.3.4.5", "1.2.3.4.6"),
-            std::cmp::Ordering::Less
-        );
-    }
-
-    // --- Group 2: version_lte ---
-
-    #[test]
-    fn version_lte_basic_true() {
-        assert!(version_lte("1.0.0", "2.0.0"));
-    }
-
-    #[test]
-    fn version_lte_equal_is_true() {
-        assert!(version_lte("1.0.0", "1.0.0"));
-    }
-
-    #[test]
-    fn version_lte_greater_is_false() {
-        assert!(!version_lte("2.0.0", "1.0.0"));
-    }
-
-    #[test]
-    fn version_lte_empty_lhs() {
-        assert!(version_lte("", "1.0.0"));
-    }
-
-    #[test]
-    fn version_lte_empty_rhs() {
-        assert!(!version_lte("1.0.0", ""));
-    }
-
-    #[test]
-    fn version_lte_both_empty() {
-        assert!(version_lte("", ""));
-    }
-
     // --- Group 3: extract_fix_version edge cases ---
 
     #[test]

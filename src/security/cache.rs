@@ -21,16 +21,16 @@ pub const DEFAULT_TTL_SECS: u64 = 24 * 60 * 60;
 /// be filtered out wrongly) must not be served. Bump this whenever the
 /// OSV extraction/filtering semantics change; a cache file with a different
 /// (or no) schema is discarded on load and rebuilt by a fresh scan.
-pub const VULN_CACHE_SCHEMA: u32 = 4;
+pub const VULN_CACHE_SCHEMA: u32 = 5;
 
 /// Version of the ordering semantics behind the version cache. Unlike the
 /// vulnerability cache it does not hold OSV filtering output, but each entry
-/// stores a COMPUTED `is_outdated`, derived with `osv::compare_versions`; when
+/// stores a COMPUTED `is_outdated`, derived with `version::compare`; when
 /// that comparator changes, entries computed with the old one (e.g. installed
 /// `v2.0.0` vs latest `1.9.9`) must not be replayed for the rest of the TTL. Bump
-/// this whenever `compare_versions`/`normalize_version` change; a file with a
+/// this whenever the ordering rules in `security::version` change; a file with a
 /// different (or no) schema is discarded on load.
-pub const VERSION_CACHE_SCHEMA: u32 = 1;
+pub const VERSION_CACHE_SCHEMA: u32 = 2;
 
 fn key(pkg: &PackageId) -> String {
     format!("{}|{}|{}", pkg.ecosystem, pkg.name, pkg.version)
@@ -362,7 +362,7 @@ mod tests {
     #[test]
     fn version_cache_from_an_older_comparator_is_discarded_on_load() {
         // The version cache stores a COMPUTED `is_outdated`, derived with
-        // `compare_versions`. After the comparator changed (Go's `v` prefix),
+        // `version::compare`. After the comparator changed (Go's `v` prefix),
         // an entry such as installed v2.0.0 vs latest 1.9.9 cached as outdated
         // would be replayed for up to the TTL. A file with no/old schema must
         // not be reused.
