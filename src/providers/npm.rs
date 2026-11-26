@@ -13,11 +13,17 @@ const MAX_PACKAGE_JSON_BYTES: u64 = 1024 * 1024;
 /// goes through this so a huge file cannot stall or exhaust ccmd.
 fn read_package_json(dir: &Path) -> Option<String> {
     let file = std::fs::File::open(dir.join("package.json")).ok()?;
+    read_bounded(file, MAX_PACKAGE_JSON_BYTES)
+}
+
+/// Read UTF-8 from `reader`, consuming at most `max + 1` bytes: the extra byte
+/// is how an over-limit input is told apart from one that is exactly `max`.
+/// Returns `None` for over-limit or non-UTF-8 input. Split out from
+/// `read_package_json` so the cap on bytes consumed can be tested directly.
+fn read_bounded(reader: impl Read, max: u64) -> Option<String> {
     let mut content = String::new();
-    file.take(MAX_PACKAGE_JSON_BYTES + 1)
-        .read_to_string(&mut content)
-        .ok()?;
-    (content.len() as u64 <= MAX_PACKAGE_JSON_BYTES).then_some(content)
+    reader.take(max + 1).read_to_string(&mut content).ok()?;
+    (content.len() as u64 <= max).then_some(content)
 }
 
 pub fn semantic_name(path: &Path) -> Option<String> {
@@ -602,6 +608,55 @@ mod tests {
         // whole file (checked by the result, and by the bounded `take`).
         let (_t, dir) = pkg_dir_with_json_of_len(ID_JSON, MAX_PACKAGE_JSON_BYTES as usize * 4);
         assert!(read_package_json(&dir).is_none());
+    }
+
+    /// A reader that can supply `available` bytes and records how many were
+    /// actually consumed, so a test can assert the cap on I/O itself and not
+    /// just on the returned value.
+    struct CountingReader {
+        available: u64,
+        consumed: u64,
+    }
+
+    impl std::io::Read for CountingReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = (buf.len() as u64).min(self.available - self.consumed) as usize;
+            buf[..n].fill(b' ');
+            self.consumed += n as u64;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn read_bounded_consumes_at_most_limit_plus_one_bytes() {
+        // 64x the limit available; without `take` the reader would be drained
+        // (64 MiB), which is exactly the unbounded read #97 is about.
+        let limit = MAX_PACKAGE_JSON_BYTES;
+        let mut reader = CountingReader {
+            available: limit * 64,
+            consumed: 0,
+        };
+        assert!(read_bounded(&mut reader, limit).is_none());
+        assert!(
+            reader.consumed <= limit + 1,
+            "consumed {} bytes, cap is {}",
+            reader.consumed,
+            limit + 1
+        );
+    }
+
+    #[test]
+    fn read_bounded_returns_content_at_exactly_the_limit() {
+        let mut reader = CountingReader {
+            available: 10,
+            consumed: 0,
+        };
+        assert_eq!(read_bounded(&mut reader, 10).as_deref(), Some("          "));
+        let mut reader = CountingReader {
+            available: 11,
+            consumed: 0,
+        };
+        assert!(read_bounded(&mut reader, 10).is_none());
     }
 
     #[test]
