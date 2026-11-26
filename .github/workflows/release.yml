@@ -83,7 +83,7 @@ jobs:
       - name: Build .deb package
         if: contains(matrix.target, 'linux')
         run: |
-          cargo install cargo-deb@3.6.3
+          cargo install --locked cargo-deb@3.6.3
           cargo deb --no-build --target ${{ matrix.target }}
           DEB_FILE=$(find target/${{ matrix.target }}/debian -name '*.deb' -print -quit)
           cp "$DEB_FILE" ccmd-${{ matrix.target }}.deb
