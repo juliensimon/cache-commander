@@ -58,6 +58,12 @@ pub struct VersionCheckOutcome {
 
 /// Returns true if a vulnerability is still active (not fixed) for the given package version.
 fn is_vuln_active(fix_version: &Option<String>, pkg_version: &str) -> bool {
+    // The installed version takes part in the comparison too. One that is not a
+    // concrete version (`9.x`, `(devel)`, free text) cannot be ordered against a
+    // fix, and the comparator can rank it above the fix by accident: fail closed.
+    if !osv::is_concrete_version(pkg_version) {
+        return true;
+    }
     match fix_version {
         // A fix that is not a concrete version (commit hash, branch, tag)
         // cannot be ordered against the installed version: fail closed.
@@ -462,6 +468,37 @@ mod tests {
             "latest",
         ] {
             assert!(is_vuln_active(&Some(fix.into()), "1.0.0"), "fix {fix}");
+        }
+    }
+
+    #[test]
+    fn is_vuln_active_handles_go_style_v_prefixes_on_either_side() {
+        // Installed Go versions are `v`-prefixed, OSV fixes usually are not.
+        // A prefixed release candidate is BEFORE the fix, so still affected.
+        assert!(is_vuln_active(&Some("1.2.3".into()), "v1.2.3-rc.1"));
+        // A prefixed fix above the installed version leaves it affected.
+        assert!(is_vuln_active(&Some("v1.6.0".into()), "1.5.0"));
+        assert!(is_vuln_active(&Some("1.6.0".into()), "v1.5.0"));
+        // Installed at or above the fix is fixed, however either is spelled.
+        assert!(!is_vuln_active(&Some("1.0.0".into()), "v1.2.3"));
+        assert!(!is_vuln_active(&Some("v1.2.3".into()), "1.2.3"));
+        assert!(!is_vuln_active(&Some("1.2.3".into()), "v1.2.3"));
+    }
+
+    #[test]
+    fn is_vuln_active_fails_closed_when_the_installed_version_is_not_a_version() {
+        // The installed version feeds the comparison too; an unparseable one
+        // cannot be ordered against a fix, so it must stay affected.
+        // The last three LOOK large to the comparator (`9.x` parses as [9]), so
+        // without an explicit gate they would be read as past the fix. The
+        // first ones only pass by luck of how the comparator ranks garbage.
+        for installed in [
+            "", "unknown", "latest", "main", "(devel)", "9.x", "9.9.9 x", "2.*",
+        ] {
+            assert!(
+                is_vuln_active(&Some("1.0.0".into()), installed),
+                "installed {installed:?}"
+            );
         }
     }
 

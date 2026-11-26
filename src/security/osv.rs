@@ -424,6 +424,15 @@ pub fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
 
 /// Ordered tuple key for a version string.
 fn normalize_version(v: &str) -> (Vec<u64>, u8, Vec<u64>) {
+    // 0. Strip a Go-style `v` prefix (`v1.2.3`). Left in, `v1` is not a number,
+    //    so the numeric core came out empty or lost its first component
+    //    (`v1.2.3-rc.1` became [2,3] and outranked 1.2.3). Only before a digit,
+    //    so a word such as `dev` is never eaten.
+    let v = v
+        .strip_prefix(['v', 'V'])
+        .filter(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+        .unwrap_or(v);
+
     // 1. Strip build metadata (everything after '+').
     let v = v.split('+').next().unwrap_or(v);
 
@@ -1169,6 +1178,55 @@ mod tests {
     }
 
     // --- Group 1: compare_versions ---
+
+    // ---- Go-style `v` prefix (#99) ----
+
+    #[test]
+    fn leading_v_is_ignored_when_ordering_versions() {
+        use std::cmp::Ordering::*;
+        // Go module versions are `v`-prefixed; OSV fixed versions usually are not.
+        // The `v` was parsed as a tail, so `v1.2.3` had an empty numeric core and
+        // sorted below every unprefixed version.
+        for (a, b, expected) in [
+            ("v1.2.3", "1.2.3", Equal),
+            ("V1.2.3", "1.2.3", Equal),
+            ("v1.2.3", "v1.2.3", Equal),
+            ("v1.2.3", "1.2.4", Less),
+            ("v1.2.3", "1.0.0", Greater),
+            ("v1.6.0", "1.5.0", Greater),
+            ("1.5.0", "v1.6.0", Less),
+            ("v2.0.0", "1.9.9", Greater),
+        ] {
+            assert_eq!(compare_versions(a, b), expected, "{a} vs {b}");
+            assert_eq!(compare_versions(b, a), expected.reverse(), "{b} vs {a}");
+        }
+    }
+
+    #[test]
+    fn a_prefixed_release_candidate_sorts_before_its_release() {
+        use std::cmp::Ordering::*;
+        // `v1.2.3-rc.1` dropped its leading `1` (`v1` is not a number), became
+        // `[2,3]`, and ranked ABOVE 1.2.3, so a release candidate looked fixed.
+        for (rc, release) in [
+            ("v1.2.3-rc.1", "1.2.3"),
+            ("v1.2.3-rc.1", "v1.2.3"),
+            ("1.2.3-rc.1", "v1.2.3"),
+            ("v1.2.3-beta.2", "1.2.3"),
+        ] {
+            assert_eq!(compare_versions(rc, release), Less, "{rc} vs {release}");
+        }
+    }
+
+    #[test]
+    fn v_only_counts_as_a_prefix_before_a_digit() {
+        use std::cmp::Ordering::*;
+        // `dev`/`v` words must not be eaten: `1.0.0.dev1` is a pre-release.
+        assert_eq!(compare_versions("1.0.0.dev1", "1.0.0"), Less);
+        assert_eq!(compare_versions("1.0.0-v2", "1.0.0"), Less);
+        // A `v` that is not followed by a digit is not a Go prefix: `vrc1` is
+        // not `rc1` (stripping it would make them Equal).
+        assert_ne!(compare_versions("vrc1", "rc1"), Equal);
+    }
 
     #[test]
     fn compare_versions_basic_less() {
