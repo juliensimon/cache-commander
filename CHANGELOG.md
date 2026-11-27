@@ -41,7 +41,9 @@ are called out under Changed.
   two such links turned a 100-byte directory into 8.8 s and 6.5 MB). It no
   longer follows them, like `dir_size`.
 - **CI supply chain (#106, #68, #108, #110, #112, #113, #130)**: `--locked` on
-  every cargo command, `persist-credentials: false` on checkouts,
+  every cargo build, test, lint and install command (`cargo fmt`,
+  `llvm-cov report` and `deb --no-build` do not resolve dependencies, so they
+  take none), `persist-credentials: false` on checkouts,
   `--ignore-scripts` on package-manager installs, and exact `pnpm` and
   `yarn@1` versions in the PR-gating E2E job. The nightly E2E job still floats
   on purpose, to surface upstream releases.
