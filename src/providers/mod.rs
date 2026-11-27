@@ -324,18 +324,14 @@ impl ProtectedSet {
         // Everything the ROUTE to a protected directory passes through, not just
         // what is above its final target: with `~/.bun -> A` and `A/bin -> B` the
         // protected directory is B, but removing A leaves `~/.bun/bin` dangling.
-        // Each step of the spelled path is resolved, and the directories above
-        // that are held; the protected directories themselves are not "above".
+        // The route is resolved one link at a time (see `route_dirs`), so a link
+        // whose target itself passes through more links is followed too. The
+        // directories above each of those are held; the protected directories
+        // themselves are not "above" anything.
         let mut holders: Vec<(u64, u64)> = dirs
             .iter()
-            .flat_map(|d| d.ancestors())
-            .filter_map(|step| std::fs::canonicalize(step).ok())
-            .flat_map(|resolved| {
-                resolved
-                    .ancestors()
-                    .filter_map(identity)
-                    .collect::<Vec<_>>()
-            })
+            .flat_map(|d| route_dirs(d))
+            .flat_map(|dir| dir.ancestors().filter_map(identity).collect::<Vec<_>>())
             .collect();
         holders.retain(|h| !identities.contains(h));
         Self {
@@ -370,6 +366,78 @@ impl ProtectedSet {
             .filter_map(identity)
             .any(|id| self.identities.contains(&id))
     }
+}
+
+/// The directories a route to `path` passes through, resolved one symlink at a
+/// time: the directory that CONTAINS each link (removing it breaks the route) and
+/// the final directory. Like `realpath`, but recording each hop; `..` and
+/// relative or absolute link targets are handled, and the number of hops is
+/// bounded so a loop terminates. Components that do not exist are kept as is.
+#[cfg(unix)]
+fn route_dirs(path: &Path) -> Vec<PathBuf> {
+    use std::collections::VecDeque;
+    use std::ffi::OsString;
+    use std::path::Component;
+    const MAX_HOPS: usize = 40; // the kernel's own limit on symlinks per lookup
+
+    /// An owned path component, so a link target can be queued after it is read.
+    enum Step {
+        Root(OsString),
+        Cur,
+        Parent,
+        Name(OsString),
+    }
+    fn steps(path: &Path) -> impl Iterator<Item = Step> + '_ {
+        path.components().map(|c| match c {
+            Component::Prefix(_) | Component::RootDir => Step::Root(c.as_os_str().to_owned()),
+            Component::CurDir => Step::Cur,
+            Component::ParentDir => Step::Parent,
+            Component::Normal(n) => Step::Name(n.to_owned()),
+        })
+    }
+
+    let mut dirs = Vec::new();
+    let mut resolved = PathBuf::new();
+    let mut pending: VecDeque<Step> = steps(path).collect();
+    let mut hops = 0;
+    while let Some(step) = pending.pop_front() {
+        match step {
+            Step::Root(root) => resolved = PathBuf::from(root),
+            Step::Cur => {}
+            Step::Parent => {
+                resolved.pop();
+            }
+            Step::Name(name) => {
+                let next = resolved.join(&name);
+                let link = std::fs::symlink_metadata(&next)
+                    .ok()
+                    .filter(|m| m.file_type().is_symlink())
+                    .and_then(|_| std::fs::read_link(&next).ok());
+                let Some(target) = link else {
+                    resolved = next;
+                    continue;
+                };
+                hops += 1;
+                if hops > MAX_HOPS {
+                    break;
+                }
+                dirs.push(resolved.clone());
+                // Continue from the link's target: an absolute one restarts at the
+                // root (its Root step resets `resolved`), a relative one is taken
+                // against the directory holding the link.
+                for step in steps(&target).collect::<Vec<_>>().into_iter().rev() {
+                    pending.push_front(step);
+                }
+            }
+        }
+    }
+    dirs.push(resolved);
+    dirs
+}
+
+#[cfg(not(unix))]
+fn route_dirs(path: &Path) -> Vec<PathBuf> {
+    vec![path.to_path_buf()]
 }
 
 /// (device, inode) of what `path` resolves to; `None` if it does not exist.
@@ -739,6 +807,89 @@ mod tests {
         std::fs::create_dir_all(&other).unwrap();
         assert!(!set.holds(&other));
         assert!(!set.holds(&b), "the protected dir is contained, not held");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn holds_follows_a_route_one_link_at_a_time() {
+        // `~/.bun -> A`, `A/bin -> ../C/link2`, `C/link2 -> B`. C holds a link the
+        // route passes through, yet it is neither a lexical ancestor of the spelled
+        // path nor above the final target B, so resolving the spelled prefixes (or
+        // only the final path) never meets it. Removing C breaks `~/.bun/bin`.
+        let tmp = tempfile::tempdir().unwrap();
+        let a = tmp.path().join("A");
+        let b = tmp.path().join("B");
+        let c = tmp.path().join("C");
+        for d in [&a, &b, &c] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(b.join("bun"), b"runtime").unwrap();
+        std::os::unix::fs::symlink(&b, c.join("link2")).unwrap();
+        std::os::unix::fs::symlink("../C/link2", a.join("bin")).unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::os::unix::fs::symlink(&a, home.join(".bun")).unwrap();
+        let set = ProtectedSet::from_dirs(&[home.join(".bun/bin")]);
+        assert!(set.contains(&b.join("bun")), "route resolves to B");
+        assert!(set.holds(&a), "A holds the first link");
+        assert!(
+            set.holds(&c),
+            "C holds the second link, reached via a link target"
+        );
+        // Controls: an unrelated sibling is not a holder; B is contained, not held.
+        let other = tmp.path().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        assert!(!set.holds(&other));
+        assert!(!set.holds(&b));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_loop_on_the_route_terminates_and_protects_nothing_wrongly() {
+        // `x -> y` and `y -> x`: the route never resolves. It must neither hang nor
+        // panic, and must not make unrelated directories "held".
+        let tmp = tempfile::tempdir().unwrap();
+        let (x, y) = (tmp.path().join("x"), tmp.path().join("y"));
+        std::os::unix::fs::symlink(&y, &x).unwrap();
+        std::os::unix::fs::symlink(&x, &y).unwrap();
+        let other = tmp.path().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        let route = x.join("bin");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let set = ProtectedSet::from_dirs(&[route]);
+            let _ = tx.send(set.holds(&other));
+        });
+        let held = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("route resolution must terminate on a symlink loop");
+        assert!(!held, "an unrelated directory is not held");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn route_dirs_follows_absolute_and_relative_targets_and_dotdot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let (a, b, c, d) = (
+            root.join("a"),
+            root.join("b"),
+            root.join("c"),
+            root.join("d"),
+        );
+        for dir in [&a, &b, &c, &d] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        // a/rel -> ../b (relative, with ..), b/abs -> <c> (absolute), c/last -> ../d
+        std::os::unix::fs::symlink("../b", a.join("rel")).unwrap();
+        std::os::unix::fs::symlink(&c, b.join("abs")).unwrap();
+        std::os::unix::fs::symlink("../d", c.join("last")).unwrap();
+        let dirs = route_dirs(&a.join("rel/abs/last"));
+        // The directories holding each link, in order, then the final directory.
+        assert_eq!(dirs, [a, b, c, d]);
+        // A path with no links resolves to itself; a missing one is kept as is.
+        assert_eq!(route_dirs(&root.join("a")), [root.join("a")]);
+        assert_eq!(route_dirs(&root.join("no/such")), [root.join("no/such")]);
     }
 
     #[cfg(unix)]
