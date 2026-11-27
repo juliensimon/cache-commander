@@ -328,8 +328,11 @@ impl ProtectedSet {
         // whose target itself passes through more links is followed too. The
         // directories above each of those are held; the protected directories
         // themselves are not "above" anything.
+        // A protected directory that does not exist protects nothing, so it holds
+        // nothing up either: its existing parents have no runtime to preserve.
         let mut holders: Vec<(u64, u64)> = dirs
             .iter()
+            .filter(|d| identity(d).is_some())
             .flat_map(|d| route_dirs(d))
             .flat_map(|dir| dir.ancestors().filter_map(identity).collect::<Vec<_>>())
             .collect();
@@ -941,6 +944,32 @@ mod tests {
         assert!(!set.contains(tmp.path()));
         assert!(!set.contains(&tmp.path().join("anything")));
         assert!(!ProtectedSet::default().contains(tmp.path()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_protected_dir_does_not_make_its_existing_parents_held() {
+        // `~/.bun -> storage` exists but `storage/bin` does not: there is no
+        // runtime to preserve, so nothing above the missing directory may be refused.
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = tmp.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::os::unix::fs::symlink(&storage, home.join(".bun")).unwrap();
+        let set = ProtectedSet::from_dirs(&[home.join(".bun/bin")]);
+        assert!(!set.holds(&storage), "the existing parent");
+        assert!(!set.holds(&home));
+        assert!(!set.holds(tmp.path()));
+        assert_eq!(
+            safety_resolved_deep(CacheKind::Unknown, &storage, &set),
+            safety(CacheKind::Unknown, &storage),
+            "and it is not reported Unsafe"
+        );
+        // Control: once the runtime directory exists, the same parent IS held.
+        std::fs::create_dir_all(storage.join("bin")).unwrap();
+        let set = ProtectedSet::from_dirs(&[home.join(".bun/bin")]);
+        assert!(set.holds(&storage));
     }
 
     #[cfg(unix)]
