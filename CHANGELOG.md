@@ -160,8 +160,8 @@ Behavior changes to know about before upgrading:
   understood, and the file is read once per process.
 - Packages found inside a pnpm `index.db` are reported under a path below it
   that does not exist on disk, so the MCP `get_package_details`,
-  `search_packages` and `delete_packages` do not apply to them (scan reports do
-  show them).
+  `search_packages`, `preview_delete` and `delete_packages` do not apply to them
+  (scan reports do show them).
 - PEP 440 and SemVer ordering rest on spec-derived tests, not a reference
   implementation (Maven is checked against the real one).
 
