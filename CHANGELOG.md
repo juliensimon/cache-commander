@@ -2,9 +2,24 @@
 
 ## [Unreleased]
 
-Security hardening of deletion and of how vulnerability matches are decided,
-found by an Aikido scan and by review rounds on each fix. Two behavior changes
-are called out under Changed.
+## [0.4.5] — 2026-11-27
+
+Security hardening, found by an Aikido scan and by review rounds on each fix:
+deletion is confined to what a scan discovers, vulnerability matching fails
+closed, symlinks below a root are no longer followed, and CI is pinned. New:
+private package names can be kept off OSV and the registries (`[privacy]`),
+pnpm 11+ global stores are scanned, and a scan now says what it could not
+identify instead of skipping it silently.
+
+Behavior changes to know about before upgrading:
+- A config file with **any unknown key** (at any level) is now unusable and
+  disables all package lookups until fixed, instead of being half-ignored.
+- An MCP agent can no longer delete roots, containers, symlinks or paths inside
+  a package; the TUI refuses symlink candidates.
+- A symlink below a root is shown as a leaf: not expanded, classified or sized.
+- The vulnerability and version caches are rebuilt once on first use.
+- **Building from source** needs a C compiler (bundled SQLite) and Rust 1.89 or
+  newer (MSRV was 1.88). Release binaries are unaffected.
 
 ### Security
 - **Private package names can be kept off the network (#95)**: a
@@ -103,10 +118,12 @@ are called out under Changed.
   an invalid name or version used to vanish from the scan, so the package looked
   absent or clean. The TUI status line now says how many were skipped, and the
   MCP `scan_vulnerabilities` / `check_outdated` reports carry
-  `unidentified_manifests` (exact count) and `unidentified` (the first 100, with
-  path and reason). It covers the vulnerability scan and the version check, and
-  the count is of directories: the same broken package copied into several
-  caches counts once per copy, and each path is listed. Only npm manifests are
+  `unidentified_manifests` and `unidentified` (the first 100, with path and
+  reason). It covers the vulnerability scan and the version check. The count is
+  of directories, so the same broken package copied into several caches counts
+  once per copy, and each path is listed; for a pnpm `index.db` it is one per
+  unusable row, and a database that could not be read at all counts as one, so
+  it is a lower bound. Only npm manifests are
   covered; other providers identify a package from its path or file name.
 - **Behavior change (MCP)**: an agent can no longer delete a root, a container
   such as `~/.cache/huggingface`, a symlink, or a path inside a package. Delete
@@ -141,6 +158,10 @@ are called out under Changed.
   it with an absolute `<localRepository>` (#118); the path alone cannot tell it
   from a nested standard repository. Only an absolute path or `${user.home}` is
   understood, and the file is read once per process.
+- Packages found inside a pnpm `index.db` are reported under a path below it
+  that does not exist on disk, so the MCP `get_package_details`,
+  `search_packages` and `delete_packages` do not apply to them (scan reports do
+  show them).
 - PEP 440 and SemVer ordering rest on spec-derived tests, not a reference
   implementation (Maven is checked against the real one).
 
