@@ -536,9 +536,101 @@ impl App {
         }
     }
 
+    /// The path to actually act on for a delete candidate, or `None` if it must
+    /// be refused. The tree can expand through directory symlinks, so a node
+    /// that looks like `root/link/pkg` may really live outside the cache root
+    /// (`link -> /elsewhere`), and `remove_dir_all` would delete it there.
+    ///
+    /// - A candidate that is itself a symlink is refused: the size walk and the
+    ///   provider pre-delete hook (e.g. Go's recursive chmod) would follow it.
+    ///   The path is normalized first, since on Unix a trailing `/` makes stat
+    ///   follow the link.
+    /// - A tree root node is trusted: its scope comes from the user's config.
+    /// - Any other node must live inside its own tree root once symlinks in its
+    ///   parent chain are resolved. The returned path is the canonical parent
+    ///   plus the final name, so the checked location is the one mutated.
+    /// - A path can be several nodes at once (a configured root that is also
+    ///   reachable as a descendant of another root through a symlink). Every
+    ///   node with this path is considered, and the root interpretation only
+    ///   wins if NO match is a descendant: matching just the first node would
+    ///   let a descendant borrow a root's trust. If any descendant match fails
+    ///   containment the candidate is refused (fail closed).
+    ///
+    /// Returns `(target, logical)`. `target` is what to size, hook and remove.
+    /// `logical` is that same location re-expressed (a) under each matching
+    /// root's LOGICAL path (the configured root, not its symlink target) and
+    /// (b) through every symlinked ancestor in the displayed path. Provider
+    /// classification is path-based, so with `.bun -> /data/storage` the
+    /// resolved `/data/storage/bin/bun` has lost the `.bun` that marks it
+    /// Unsafe; its logical forms `.bun/bin/bun` have not.
+    fn scoped_delete_target(
+        &self,
+        path: &std::path::Path,
+    ) -> Option<(std::path::PathBuf, Vec<std::path::PathBuf>)> {
+        let normalized: std::path::PathBuf = path.components().collect();
+        if std::fs::symlink_metadata(&normalized).is_ok_and(|m| m.file_type().is_symlink()) {
+            return None;
+        }
+        let matches: Vec<usize> = self
+            .tree
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.path == path)
+            .map(|(i, _)| i)
+            .collect();
+        if matches.is_empty() {
+            return None;
+        }
+        let mut canonical_parent: Option<std::path::PathBuf> = None;
+        let mut logical: Vec<std::path::PathBuf> = Vec::new();
+        for idx in matches {
+            let mut root = idx;
+            while let Some(parent) = self.tree.nodes[root].parent {
+                root = parent;
+            }
+            if root == idx {
+                continue; // a root node: trusted, unless another match says otherwise
+            }
+            let canonical_root = std::fs::canonicalize(&self.tree.nodes[root].path).ok()?;
+            let parent = std::fs::canonicalize(normalized.parent()?).ok()?;
+            let relative = parent.strip_prefix(&canonical_root).ok()?;
+            logical.push(
+                self.tree.nodes[root]
+                    .path
+                    .join(relative)
+                    .join(normalized.file_name()?),
+            );
+            // The same location spelled through each symlinked ancestor of the
+            // displayed path. With `root/.bun -> root/storage`, the resolved
+            // `root/storage/bin/bun` is also `root/.bun/bin/bun`, and that
+            // spelling is the one the Unsafe classification recognizes.
+            let mut ancestor = std::path::PathBuf::new();
+            for component in normalized.parent()?.components() {
+                ancestor.push(component.as_os_str());
+                let is_link =
+                    std::fs::symlink_metadata(&ancestor).is_ok_and(|m| m.file_type().is_symlink());
+                if !is_link {
+                    continue;
+                }
+                if let Ok(link_target) = std::fs::canonicalize(&ancestor)
+                    && let Ok(below) = parent.strip_prefix(&link_target)
+                {
+                    logical.push(ancestor.join(below).join(normalized.file_name()?));
+                }
+            }
+            canonical_parent = Some(parent);
+        }
+        match canonical_parent {
+            Some(parent) => Some((parent.join(normalized.file_name()?), logical)),
+            None => Some((normalized, logical)),
+        }
+    }
+
     fn perform_delete(&mut self) {
         let mut deleted_count = 0usize;
         let mut refused_unsafe = 0usize;
+        let mut refused_scope = 0usize;
         let mut errored = 0usize;
         let mut freed = 0u64;
         let mut deleted_paths = Vec::new();
@@ -552,22 +644,50 @@ impl App {
                 continue;
             }
 
+            // #90: validate immediately before mutating, and from here on use
+            // the validated location for the size walk, the pre-delete hook
+            // and the removal (not the tree's possibly symlink-routed path).
+            let Some((target, logical)) = self.scoped_delete_target(path) else {
+                refused_scope += 1;
+                continue;
+            };
+            let target = target.as_path();
+
+            // The validated location can be classified differently from the
+            // displayed path (`.bun/alias -> .bun/bin` makes `alias/bun` look
+            // Safe while resolving to the Unsafe runtime), so enforce the
+            // safety policy on it too, before the size walk, hook or removal.
+            // The original-path refusal above stays.
+            // Also classify it under each matching root's logical path: with a
+            // symlinked root (`.bun -> /data/storage`) the resolved path has
+            // lost the component that marks it Unsafe, the logical one has not.
+            let unsafe_target = std::iter::once(target)
+                .chain(logical.iter().map(|p| p.as_path()))
+                .any(|candidate| {
+                    crate::providers::safety(crate::providers::detect(candidate), candidate)
+                        == crate::providers::SafetyLevel::Unsafe
+                });
+            if unsafe_target {
+                refused_unsafe += 1;
+                continue;
+            }
+
             // Measure size before deleting
-            let size = crate::scanner::walker::dir_size(path);
+            let size = crate::scanner::walker::dir_size(target);
 
             // Provider-specific pre-delete hook (e.g. chmod +w on Go's
             // read-only module cache). Default is a no-op. Hook errors
             // count as failures — the subsequent remove_dir_all would
             // just hit the same problem.
-            if crate::providers::pre_delete(kind, path).is_err() {
+            if crate::providers::pre_delete(kind, target).is_err() {
                 errored += 1;
                 continue;
             }
 
-            let outcome = if path.is_dir() {
-                std::fs::remove_dir_all(path)
+            let outcome = if target.is_dir() {
+                std::fs::remove_dir_all(target)
             } else {
-                std::fs::remove_file(path)
+                std::fs::remove_file(target)
             };
             match outcome {
                 Ok(()) => {
@@ -607,6 +727,13 @@ impl App {
                 "refused {} Unsafe item{}",
                 refused_unsafe,
                 if refused_unsafe == 1 { "" } else { "s" }
+            ));
+        }
+        if refused_scope > 0 {
+            parts.push(format!(
+                "refused {} item{} that are symlinks or resolve outside their cache root",
+                refused_scope,
+                if refused_scope == 1 { "" } else { "s" }
             ));
         }
         if errored > 0 {
@@ -1098,6 +1225,16 @@ mod tests {
         n.size = 1024;
         n.has_children = false;
         n.children_loaded = true;
+        n
+    }
+
+    /// Like `mk_node_with_path`, but a directory whose children have NOT been
+    /// loaded yet, so `TreeState::insert_children` (a silent no-op on a node
+    /// with `children_loaded`) will actually attach children to it.
+    fn expandable_node(name: &str, path: PathBuf, kind: CacheKind) -> TreeNode {
+        let mut n = mk_node_with_path(name, path, kind);
+        n.has_children = true;
+        n.children_loaded = false;
         n
     }
 
@@ -1857,6 +1994,420 @@ mod tests {
             msg.contains("refused") || msg.contains("skipped") || msg.contains("Unsafe"),
             "status should surface the refusal: {msg}"
         );
+    }
+
+    // --- #90: deletion must stay inside the candidate's own cache root -----
+
+    /// `<tmp>/root` (tree root) with `root/link -> <tmp>/outside`, where
+    /// `outside/victim/data.txt` is data that must never be deleted. Returns
+    /// the app with the tree root loaded, and the paths.
+    #[cfg(unix)]
+    fn app_with_symlink_escape() -> (tempfile::TempDir, App, PathBuf, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(outside.join("victim")).unwrap();
+        std::fs::write(outside.join("victim/data.txt"), b"precious").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+
+        let (mut app, _tx, _rx) = build_app(bare_config());
+        app.tree.set_roots(vec![expandable_node(
+            "root",
+            root.clone(),
+            CacheKind::Cargo,
+        )]);
+        (tmp, app, root, outside)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn perform_delete_refuses_a_candidate_reached_through_a_symlinked_directory() {
+        // The tree can expand through `root/link -> outside`, so a node like
+        // `root/link/victim` looks like it is inside the root but is not.
+        // remove_dir_all on that path deletes the REAL outside directory.
+        let (_tmp, mut app, root, outside) = app_with_symlink_escape();
+        let link = root.join("link");
+        app.tree.insert_children(
+            0,
+            vec![expandable_node("link", link.clone(), CacheKind::Cargo)],
+        );
+        let victim = link.join("victim");
+        app.tree.insert_children(
+            1,
+            vec![mk_node_with_path(
+                "victim",
+                victim.clone(),
+                CacheKind::Cargo,
+            )],
+        );
+        assert!(
+            app.tree.nodes.iter().any(|n| n.path == victim),
+            "precondition: the candidate must be a tree node (else it is refused for the wrong reason)"
+        );
+        app.delete_candidates = vec![victim];
+
+        app.perform_delete();
+
+        assert!(
+            outside.join("victim/data.txt").exists(),
+            "data outside the cache root must survive"
+        );
+        let msg = app.status_msg.as_deref().unwrap_or("");
+        assert!(msg.contains("refused"), "refusal must be surfaced: {msg}");
+        assert!(!msg.contains("Deleted"), "nothing was deleted: {msg}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn perform_delete_refuses_a_symlink_candidate() {
+        // Deleting a symlink node must not touch its target, and the size and
+        // provider pre-delete hooks must not follow it either; refuse it.
+        let (_tmp, mut app, root, outside) = app_with_symlink_escape();
+        let link = root.join("link");
+        app.tree.insert_children(
+            0,
+            vec![mk_node_with_path("link", link.clone(), CacheKind::Cargo)],
+        );
+        assert!(
+            app.tree.nodes.iter().any(|n| n.path == link),
+            "precondition: the candidate must be a tree node"
+        );
+        app.delete_candidates = vec![link.clone()];
+
+        app.perform_delete();
+
+        assert!(
+            std::fs::symlink_metadata(&link).is_ok(),
+            "the symlink itself is left alone"
+        );
+        assert!(outside.join("victim/data.txt").exists());
+        assert!(app.status_msg.as_deref().unwrap_or("").contains("refused"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn perform_delete_still_deletes_children_and_in_root_symlink_paths() {
+        // Controls: a plain child is deleted, and a path through a symlink that
+        // stays INSIDE the root is the same entry and still works.
+        let (_tmp, mut app, root, _outside) = app_with_symlink_escape();
+        std::fs::create_dir_all(root.join("real/pkg")).unwrap();
+        std::fs::write(root.join("real/pkg/f"), b"x").unwrap();
+        std::fs::create_dir_all(root.join("plain")).unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("alias")).unwrap();
+        app.tree.insert_children(
+            0,
+            vec![
+                mk_node_with_path("plain", root.join("plain"), CacheKind::Cargo),
+                expandable_node("alias", root.join("alias"), CacheKind::Cargo),
+            ],
+        );
+        // Candidates always come from the tree: expand `alias` so that
+        // `alias/pkg` is a real node beneath it.
+        let alias_idx = app
+            .tree
+            .nodes
+            .iter()
+            .position(|n| n.path == root.join("alias"))
+            .unwrap();
+        let via_alias = root.join("alias/pkg");
+        app.tree.insert_children(
+            alias_idx,
+            vec![mk_node_with_path(
+                "pkg",
+                via_alias.clone(),
+                CacheKind::Cargo,
+            )],
+        );
+        app.delete_candidates = vec![root.join("plain"), via_alias];
+
+        app.perform_delete();
+
+        assert!(!root.join("plain").exists(), "plain child deleted");
+        assert!(
+            !root.join("real/pkg").exists(),
+            "in-root alias path deleted"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn perform_delete_refuses_a_candidate_that_is_not_a_tree_node() {
+        // Candidates come from the tree. A path with no node cannot be tied to
+        // a cache root, so it is refused rather than trusted.
+        let (_tmp, mut app, _root, outside) = app_with_symlink_escape();
+        let stray = outside.join("victim");
+        app.delete_candidates = vec![stray.clone()];
+
+        app.perform_delete();
+
+        assert!(stray.join("data.txt").exists(), "stray path must survive");
+        assert!(app.status_msg.as_deref().unwrap_or("").contains("refused"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn perform_delete_rechecks_safety_on_the_resolved_target() {
+        // `.bun/alias -> .bun/bin`, so the node `.bun/alias/bun` looks Safe by
+        // its displayed path but resolves to the Unsafe `.bun/bin/bun` runtime.
+        // Safety must be enforced on the location that will actually be removed.
+        let tmp = tempfile::tempdir().unwrap();
+        let bun_root = tmp.path().join(".bun");
+        let bin = bun_root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("bun"), b"runtime").unwrap();
+        std::os::unix::fs::symlink(&bin, bun_root.join("alias")).unwrap();
+        let displayed = bun_root.join("alias/bun");
+
+        // Precondition: judged by the displayed path alone it is NOT Unsafe,
+        // otherwise the existing path-based refusal would hide this bug.
+        let kind = crate::providers::detect(&displayed);
+        assert_ne!(
+            crate::providers::safety(kind, &displayed),
+            crate::providers::SafetyLevel::Unsafe,
+            "fixture must look safe by its displayed path"
+        );
+
+        let (mut app, _tx, _rx) = build_app(bare_config());
+        app.tree.set_roots(vec![expandable_node(
+            ".bun",
+            bun_root.clone(),
+            CacheKind::Bun,
+        )]);
+        app.tree.insert_children(
+            0,
+            vec![expandable_node(
+                "alias",
+                bun_root.join("alias"),
+                CacheKind::Bun,
+            )],
+        );
+        app.tree.insert_children(
+            1,
+            vec![mk_node_with_path("bun", displayed.clone(), CacheKind::Bun)],
+        );
+        assert!(app.tree.nodes.iter().any(|n| n.path == displayed));
+        app.delete_candidates = vec![displayed];
+
+        app.perform_delete();
+
+        assert!(bin.join("bun").exists(), "the Unsafe runtime must survive");
+        assert!(app.status_msg.as_deref().unwrap_or("").contains("refused"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn perform_delete_classifies_the_resolved_target_under_a_symlinked_root() {
+        // `.bun` itself is a symlink to `storage/` (a common setup). The
+        // resolved path `<tmp>/storage/bin/bun` has no `.bun` component, so
+        // classifying it on its own looks harmless and the runtime would be
+        // deleted. The location must also be classified under the root's
+        // LOGICAL path (`.bun/bin/bun`), where it is Unsafe.
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = tmp.path().join("storage");
+        let bin = storage.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("bun"), b"runtime").unwrap();
+        std::os::unix::fs::symlink(&bin, storage.join("alias")).unwrap();
+        let bun_root = tmp.path().join(".bun");
+        std::os::unix::fs::symlink(&storage, &bun_root).unwrap();
+        let displayed = bun_root.join("alias/bun");
+
+        // Preconditions: Safe by its displayed path, and the resolved path
+        // alone is also not Unsafe (otherwise this would not be the bug).
+        let kind = crate::providers::detect(&displayed);
+        assert_ne!(
+            crate::providers::safety(kind, &displayed),
+            crate::providers::SafetyLevel::Unsafe
+        );
+        let resolved = std::fs::canonicalize(&displayed).unwrap();
+        assert_ne!(
+            crate::providers::safety(crate::providers::detect(&resolved), &resolved),
+            crate::providers::SafetyLevel::Unsafe,
+            "fixture: the resolved path alone must look safe"
+        );
+        assert_eq!(
+            crate::providers::safety(
+                crate::providers::detect(&bun_root.join("bin/bun")),
+                &bun_root.join("bin/bun")
+            ),
+            crate::providers::SafetyLevel::Unsafe,
+            "fixture: the logical location of the runtime must be Unsafe"
+        );
+
+        let (mut app, _tx, _rx) = build_app(bare_config());
+        app.tree.set_roots(vec![expandable_node(
+            ".bun",
+            bun_root.clone(),
+            CacheKind::Bun,
+        )]);
+        app.tree.insert_children(
+            0,
+            vec![expandable_node(
+                "alias",
+                bun_root.join("alias"),
+                CacheKind::Bun,
+            )],
+        );
+        app.tree.insert_children(
+            1,
+            vec![mk_node_with_path("bun", displayed.clone(), CacheKind::Bun)],
+        );
+        assert!(app.tree.nodes.iter().any(|n| n.path == displayed));
+        app.delete_candidates = vec![displayed];
+
+        app.perform_delete();
+
+        assert!(bin.join("bun").exists(), "the Unsafe runtime must survive");
+        assert!(app.status_msg.as_deref().unwrap_or("").contains("refused"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn perform_delete_classifies_under_a_symlink_that_is_inside_the_root() {
+        // The symlink is INSIDE the configured root, not the root itself:
+        //   <root>/.bun          -> <root>/storage
+        //   <root>/storage/alias -> <root>/storage/bin
+        // Selecting `<root>/.bun/alias/bun` resolves to
+        // `<root>/storage/bin/bun`. Re-rooting that at the configured root still
+        // gives `<root>/storage/bin/bun` (no `.bun`); only spelling it through
+        // the symlinked ancestor, `<root>/.bun/bin/bun`, shows it is Unsafe.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let storage = root.join("storage");
+        let bin = storage.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("bun"), b"runtime").unwrap();
+        std::os::unix::fs::symlink(&bin, storage.join("alias")).unwrap();
+        std::os::unix::fs::symlink(&storage, root.join(".bun")).unwrap();
+        let displayed = root.join(".bun/alias/bun");
+
+        let unsafe_at = |p: &std::path::Path| {
+            crate::providers::safety(crate::providers::detect(p), p)
+                == crate::providers::SafetyLevel::Unsafe
+        };
+        assert!(!unsafe_at(&displayed), "fixture: safe by displayed path");
+        assert!(
+            !unsafe_at(&std::fs::canonicalize(&displayed).unwrap()),
+            "fixture: the resolved path alone looks safe"
+        );
+        assert!(
+            !unsafe_at(&root.join("storage/bin/bun")),
+            "fixture: re-rooting at the configured root also loses `.bun`"
+        );
+        assert!(
+            unsafe_at(&root.join(".bun/bin/bun")),
+            "fixture: spelled through the symlinked ancestor it is Unsafe"
+        );
+
+        let (mut app, _tx, _rx) = build_app(bare_config());
+        app.tree.set_roots(vec![expandable_node(
+            "root",
+            root.clone(),
+            CacheKind::Cargo,
+        )]);
+        app.tree.insert_children(
+            0,
+            vec![expandable_node(".bun", root.join(".bun"), CacheKind::Bun)],
+        );
+        let bun_idx = app
+            .tree
+            .nodes
+            .iter()
+            .position(|n| n.path == root.join(".bun"))
+            .unwrap();
+        app.tree.insert_children(
+            bun_idx,
+            vec![expandable_node(
+                "alias",
+                root.join(".bun/alias"),
+                CacheKind::Bun,
+            )],
+        );
+        let alias_idx = app
+            .tree
+            .nodes
+            .iter()
+            .position(|n| n.path == root.join(".bun/alias"))
+            .unwrap();
+        app.tree.insert_children(
+            alias_idx,
+            vec![mk_node_with_path("bun", displayed.clone(), CacheKind::Bun)],
+        );
+        assert!(app.tree.nodes.iter().any(|n| n.path == displayed));
+        app.delete_candidates = vec![displayed];
+
+        app.perform_delete();
+
+        assert!(bin.join("bun").exists(), "the Unsafe runtime must survive");
+        assert!(app.status_msg.as_deref().unwrap_or("").contains("refused"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn perform_delete_does_not_trust_a_path_that_is_also_a_descendant() {
+        // `root/link/victim` is configured as its own root AND appears as a
+        // descendant of `root` through `link -> outside`. Matching the first
+        // node by pathname can pick the trusted root interpretation and skip
+        // containment. A path that is a descendant anywhere must satisfy
+        // containment for that descendant, so this is refused (fail closed).
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(outside.join("victim")).unwrap();
+        std::fs::write(outside.join("victim/data.txt"), b"precious").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+        let victim = root.join("link/victim");
+
+        let (mut app, _tx, _rx) = build_app(bare_config());
+        // The victim root comes FIRST so a first-match lookup finds it.
+        app.tree.set_roots(vec![
+            mk_node_with_path("victim-root", victim.clone(), CacheKind::Cargo),
+            expandable_node("root", root.clone(), CacheKind::Cargo),
+        ]);
+        let root_idx = app.tree.nodes.iter().position(|n| n.path == root).unwrap();
+        app.tree.insert_children(
+            root_idx,
+            vec![expandable_node("link", root.join("link"), CacheKind::Cargo)],
+        );
+        let link_idx = app
+            .tree
+            .nodes
+            .iter()
+            .position(|n| n.path == root.join("link"))
+            .unwrap();
+        app.tree.insert_children(
+            link_idx,
+            vec![mk_node_with_path(
+                "victim",
+                victim.clone(),
+                CacheKind::Cargo,
+            )],
+        );
+        let matches: Vec<usize> = app
+            .tree
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.path == victim)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            matches.len(),
+            2,
+            "precondition: the path is a root and a descendant"
+        );
+        assert_eq!(app.tree.nodes[matches[0]].parent, None, "root comes first");
+        app.delete_candidates = vec![victim];
+
+        app.perform_delete();
+
+        assert!(
+            outside.join("victim/data.txt").exists(),
+            "data outside the cache root must survive"
+        );
+        assert!(app.status_msg.as_deref().unwrap_or("").contains("refused"));
     }
 
     // --- M3: perform_delete error paths -----------------------------------
