@@ -20,6 +20,12 @@ are called out under Changed.
   on-disk lookup caches the next time a scan runs. Config files with
   stale or misspelt keys that used to be ignored now disable lookups until
   they are fixed; the warning and the status line name the cause.
+- **Symlinks below a root are leaves (#92, #93)**: package discovery skips
+  them, so a package behind a link is no longer read and its name no longer
+  sent to OSV or a registry; tree expansion lists a link but does not open,
+  classify or size it, and the MCP listing does the same; `v` / `o` on a
+  selected link say so instead of scanning it. Sizing already
+  ignored links (#127). A root that is itself a link is still followed.
 - **MCP delete is limited to discovered entries (#119)**: `delete_packages`
   only removes entries that discovery lists (what `search_packages` returns),
   never a configured root, a provider container, a symlink, or a path inside a
@@ -62,6 +68,12 @@ are called out under Changed.
   on purpose, to surface upstream releases.
 
 ### Changed
+- **Behavior change (tree)**: a symlink below a root is shown as a leaf with no
+  size and is not classified. For a directory, such as `~/.cache/pip` pointing
+  at another volume, that also means it cannot be expanded: add its target as a
+  root to browse it. For a file, such as the links to blobs in a Hugging Face
+  snapshot, the size is the blob's, counted where the blob lives; the parent
+  directory already treated links as 0.
 - **Behavior change (MCP)**: an agent can no longer delete a root, a container
   such as `~/.cache/huggingface`, a symlink, or a path inside a package. Delete
   the discovered entries instead.
@@ -87,8 +99,9 @@ are called out under Changed.
   were. A process that loaded a cache before a package was marked private can
   write that entry back when it saves; the next scan under the new list removes
   it again. Nothing is sent meanwhile: the list is applied before any request.
-- Tree expansion and provider file reads still follow symlinked directories;
-  only sizing was fixed (#92, #93).
+- A symlinked *file* inside a package directory (for example a `package.json`
+  that is a link) is still read by the provider that parses it. Directories
+  reached through links are no longer entered (#92, #93).
 - pnpm 11 and later global stores are not identified for vulnerability scanning
   because their package index moved to SQLite (#39).
 - A custom-named Maven repository whose group id contains a `repository`
