@@ -48,7 +48,11 @@ pub struct App {
     pub scanner_dead: bool,
     pub update_info: Option<crate::updater::UpdateInfo>,
     update_rx: mpsc::Receiver<crate::updater::UpdateMsg>,
-    /// Directories deletion must never touch, by file identity (#122).
+    /// Where each provider keeps what deletion must never touch (#122).
+    protected_dirs: Vec<std::path::PathBuf>,
+    /// Their file identities, taken when a delete is started (not only at
+    /// startup, which can be hours earlier) so the confirmation dialog and the
+    /// decision share a current view.
     protected: crate::providers::ProtectedSet,
 }
 
@@ -87,6 +91,7 @@ impl App {
             update_info: None,
             update_rx,
             protected: crate::providers::ProtectedSet::resolve(),
+            protected_dirs: crate::providers::protected_dirs(),
         }
     }
 
@@ -397,6 +402,7 @@ impl App {
                     .iter()
                     .filter_map(|&idx| self.tree.nodes.get(idx).map(|n| n.path.clone()))
                     .collect();
+                self.protected = crate::providers::ProtectedSet::from_dirs(&self.protected_dirs);
                 if self.config.confirm_delete {
                     self.mode = AppMode::Deleting;
                 } else {
@@ -2308,6 +2314,37 @@ mod tests {
             tools.join("pkg/f").exists(),
             "data under the protected directory must survive"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn starting_a_delete_takes_a_fresh_view_of_the_protected_dirs() {
+        // The set is not only a startup snapshot: a runtime installed (or replaced)
+        // while the TUI is open must be protected when a delete is started.
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = tmp.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let bin = storage.join("bin");
+        let (mut app, _tx, _rx) = build_app(bare_config());
+        app.protected_dirs = vec![bin.clone()];
+        app.protected = crate::providers::ProtectedSet::from_dirs(&app.protected_dirs);
+        assert!(!app.protected.contains(&bin), "nothing to protect yet");
+
+        // Bun is installed after startup.
+        std::fs::create_dir_all(&bin).unwrap();
+        app.tree.set_roots(vec![expandable_node(
+            "storage",
+            storage.clone(),
+            CacheKind::Unknown,
+        )]);
+        app.tree.marked.insert(0);
+        app.process_key(KeyEvent::new(
+            KeyCode::Char('d'),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+
+        assert!(app.protected.contains(&bin), "the new runtime is protected");
+        assert!(app.protected.holds(&storage));
     }
 
     #[cfg(unix)]

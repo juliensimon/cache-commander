@@ -26,8 +26,11 @@ use tools::*;
 #[derive(Clone)]
 pub struct CcmdMcp {
     roots: Vec<PathBuf>,
-    /// Directories deletion must never touch, by file identity (#122).
-    protected: providers::ProtectedSet,
+    /// Where each provider keeps what deletion must never touch (#122). Their
+    /// identities are resolved at each decision (`protected()`), not once here: an
+    /// MCP server can run for days, and a runtime installed or replaced after
+    /// startup must still be protected.
+    protected_dirs: Vec<PathBuf>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -162,7 +165,7 @@ impl CcmdMcp {
         let tool_router = Self::tool_router();
         Self {
             roots: config.roots.clone(),
-            protected: providers::ProtectedSet::resolve(),
+            protected_dirs: providers::protected_dirs(),
             tool_router,
         }
     }
@@ -244,6 +247,11 @@ impl CcmdMcp {
         nodes.push(node);
     }
 
+    /// The protected set as it is NOW.
+    fn protected(&self) -> providers::ProtectedSet {
+        providers::ProtectedSet::from_dirs(&self.protected_dirs)
+    }
+
     fn provider_label(node: &TreeNode) -> String {
         let label = node.kind.label();
         if !label.is_empty() {
@@ -292,6 +300,7 @@ impl CcmdMcp {
         let mut safe_count = 0usize;
         let mut caution_count = 0usize;
         let mut unsafe_count = 0usize;
+        let protected = self.protected();
 
         for node in &nodes {
             total_size += node.size;
@@ -300,7 +309,7 @@ impl CcmdMcp {
             entry.0 += node.size;
             entry.1 += 1;
 
-            match providers::safety_resolved_deep(node.kind, &node.path, &self.protected) {
+            match providers::safety_resolved_deep(node.kind, &node.path, &protected) {
                 providers::SafetyLevel::Safe => safe_count += 1,
                 providers::SafetyLevel::Caution => caution_count += 1,
                 providers::SafetyLevel::Unsafe => unsafe_count += 1,
@@ -371,6 +380,7 @@ impl CcmdMcp {
 
         let result = tokio::task::spawn_blocking(move || {
             let nodes = server.walk_roots();
+            let protected = server.protected();
             let matches: Vec<PackageEntry> = nodes
                 .into_iter()
                 .filter(|node| {
@@ -383,8 +393,7 @@ impl CcmdMcp {
                     name_match && eco_match
                 })
                 .map(|node| {
-                    let safety =
-                        providers::safety_resolved_deep(node.kind, &node.path, &server.protected);
+                    let safety = providers::safety_resolved_deep(node.kind, &node.path, &protected);
                     PackageEntry {
                         name: node.name.clone(),
                         version: providers::package_id(node.kind, &node.path)
@@ -461,7 +470,7 @@ impl CcmdMcp {
             return Ok("Path is not inside any configured cache root.".to_string());
         }
 
-        let protected = self.protected.clone();
+        let protected = self.protected();
         let result = tokio::task::spawn_blocking(move || {
             let kind = providers::detect(&path);
             let safety = providers::safety_resolved_deep(kind, &path, &protected);
@@ -664,7 +673,7 @@ impl CcmdMcp {
         #[allow(clippy::unnecessary_filter_map)]
         let paths: Vec<PathBuf> = input.0.paths.iter().map(PathBuf::from).collect();
         let roots = self.roots.clone();
-        let protected = self.protected.clone();
+        let protected = self.protected();
 
         #[allow(clippy::unnecessary_filter_map)]
         let result = tokio::task::spawn_blocking(move || {
@@ -778,7 +787,7 @@ impl CcmdMcp {
         let paths: Vec<PathBuf> = input.paths.iter().map(PathBuf::from).collect();
         let confirm_caution = input.confirm_caution;
         let roots = self.roots.clone();
-        let protected = self.protected.clone();
+        let protected = self.protected();
 
         let result = tokio::task::spawn_blocking(move || {
             let deletable = deletable_paths(&roots);
@@ -982,7 +991,7 @@ mod tests {
         let mut config = Config::default_for_test();
         config.roots = vec![storage.clone()];
         let mut server = CcmdMcp::new(&config);
-        server.protected = providers::ProtectedSet::from_dirs(&[home.join(".bun/bin")]);
+        server.protected_dirs = vec![home.join(".bun/bin")];
         (dir, server, storage.join("bin"), storage.join("install"))
     }
 
@@ -1038,7 +1047,7 @@ mod tests {
         let mut config = Config::default_for_test();
         config.roots = vec![data.clone()];
         let mut server = CcmdMcp::new(&config);
-        server.protected = providers::ProtectedSet::from_dirs(&[home.join(".bun/bin")]);
+        server.protected_dirs = vec![home.join(".bun/bin")];
 
         let result = call_delete(&server, &[&storage, &other], true).await;
         assert!(
@@ -1069,7 +1078,7 @@ mod tests {
         let mut config = Config::default_for_test();
         config.roots = vec![alias.clone()];
         let mut server = CcmdMcp::new(&config);
-        server.protected = providers::ProtectedSet::from_dirs(&[home.join(".bun/bin")]);
+        server.protected_dirs = vec![home.join(".bun/bin")];
         let out = server
             .get_package_details(Parameters(tools::DetailsInput {
                 path: Some(alias.join("pkg").to_string_lossy().to_string()),
@@ -1108,13 +1117,58 @@ mod tests {
         let mut config = Config::default_for_test();
         config.roots = vec![data.clone()];
         let mut server = CcmdMcp::new(&config);
-        server.protected = providers::ProtectedSet::from_dirs(&[home.join(".bun/bin")]);
+        server.protected_dirs = vec![home.join(".bun/bin")];
 
         let result = call_delete(&server, &[&a, &other], true).await;
         assert!(a.join("bin").exists(), "the route must survive: {result}");
         assert!(
             !other.exists(),
             "control: an unrelated sibling is deleted: {result}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_runtime_installed_after_the_server_started_is_still_protected() {
+        // An MCP server can run for days. `~/.bun/bin` does not exist when it
+        // starts; Bun is installed later. Deleting the entry that now holds it
+        // must be refused: the protected set is resolved at each decision, not once.
+        let dir = TempDir::new().unwrap();
+        let data = dir.path().join("data");
+        let storage = data.join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::os::unix::fs::symlink(&storage, home.join(".bun")).unwrap();
+        let mut config = Config::default_for_test();
+        config.roots = vec![data.clone()];
+        let mut server = CcmdMcp::new(&config);
+        server.protected_dirs = vec![home.join(".bun/bin")];
+
+        // Before: nothing to protect, so the entry is an ordinary Caution item.
+        let out = server
+            .preview_delete(Parameters(tools::PreviewDeleteInput {
+                paths: vec![storage.to_string_lossy().to_string()],
+            }))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(
+            !v["items"][0]["safety_level"]
+                .as_str()
+                .unwrap()
+                .starts_with("Unsafe"),
+            "precondition: {v}"
+        );
+
+        // Bun is installed while the server runs.
+        std::fs::create_dir_all(storage.join("bin")).unwrap();
+        std::fs::write(storage.join("bin/bun"), b"runtime").unwrap();
+
+        let result = call_delete(&server, &[&storage], true).await;
+        assert!(
+            storage.join("bin/bun").exists(),
+            "the runtime installed after startup must survive: {result}"
         );
     }
 

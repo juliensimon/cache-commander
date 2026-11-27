@@ -458,7 +458,7 @@ fn identity(_path: &Path) -> Option<(u64, u64)> {
 }
 
 /// Where each provider keeps what must not be deleted (the Unsafe set in `safety`).
-fn protected_dirs() -> Vec<PathBuf> {
+pub fn protected_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     // Bun: the runtime binary lives in `$BUN_INSTALL/bin` (default `~/.bun/bin`).
     if let Some(install) = std::env::var_os("BUN_INSTALL").filter(|v| !v.is_empty()) {
