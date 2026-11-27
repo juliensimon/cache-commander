@@ -26,6 +26,8 @@ use tools::*;
 #[derive(Clone)]
 pub struct CcmdMcp {
     roots: Vec<PathBuf>,
+    /// Directories deletion must never touch, by file identity (#122).
+    protected: providers::ProtectedSet,
     tool_router: ToolRouter<Self>,
 }
 
@@ -160,6 +162,7 @@ impl CcmdMcp {
         let tool_router = Self::tool_router();
         Self {
             roots: config.roots.clone(),
+            protected: providers::ProtectedSet::resolve(),
             tool_router,
         }
     }
@@ -297,7 +300,7 @@ impl CcmdMcp {
             entry.0 += node.size;
             entry.1 += 1;
 
-            match providers::safety(node.kind, &node.path) {
+            match providers::safety_resolved(node.kind, &node.path, &self.protected) {
                 providers::SafetyLevel::Safe => safe_count += 1,
                 providers::SafetyLevel::Caution => caution_count += 1,
                 providers::SafetyLevel::Unsafe => unsafe_count += 1,
@@ -380,7 +383,8 @@ impl CcmdMcp {
                     name_match && eco_match
                 })
                 .map(|node| {
-                    let safety = providers::safety(node.kind, &node.path);
+                    let safety =
+                        providers::safety_resolved(node.kind, &node.path, &server.protected);
                     PackageEntry {
                         name: node.name.clone(),
                         version: providers::package_id(node.kind, &node.path)
@@ -457,9 +461,10 @@ impl CcmdMcp {
             return Ok("Path is not inside any configured cache root.".to_string());
         }
 
+        let protected = self.protected.clone();
         let result = tokio::task::spawn_blocking(move || {
             let kind = providers::detect(&path);
-            let safety = providers::safety(kind, &path);
+            let safety = providers::safety_resolved(kind, &path, &protected);
             let size = walker::dir_size(&path);
             let last_modified = path
                 .metadata()
@@ -659,6 +664,7 @@ impl CcmdMcp {
         #[allow(clippy::unnecessary_filter_map)]
         let paths: Vec<PathBuf> = input.0.paths.iter().map(PathBuf::from).collect();
         let roots = self.roots.clone();
+        let protected = self.protected.clone();
 
         #[allow(clippy::unnecessary_filter_map)]
         let result = tokio::task::spawn_blocking(move || {
@@ -710,7 +716,7 @@ impl CcmdMcp {
                         }
                     };
                     let kind = providers::detect(&canonical);
-                    let safety = providers::safety(kind, &canonical);
+                    let safety = providers::safety_resolved(kind, &canonical, &protected);
                     let size = walker::dir_size(&canonical);
                     let name = providers::semantic_name(kind, &canonical).unwrap_or_else(|| {
                         canonical
@@ -772,6 +778,7 @@ impl CcmdMcp {
         let paths: Vec<PathBuf> = input.paths.iter().map(PathBuf::from).collect();
         let confirm_caution = input.confirm_caution;
         let roots = self.roots.clone();
+        let protected = self.protected.clone();
 
         let result = tokio::task::spawn_blocking(move || {
             let deletable = deletable_paths(&roots);
@@ -812,7 +819,7 @@ impl CcmdMcp {
                     }
                 };
                 let kind = providers::detect(&canonical);
-                let safety = providers::safety(kind, &canonical);
+                let safety = providers::safety_resolved(kind, &canonical, &protected);
                 let name = providers::semantic_name(kind, &canonical).unwrap_or_else(|| {
                     canonical
                         .file_name()
@@ -953,6 +960,89 @@ mod tests {
             .expect("shared store must be listed");
         assert!(store.size >= 8192, "store size {}", store.size);
         assert!(nodes.iter().any(|n| n.name == "[model] org/m"));
+    }
+
+    // --- protected locations by file identity (#122) ---
+
+    /// `home/.bun -> storage/`, with `storage/` a configured root holding the
+    /// Bun runtime in `storage/bin` and an ordinary `storage/install`. The paths
+    /// the server sees contain no `.bun`, so name-based safety calls `storage/bin`
+    /// Caution, which `confirm_caution` would then delete.
+    #[cfg(unix)]
+    fn bun_behind_a_symlink_server() -> (TempDir, CcmdMcp, PathBuf, PathBuf) {
+        let dir = TempDir::new().unwrap();
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(storage.join("bin")).unwrap();
+        std::fs::write(storage.join("bin/bun"), b"runtime").unwrap();
+        std::fs::create_dir_all(storage.join("install")).unwrap();
+        std::fs::write(storage.join("install/f"), b"x").unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::os::unix::fs::symlink(&storage, home.join(".bun")).unwrap();
+        let mut config = Config::default_for_test();
+        config.roots = vec![storage.clone()];
+        let mut server = CcmdMcp::new(&config);
+        server.protected = providers::ProtectedSet::from_dirs(&[home.join(".bun/bin")]);
+        (dir, server, storage.join("bin"), storage.join("install"))
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn delete_refuses_a_protected_dir_even_with_confirm_caution() {
+        let (_dir, server, bin, install) = bun_behind_a_symlink_server();
+        // Precondition: both are discovered entries, and the protected one is
+        // only Caution by name, so confirm_caution is what would let it through.
+        let kind = providers::detect(&bin);
+        assert_ne!(
+            providers::safety(kind, &bin),
+            providers::SafetyLevel::Unsafe,
+            "fixture must be invisible to name-based classification"
+        );
+        let result = call_delete(&server, &[&bin, &install], true).await;
+        assert!(
+            bin.join("bun").exists(),
+            "the runtime must survive: {result}"
+        );
+        let skipped: Vec<_> = result["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["path"].as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            skipped.iter().any(|p| p.ends_with("storage/bin")),
+            "refusal must be reported: {result}"
+        );
+        // Control: the unprotected sibling is deleted.
+        assert!(!install.exists(), "unprotected sibling: {result}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn preview_delete_agrees_a_protected_dir_would_not_be_deleted() {
+        let (_dir, server, bin, install) = bun_behind_a_symlink_server();
+        let out = server
+            .preview_delete(Parameters(tools::PreviewDeleteInput {
+                paths: vec![
+                    bin.to_string_lossy().to_string(),
+                    install.to_string_lossy().to_string(),
+                ],
+            }))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let items = v["items"].as_array().unwrap();
+        let by_suffix = |s: &str| {
+            items
+                .iter()
+                .find(|i| i["path"].as_str().unwrap().ends_with(s))
+                .unwrap()
+        };
+        let level = |s: &str| by_suffix(s)["safety_level"].as_str().unwrap().to_string();
+        assert!(level("storage/bin").starts_with("Unsafe"), "{v}");
+        assert_eq!(by_suffix("storage/bin")["would_delete"], false, "{v}");
+        // Control: preview must not over-refuse.
+        assert!(!level("storage/install").starts_with("Unsafe"), "{v}");
     }
 
     // --- delete scope: only discovered cache entries are deletable (#91) ---

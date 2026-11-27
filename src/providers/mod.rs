@@ -22,7 +22,7 @@ pub mod xcode;
 pub mod yarn;
 
 use crate::tree::node::CacheKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct MetadataField {
@@ -296,6 +296,81 @@ pub fn package_id(kind: CacheKind, path: &Path) -> Option<PackageId> {
     }
 }
 
+/// Directories whose removal would break a tool, as file identities (device and
+/// inode) rather than path strings (#122). `safety()` classifies by name, so a
+/// route to the same directory that lacks the marking component (`.bun` being a
+/// symlink to `storage/`, with `storage/` configured as a root) looks harmless.
+/// An identity does not depend on how the path was reached: a target is
+/// protected if it, or any of its ancestors, IS one of these directories.
+#[derive(Clone, Debug, Default)]
+pub struct ProtectedSet {
+    identities: Vec<(u64, u64)>,
+}
+
+impl ProtectedSet {
+    /// The protected directories of every provider on this machine, resolved
+    /// through symlinks now; ones that do not exist are skipped (nothing to protect).
+    pub fn resolve() -> Self {
+        Self::from_dirs(&protected_dirs())
+    }
+
+    /// Identities of the given directories (symlinks followed, missing ones skipped).
+    pub fn from_dirs(dirs: &[PathBuf]) -> Self {
+        Self {
+            identities: dirs.iter().filter_map(|d| identity(d)).collect(),
+        }
+    }
+
+    /// True if `target` is a protected directory or lies under one. Each of its
+    /// ancestors is stat'ed, which follows symlinks, so how the path was spelled
+    /// (through a symlinked parent, a symlinked root, a different name) does not
+    /// matter: only whether a directory on the way IS a protected one.
+    pub fn contains(&self, target: &Path) -> bool {
+        !self.identities.is_empty()
+            && target
+                .ancestors()
+                .filter_map(identity)
+                .any(|id| self.identities.contains(&id))
+    }
+}
+
+/// (device, inode) of what `path` resolves to; `None` if it does not exist.
+#[cfg(unix)]
+fn identity(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
+}
+
+/// No file identity off Unix (ccmd targets macOS and Linux): nothing is protected
+/// by identity there, the name-based rules in `safety` still apply.
+#[cfg(not(unix))]
+fn identity(_path: &Path) -> Option<(u64, u64)> {
+    None
+}
+
+/// Where each provider keeps what must not be deleted (the Unsafe set in `safety`).
+fn protected_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    // Bun: the runtime binary lives in `$BUN_INSTALL/bin` (default `~/.bun/bin`).
+    if let Some(install) = std::env::var_os("BUN_INSTALL").filter(|v| !v.is_empty()) {
+        dirs.push(PathBuf::from(install).join("bin"));
+    }
+    if let Some(home) = directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf()) {
+        dirs.push(home.join(".bun").join("bin"));
+    }
+    dirs
+}
+
+/// `safety`, but a target that is or lies under a protected directory is Unsafe
+/// whatever its name says.
+pub fn safety_resolved(kind: CacheKind, path: &Path, protected: &ProtectedSet) -> SafetyLevel {
+    if protected.contains(path) {
+        SafetyLevel::Unsafe
+    } else {
+        safety(kind, path)
+    }
+}
+
 /// Sanitize a string for safe use in a shell command.
 /// Rejects names containing shell metacharacters.
 fn is_safe_for_shell(s: &str) -> bool {
@@ -517,6 +592,72 @@ pub fn pre_delete(kind: CacheKind, path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- #122: protected locations by file identity ----
+
+    /// `home/.bun -> storage/`, runtime at `storage/bin/bun`: the issue's layout.
+    #[cfg(unix)]
+    fn bun_behind_a_symlink() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = tmp.path().join("storage");
+        std::fs::create_dir_all(storage.join("bin")).unwrap();
+        std::fs::write(storage.join("bin/bun"), b"runtime").unwrap();
+        std::fs::create_dir_all(storage.join("install/cache")).unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::os::unix::fs::symlink(&storage, home.join(".bun")).unwrap();
+        (tmp, storage, home)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_protected_dir_is_recognised_however_its_path_is_spelled() {
+        let (_tmp, storage, home) = bun_behind_a_symlink();
+        let set = ProtectedSet::from_dirs(&[home.join(".bun/bin")]);
+        // The protected directory itself, and what is under it, reached through
+        // the resolved path that contains no `.bun` component at all.
+        assert!(set.contains(&storage.join("bin")));
+        assert!(set.contains(&storage.join("bin/bun")));
+        // Name-based classification cannot see this; that is the whole point.
+        let resolved = storage.join("bin/bun");
+        assert_ne!(
+            safety(detect(&resolved), &resolved),
+            SafetyLevel::Unsafe,
+            "fixture must be invisible to name-based classification"
+        );
+        // Neighbours are not protected: identity, not a textual prefix.
+        std::fs::create_dir_all(storage.join("binx")).unwrap();
+        assert!(!set.contains(&storage.join("binx")));
+        assert!(!set.contains(&storage.join("install/cache")));
+        assert!(!set.contains(&storage));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn protected_dirs_that_do_not_exist_protect_nothing_and_do_not_fail() {
+        let tmp = tempfile::tempdir().unwrap();
+        let set = ProtectedSet::from_dirs(&[tmp.path().join("no/such/.bun/bin")]);
+        assert!(!set.contains(tmp.path()));
+        assert!(!set.contains(&tmp.path().join("anything")));
+        assert!(!ProtectedSet::default().contains(tmp.path()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn safety_resolved_is_unsafe_for_a_protected_target_and_otherwise_unchanged() {
+        let (_tmp, storage, home) = bun_behind_a_symlink();
+        let set = ProtectedSet::from_dirs(&[home.join(".bun/bin")]);
+        let runtime = storage.join("bin/bun");
+        assert_eq!(
+            safety_resolved(CacheKind::Unknown, &runtime, &set),
+            SafetyLevel::Unsafe
+        );
+        let other = storage.join("install/cache");
+        assert_eq!(
+            safety_resolved(CacheKind::Unknown, &other, &set),
+            safety(CacheKind::Unknown, &other)
+        );
+    }
     use std::path::PathBuf;
 
     // --- detect() ---
