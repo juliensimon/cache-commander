@@ -320,17 +320,27 @@ impl ProtectedSet {
 
     /// Identities of the given directories (symlinks followed, missing ones skipped).
     pub fn from_dirs(dirs: &[PathBuf]) -> Self {
-        let resolved: Vec<PathBuf> = dirs
+        let identities: Vec<(u64, u64)> = dirs.iter().filter_map(|d| identity(d)).collect();
+        // Everything the ROUTE to a protected directory passes through, not just
+        // what is above its final target: with `~/.bun -> A` and `A/bin -> B` the
+        // protected directory is B, but removing A leaves `~/.bun/bin` dangling.
+        // Each step of the spelled path is resolved, and the directories above
+        // that are held; the protected directories themselves are not "above".
+        let mut holders: Vec<(u64, u64)> = dirs
             .iter()
-            .filter_map(|d| std::fs::canonicalize(d).ok())
+            .flat_map(|d| d.ancestors())
+            .filter_map(|step| std::fs::canonicalize(step).ok())
+            .flat_map(|resolved| {
+                resolved
+                    .ancestors()
+                    .filter_map(identity)
+                    .collect::<Vec<_>>()
+            })
             .collect();
+        holders.retain(|h| !identities.contains(h));
         Self {
-            identities: dirs.iter().filter_map(|d| identity(d)).collect(),
-            holders: resolved
-                .iter()
-                .flat_map(|d| d.ancestors().skip(1))
-                .filter_map(identity)
-                .collect(),
+            identities,
+            holders,
         }
     }
 
@@ -688,8 +698,10 @@ mod tests {
         std::os::unix::fs::symlink(&tools, root.join("alias")).unwrap();
         let set = ProtectedSet::from_dirs(&[home.join(".bun/bin")]);
         let spelled = root.join("alias/pkg");
-        // Precondition: nothing lexical in the spelled path marks it.
-        assert!(!spelled.to_string_lossy().contains("bin"));
+        // Precondition: as spelled it is not lexically under the protected dir
+        // (comparing components, not substrings, so an unrelated `bin` in the
+        // temp path cannot matter).
+        assert!(!spelled.starts_with(storage.join("bin")));
         assert!(set.contains(&spelled), "pkg lives under the protected dir");
         assert!(
             set.contains(&root.join("alias")),
@@ -700,6 +712,33 @@ mod tests {
         std::fs::create_dir_all(&elsewhere).unwrap();
         std::os::unix::fs::symlink(tmp.path().join("elsewhere"), root.join("ok")).unwrap();
         assert!(!set.contains(&root.join("ok/pkg")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn holds_covers_the_directories_a_chain_of_symlinks_passes_through() {
+        // `~/.bun -> A` and `A/bin -> B`: the protected directory is B, so A is not
+        // above it, yet removing A (or the link `A/bin`) leaves `~/.bun/bin`
+        // dangling and breaks access to Bun even though the binary survives.
+        let tmp = tempfile::tempdir().unwrap();
+        let a = tmp.path().join("A");
+        let b = tmp.path().join("B");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(b.join("bun"), b"runtime").unwrap();
+        std::os::unix::fs::symlink(&b, a.join("bin")).unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::os::unix::fs::symlink(&a, home.join(".bun")).unwrap();
+        let set = ProtectedSet::from_dirs(&[home.join(".bun/bin")]);
+        assert!(set.contains(&b.join("bun")), "the binary itself");
+        assert!(set.holds(&a), "A holds the link the route passes through");
+        assert!(set.holds(tmp.path()));
+        // Control: an unrelated sibling and the protected dir itself are not holders.
+        let other = tmp.path().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        assert!(!set.holds(&other));
+        assert!(!set.holds(&b), "the protected dir is contained, not held");
     }
 
     #[cfg(unix)]

@@ -1087,6 +1087,39 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn delete_refuses_a_dir_the_route_to_a_protected_dir_passes_through() {
+        // `~/.bun -> data/A` and `data/A/bin -> outside/B` (B is the protected
+        // directory). `data/A` is a discovered, deletable entry; B is untouched by
+        // removing it, but `~/.bun/bin` would dangle and Bun stop working.
+        let dir = TempDir::new().unwrap();
+        let data = dir.path().join("data");
+        let a = data.join("A");
+        let b = dir.path().join("outside/B");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(b.join("bun"), b"runtime").unwrap();
+        std::os::unix::fs::symlink(&b, a.join("bin")).unwrap();
+        let other = data.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("f"), b"x").unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::os::unix::fs::symlink(&a, home.join(".bun")).unwrap();
+        let mut config = Config::default_for_test();
+        config.roots = vec![data.clone()];
+        let mut server = CcmdMcp::new(&config);
+        server.protected = providers::ProtectedSet::from_dirs(&[home.join(".bun/bin")]);
+
+        let result = call_delete(&server, &[&a, &other], true).await;
+        assert!(a.join("bin").exists(), "the route must survive: {result}");
+        assert!(
+            !other.exists(),
+            "control: an unrelated sibling is deleted: {result}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn preview_delete_agrees_a_protected_dir_would_not_be_deleted() {
         let (_dir, server, bin, install) = bun_behind_a_symlink_server();
         let out = server
