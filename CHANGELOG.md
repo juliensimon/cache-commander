@@ -2,6 +2,85 @@
 
 ## [Unreleased]
 
+Security hardening of deletion and of how vulnerability matches are decided,
+found by an Aikido scan and by review rounds on each fix. Two behavior changes
+are called out under Changed.
+
+### Security
+- **MCP delete is limited to discovered entries (#119)**: `delete_packages`
+  only removes entries that discovery lists (what `search_packages` returns),
+  never a configured root, a provider container, a symlink, or a path inside a
+  package. `preview_delete` applies the same scope.
+- **TUI delete stays inside its cache root (#120, #90)**: a candidate that is a
+  symlink, resolves outside its own tree root, or has no tree node is refused
+  and counted in the status line. The size walk, the provider hook and the
+  removal use the validated location.
+- **Protected directories are recognised by file identity, not by name (#129,
+  #122)**: with `~/.bun` a symlink to another directory, the Bun runtime was
+  classified by its path string and could be deleted (MCP with
+  `confirm_caution`, TUI as an ordinary candidate). The directories a provider
+  protects are now resolved to (device, inode) and checked for the target, what
+  lies under it, and, for a child entry, what it contains. The MCP delete
+  additionally refuses everything while the route to a protected directory is a
+  chain of symlinks it cannot reason about. Deleting a whole configured root in
+  the TUI stays allowed. Only Bun has a protected location today.
+- **Vulnerability matching fails closed (#121, #123, #124, #125, #100)**: OSV
+  ranges are read as ordered intervals; Git commit hashes and tags are no
+  longer taken as fix versions; versions are ordered by each ecosystem's own
+  rules (SemVer, Go with its `v` prefix, PEP 440 including local versions, and
+  a port of Maven's `ComparableVersion` validated against Maven 3.10.0 on about
+  674k pairs with no disagreement). A version that cannot be ordered is treated
+  as possibly affected, and an outdated check that cannot order two versions is
+  reported as unchecked instead of up to date.
+- **Terminal output (#126, #94)**: control characters in names and paths are
+  shown as a visible U+FFFD and no longer misalign the tree columns. They were
+  already filtered before reaching the terminal by ratatui; a byte-level test
+  now pins that.
+- **Symlinks in sizing (#127, part of #93)**: `quick_size` followed symlinks
+  (counting bytes outside the directory, and recursing through links back at it:
+  two such links turned a 100-byte directory into 8.8 s and 6.5 MB). It no
+  longer follows them, like `dir_size`.
+- **CI supply chain (#106, #68, #108, #110, #112, #113, #130)**: `--locked` on
+  every cargo command, `persist-credentials: false` on checkouts,
+  `--ignore-scripts` on package-manager installs, and exact `pnpm` and
+  `yarn@1` versions in the PR-gating E2E job. The nightly E2E job still floats
+  on purpose, to surface upstream releases.
+
+### Changed
+- **Behavior change (MCP)**: an agent can no longer delete a root, a container
+  such as `~/.cache/huggingface`, a symlink, or a path inside a package. Delete
+  the discovered entries instead.
+- **Behavior change (TUI)**: symlink candidates are refused rather than
+  unlinked; remove a stale link with `rm`. A child directory that contains a
+  protected runtime is refused.
+- **Cache format**: the vulnerability and version caches carry a schema number;
+  caches written by earlier versions are discarded and rebuilt on first use.
+- **npm (#109, #114, #116)**: upgrade commands keep the package scope;
+  `package.json` is parsed with `serde_json` for package identity and read up to
+  1 MiB.
+- **Maven (#115)**: coordinates are read relative to the first `repository`
+  directory after `.m2`, so a group id containing `repository` keeps its full
+  name.
+- **CI (#87)**: `fail-fast: false` on the test matrix, so a failing Ubuntu job
+  no longer cancels macOS.
+- **Docs (#111, #131)**: an Aikido badge, and a README section on exactly what
+  leaves the machine (what each scan sends, and that the update check is on by
+  default).
+
+### Known limitations
+- Private or internal package names are sent to OSV and the public registries
+  like any other; there is no deny list yet (#95, documented in the README).
+- Tree expansion and provider file reads still follow symlinked directories;
+  only sizing was fixed (#92, #93).
+- pnpm 11 and later global stores are not identified for vulnerability scanning
+  because their package index moved to SQLite (#39).
+- A custom-named Maven repository whose group id contains a `repository`
+  component can be mis-parsed, because the scan root alone cannot tell it from
+  a nested standard repository (#118).
+- Packages whose manifests cannot be identified are not reported (#117).
+- PEP 440 and SemVer ordering rest on spec-derived tests, not a reference
+  implementation (Maven is checked against the real one).
+
 ## [0.4.4] — 2026-11-24
 
 Maintenance release: restores green CI (new stable cargo and clippy lints
