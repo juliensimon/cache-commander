@@ -247,7 +247,7 @@ When you press `V` (or pass `--vulncheck`):
 
 ### What Leaves Your Machine
 
-Nothing is sent until you ask for it. Scanning your caches is local; these are the only network requests `ccmd` makes, and what each one contains:
+Scanning and browsing your caches is local. Apart from the update check (on by default, last row), nothing about your packages is sent until you ask for it. These are the only network requests `ccmd` makes, and what each one contains:
 
 | When | Request | What it contains |
 |---|---|---|
