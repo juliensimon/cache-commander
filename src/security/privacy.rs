@@ -82,11 +82,17 @@ impl PrivacyPolicy {
     /// Over-matching is the safe direction here: it skips a lookup, and the
     /// skip is reported; under-matching discloses a name.
     pub fn is_private(&self, pkg: &PackageId) -> bool {
+        self.is_private_name(pkg.ecosystem, &pkg.name)
+    }
+
+    /// [`Self::is_private`] for a name read back from a cache file, where only
+    /// the strings are at hand.
+    pub fn is_private_name(&self, ecosystem: &str, name: &str) -> bool {
         if self.block_all {
             return true;
         }
-        let name = pkg.name.to_ascii_lowercase();
-        let pypi = pkg.ecosystem == "PyPI";
+        let name = name.to_ascii_lowercase();
+        let pypi = ecosystem == "PyPI";
         let normalised = pypi.then(|| pep503(&name));
         self.patterns.iter().any(|pattern| {
             matches_pattern(pattern, &name, NAMESPACE_BOUNDARIES)

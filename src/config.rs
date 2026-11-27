@@ -95,19 +95,19 @@ enum FileConfig {
 const LOOKUPS_DISABLED: &str = "package lookups (OSV.dev, registries) are disabled until the config file is fixed, so that names it may have marked private are not sent";
 
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct VulncheckConfig {
     pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct VersioncheckConfig {
     pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct UpdaterConfig {
     pub enabled: bool,
 }
@@ -644,6 +644,20 @@ mod tests {
                 toml::from_str::<Config>(&toml).is_err(),
                 "[{header}] must be rejected"
             );
+        }
+    }
+
+    #[test]
+    fn a_privacy_setting_misplaced_inside_another_table_is_an_error() {
+        // `[vulncheck.privacy]` is not `[privacy]`. Left permissive, the nested
+        // table would be dropped and the list it holds never applied.
+        for toml in [
+            "[vulncheck.privacy]\nprivate_packages = [\"@acme\"]\n",
+            "[versioncheck]\nprivate_packages = [\"@acme\"]\n",
+            "[updater]\nenabeld = false\n",
+            "[vulncheck]\nenabeld = true\n",
+        ] {
+            assert!(toml::from_str::<Config>(toml).is_err(), "{toml}");
         }
     }
 

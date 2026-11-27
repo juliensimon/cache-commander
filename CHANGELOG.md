@@ -14,8 +14,10 @@ are called out under Changed.
   reported as clean; the status line and the MCP reports count what was
   withheld. A config file that exists but cannot be used disables all package
   lookups instead of falling back to defaults. The file is now strict: any
-  unknown key, not only one under `[privacy]`, makes it unusable, so a
-  misspelt `[privcy]` cannot leave the list silently empty. Config files with
+  unknown key at any level (not only under `[privacy]`) makes it unusable, so a
+  misspelt `[privcy]`, or a list written inside `[vulncheck]`, cannot leave the
+  list silently empty. Packages marked private are also removed from the
+  on-disk lookup caches the next time a scan runs. Config files with
   stale or misspelt keys that used to be ignored now disable lookups until
   they are fixed; the warning and the status line name the cause.
 - **MCP delete is limited to discovered entries (#119)**: `delete_packages`

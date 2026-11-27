@@ -174,12 +174,15 @@ pub fn scan_vulns_with_cache(
 fn scan_vulns_private<Q>(
     packages: &[(PathBuf, PackageId)],
     querier: Q,
-    cache: Option<&mut cache::VulnCache>,
+    mut cache: Option<&mut cache::VulnCache>,
     policy: &privacy::PrivacyPolicy,
 ) -> VulnScanOutcome
 where
     Q: FnMut(&[PackageId]) -> Result<osv::OsvResponse, String>,
 {
+    if let Some(c) = cache.as_deref_mut() {
+        c.purge_private(policy);
+    }
     let (allowed, skipped) = policy.partition(packages);
     let mut outcome = scan_vulns_with_querier_and_cache(&allowed, querier, cache);
     outcome.skipped_private = skipped;
@@ -354,12 +357,15 @@ pub fn check_versions_with_cache(
 fn check_versions_private<F>(
     packages: &[(PathBuf, PackageId)],
     checker: F,
-    cache: Option<&mut cache::VersionCache>,
+    mut cache: Option<&mut cache::VersionCache>,
     policy: &privacy::PrivacyPolicy,
 ) -> VersionCheckOutcome
 where
     F: Fn(&PackageId) -> Result<Option<String>, String> + Send + Sync + 'static + Copy,
 {
+    if let Some(c) = cache.as_deref_mut() {
+        c.purge_private(policy);
+    }
     let (allowed, skipped) = policy.partition(packages);
     let mut outcome = check_versions_with_cache_inner(&allowed, checker, cache);
     outcome.skipped_private = skipped;
@@ -1463,6 +1469,118 @@ mod tests {
         );
         assert_eq!(out.skipped_private, 1);
         assert!(out.results.is_empty());
+    }
+
+    #[test]
+    fn marking_a_package_private_removes_it_from_the_vuln_cache_file() {
+        // Withholding the lookup is not enough: the cache is saved to disk by
+        // the caller, and a name scanned before it was marked private would
+        // otherwise stay in that file (local backups, other readers).
+        let private = named("npm", "@acme/ui", "1.0.0");
+        let public = named("npm", "left-pad", "1.3.0");
+        let mut cache = cache::VulnCache::with_default_ttl();
+        cache.insert(&private, &SecurityInfo { vulns: vec![] });
+        cache.insert(&public, &SecurityInfo { vulns: vec![] });
+
+        let pkgs = vec![(PathBuf::from("/b"), public.clone())];
+        scan_vulns_private(
+            &pkgs,
+            |ids| {
+                Ok(osv::OsvResponse {
+                    results: ids
+                        .iter()
+                        .map(|_| osv::OsvQueryResult { vulns: vec![] })
+                        .collect(),
+                })
+            },
+            Some(&mut cache),
+            &privacy::PrivacyPolicy::new(["@acme"]),
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vuln_cache.json");
+        cache.save(&path).unwrap();
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !on_disk.contains("@acme"),
+            "private name persisted: {on_disk}"
+        );
+        assert!(
+            on_disk.contains("left-pad"),
+            "control: others kept: {on_disk}"
+        );
+    }
+
+    #[test]
+    fn marking_a_package_private_removes_it_from_the_version_cache_file() {
+        fn ok(pkg: &PackageId) -> Result<Option<String>, String> {
+            Ok(Some(pkg.version.clone()))
+        }
+        let private = named("crates.io", "acme-core", "1.0.0");
+        let public = named("crates.io", "serde", "1.0.0");
+        let mut cache = cache::VersionCache::with_default_ttl();
+        let info = VersionInfo {
+            current: "1.0.0".into(),
+            latest: "1.0.0".into(),
+            is_outdated: false,
+        };
+        cache.insert(&private, &info);
+        cache.insert(&public, &info);
+
+        let pkgs = vec![(PathBuf::from("/b"), public.clone())];
+        check_versions_private(
+            &pkgs,
+            ok,
+            Some(&mut cache),
+            &privacy::PrivacyPolicy::new(["acme-*"]),
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("version_cache.json");
+        cache.save(&path).unwrap();
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !on_disk.contains("acme-core"),
+            "private name persisted: {on_disk}"
+        );
+        assert!(on_disk.contains("serde"), "control: others kept: {on_disk}");
+    }
+
+    #[test]
+    fn a_blocked_config_does_not_wipe_the_caches() {
+        // With the config unreadable nothing is known to be private, only that
+        // nothing may be sent. Deleting every cached result because of a typo
+        // would throw away data that was never at issue.
+        let pkg = named("npm", "left-pad", "1.3.0");
+        let mut cache = cache::VulnCache::with_default_ttl();
+        cache.insert(&pkg, &SecurityInfo { vulns: vec![] });
+        scan_vulns_private(
+            &[],
+            |_| panic!("no request may be made"),
+            Some(&mut cache),
+            &privacy::PrivacyPolicy::block_all(),
+        );
+        assert!(cache.get(&pkg).is_some());
+
+        fn ok(pkg: &PackageId) -> Result<Option<String>, String> {
+            Ok(Some(pkg.version.clone()))
+        }
+        let mut versions = cache::VersionCache::with_default_ttl();
+        versions.insert(
+            &pkg,
+            &VersionInfo {
+                current: "1.3.0".into(),
+                latest: "1.3.0".into(),
+                is_outdated: false,
+            },
+        );
+        check_versions_private(
+            &[],
+            ok,
+            Some(&mut versions),
+            &privacy::PrivacyPolicy::block_all(),
+        );
+        assert!(versions.get(&pkg).is_some());
     }
 
     #[test]

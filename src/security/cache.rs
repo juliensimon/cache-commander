@@ -36,6 +36,20 @@ fn key(pkg: &PackageId) -> String {
     format!("{}|{}|{}", pkg.ecosystem, pkg.name, pkg.version)
 }
 
+/// Whether a cache key (`ecosystem|name|version`) names a package the policy
+/// withholds. The version is whatever follows the LAST `|`, so a name that
+/// itself contains one is still read whole. A key of another shape names
+/// nothing and is kept.
+fn key_is_private(key: &str, policy: &crate::security::privacy::PrivacyPolicy) -> bool {
+    let Some((ecosystem, rest)) = key.split_once('|') else {
+        return false;
+    };
+    let Some((name, _version)) = rest.rsplit_once('|') else {
+        return false;
+    };
+    policy.is_private_name(ecosystem, name)
+}
+
 fn now_secs() -> u64 {
     // If the clock is set before 1970 we can't compute age correctly.
     // Returning u64::MAX makes every entry appear expired instead of
@@ -179,6 +193,20 @@ impl VulnCache {
     /// scanner calls this before `save()` so the disk file doesn't grow
     /// unbounded as packages get upgraded (stale `(name, version)` tuples
     /// would otherwise linger, just ignored on read).
+    /// Remove entries for packages the privacy policy withholds, returning how
+    /// many were dropped. Withholding the lookup is not enough: the caller
+    /// saves this cache, and a name cached before it was marked private would
+    /// stay in the file. A policy that blocks everything because the config
+    /// is unusable names nothing in particular, so it drops nothing.
+    pub fn purge_private(&mut self, policy: &crate::security::privacy::PrivacyPolicy) -> usize {
+        if policy.blocks_everything() {
+            return 0;
+        }
+        let before = self.entries.len();
+        self.entries.retain(|key, _| !key_is_private(key, policy));
+        before - self.entries.len()
+    }
+
     pub fn prune_expired(&mut self, now: u64) {
         let ttl = self.ttl_secs;
         self.entries
@@ -274,6 +302,20 @@ impl VersionCache {
         }
     }
 
+    /// Remove entries for packages the privacy policy withholds, returning how
+    /// many were dropped. Withholding the lookup is not enough: the caller
+    /// saves this cache, and a name cached before it was marked private would
+    /// stay in the file. A policy that blocks everything because the config
+    /// is unusable names nothing in particular, so it drops nothing.
+    pub fn purge_private(&mut self, policy: &crate::security::privacy::PrivacyPolicy) -> usize {
+        if policy.blocks_everything() {
+            return 0;
+        }
+        let before = self.entries.len();
+        self.entries.retain(|key, _| !key_is_private(key, policy));
+        before - self.entries.len()
+    }
+
     pub fn prune_expired(&mut self, now: u64) {
         let ttl = self.ttl_secs;
         self.entries
@@ -325,6 +367,21 @@ pub fn default_paths() -> Option<(PathBuf, PathBuf)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn key_is_private_reads_the_name_whole_and_keeps_odd_keys() {
+        use crate::security::privacy::PrivacyPolicy;
+        let policy = PrivacyPolicy::new(["acme|x"]);
+        // A name containing `|`: the version is what follows the LAST one.
+        assert!(key_is_private("npm|acme|x|1.0.0", &policy));
+        assert!(!key_is_private("npm|other|1.0.0", &policy));
+        // Keys of another shape name nothing; they are kept, not guessed at.
+        assert!(!key_is_private("garbage", &PrivacyPolicy::new(["garbage"])));
+        assert!(!key_is_private(
+            "npm|only-two",
+            &PrivacyPolicy::new(["only-two"])
+        ));
+    }
+
     use super::*;
 
     fn pkg(name: &str, version: &str) -> PackageId {
