@@ -370,6 +370,26 @@ impl App {
         }
     }
 
+    /// The path `v` / `o` should scan: the selected node, unless it is a
+    /// symlink below a root.
+    ///
+    /// Discovery follows a scan root that is a link, because the user named it
+    /// in the config. A link the user merely selected was named by nobody, and
+    /// scanning it would read the package identities behind it and send them to
+    /// OSV or a registry (#92). Says why and returns `None` in that case.
+    fn selected_scan_target(&mut self) -> Option<std::path::PathBuf> {
+        let idx = self.tree.selected_node_index()?;
+        let node = &self.tree.nodes[idx];
+        if node.parent.is_some() && crate::scanner::walker::is_symlink(&node.path) {
+            self.status_msg = Some(
+                "symlinks below a root are not scanned; add the target as a root to scan it"
+                    .to_string(),
+            );
+            return None;
+        }
+        Some(node.path.clone())
+    }
+
     fn handle_normal_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
@@ -402,9 +422,8 @@ impl App {
             }
             KeyCode::Char('u') => self.tree.marked.clear(),
             KeyCode::Char('v') => {
-                if let Some(idx) = self.tree.selected_node_index() {
+                if let Some(path) = self.selected_scan_target() {
                     self.vulnscan_in_progress = true;
-                    let path = self.tree.nodes[idx].path.clone();
                     self.send_scan_request(crate::scanner::ScanRequest::ScanVulns(vec![path]));
                 }
             }
@@ -414,9 +433,8 @@ impl App {
                 self.send_scan_request(crate::scanner::ScanRequest::ScanVulns(roots));
             }
             KeyCode::Char('o') => {
-                if let Some(idx) = self.tree.selected_node_index() {
+                if let Some(path) = self.selected_scan_target() {
                     self.versioncheck_in_progress = true;
-                    let path = self.tree.nodes[idx].path.clone();
                     self.send_scan_request(crate::scanner::ScanRequest::CheckVersions(vec![path]));
                 }
             }
@@ -2073,6 +2091,93 @@ mod tests {
             .unwrap();
         app.tick();
         assert!(app.tree.nodes.iter().any(|n| n.name == "child"));
+    }
+
+    /// An app whose tree is `root/` (a real directory) with one child, `link`,
+    /// a symlink to a directory outside the root, selected.
+    #[cfg(unix)]
+    fn app_with_selected_symlink() -> (App, mpsc::Receiver<ScanRequest>, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+
+        let (mut app, tx, rx) = build_app(bare_config());
+        let mut parent = mk_node_with_path("root", root.clone(), CacheKind::Unknown);
+        parent.has_children = true;
+        parent.children_loaded = false;
+        app.tree.set_roots(vec![parent]);
+        let mut link = TreeNode::new(root.join("link"), 1, Some(0));
+        link.name = "link".into();
+        tx.send(ScanResult::ChildrenScanned(root, vec![link]))
+            .unwrap();
+        app.tick();
+        app.tree.expanded.insert(0);
+        app.tree.recompute_visible();
+        let idx = app
+            .tree
+            .nodes
+            .iter()
+            .position(|n| n.name == "link")
+            .unwrap();
+        app.tree.selected = app
+            .tree
+            .visible
+            .iter()
+            .position(|&i| i == idx)
+            .expect("the link is visible");
+        while rx.try_recv().is_ok() {}
+        (app, rx, tmp)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scanning_a_selected_symlink_does_not_make_it_a_root() {
+        // Discovery follows a root that is a link, because the user named it.
+        // A link the user merely selected below a root was not named by anyone:
+        // scanning it would read and send what lies outside the root (#92).
+        let (mut app, rx, _tmp) = app_with_selected_symlink();
+        for key in ['v', 'o'] {
+            app.process_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE));
+            assert!(
+                rx.try_recv().is_err(),
+                "'{key}' must not scan a symlink leaf"
+            );
+        }
+        let msg = app.status_msg.as_deref().unwrap_or("");
+        assert!(msg.contains("symlink"), "must say why: {msg}");
+        assert!(!app.vulnscan_in_progress && !app.versioncheck_in_progress);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_root_is_still_scanned() {
+        // The user named it in the config; relocating a cache behind a link is
+        // common.
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = tmp.path().join("root_link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let (mut app, _tx, rx) = build_app(bare_config());
+        app.tree.set_roots(vec![TreeNode::root(link.clone())]);
+        app.process_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ScanRequest::ScanVulns(p)) if p == vec![link]
+        ));
+    }
+
+    #[test]
+    fn scanning_a_selected_directory_still_works() {
+        let (mut app, _tx, rx) = build_app(bare_config());
+        app.tree.set_roots(vec![mk_node("r", 1, CacheKind::Cargo)]);
+        app.process_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        assert!(matches!(rx.try_recv(), Ok(ScanRequest::ScanVulns(_))));
+        app.process_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        assert!(matches!(rx.try_recv(), Ok(ScanRequest::CheckVersions(_))));
     }
 
     #[test]

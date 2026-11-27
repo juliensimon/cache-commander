@@ -23,7 +23,8 @@ are called out under Changed.
 - **Symlinks below a root are leaves (#92, #93)**: package discovery skips
   them, so a package behind a link is no longer read and its name no longer
   sent to OSV or a registry; tree expansion lists a link but does not open,
-  classify or size it, and the MCP listing does the same. Sizing already
+  classify or size it, and the MCP listing does the same; `v` / `o` on a
+  selected link say so instead of scanning it. Sizing already
   ignored links (#127). A root that is itself a link is still followed.
 - **MCP delete is limited to discovered entries (#119)**: `delete_packages`
   only removes entries that discovery lists (what `search_packages` returns),
