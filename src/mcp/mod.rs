@@ -988,12 +988,15 @@ mod tests {
     #[cfg(unix)]
     fn bun_behind_a_symlink_server() -> (TempDir, CcmdMcp, PathBuf, PathBuf) {
         let dir = TempDir::new().unwrap();
-        let storage = dir.path().join("storage");
+        // Canonical: a link target spelled through a symlink (macOS `/var`) is itself
+        // a multi-hop link, which these fixtures must not hit by accident.
+        let base = dir.path().canonicalize().unwrap();
+        let storage = base.join("storage");
         std::fs::create_dir_all(storage.join("bin")).unwrap();
         std::fs::write(storage.join("bin/bun"), b"runtime").unwrap();
         std::fs::create_dir_all(storage.join("install")).unwrap();
         std::fs::write(storage.join("install/f"), b"x").unwrap();
-        let home = dir.path().join("home");
+        let home = base.join("home");
         std::fs::create_dir_all(&home).unwrap();
         std::os::unix::fs::symlink(&storage, home.join(".bun")).unwrap();
         let mut config = Config::default_for_test();
@@ -1042,14 +1045,17 @@ mod tests {
         // `data/storage/bin`; with `data/` the configured root, `data/storage` is a
         // discovered, deletable entry whose removal takes the runtime with it.
         let dir = TempDir::new().unwrap();
-        let data = dir.path().join("data");
+        // Canonical: a link target spelled through a symlink (macOS `/var`) is itself
+        // a multi-hop link, which these fixtures must not hit by accident.
+        let base = dir.path().canonicalize().unwrap();
+        let data = base.join("data");
         let storage = data.join("storage");
         std::fs::create_dir_all(storage.join("bin")).unwrap();
         std::fs::write(storage.join("bin/bun"), b"runtime").unwrap();
         let other = data.join("other");
         std::fs::create_dir_all(&other).unwrap();
         std::fs::write(other.join("f"), b"x").unwrap();
-        let home = dir.path().join("home");
+        let home = base.join("home");
         std::fs::create_dir_all(&home).unwrap();
         std::os::unix::fs::symlink(&storage, home.join(".bun")).unwrap();
         let mut config = Config::default_for_test();
@@ -1075,13 +1081,16 @@ mod tests {
         // `storage/bin`. Details are asked for the path as spelled, which has no
         // protected ancestor; reporting it Safe would invite the delete.
         let dir = TempDir::new().unwrap();
-        let storage = dir.path().join("storage");
+        // Canonical: a link target spelled through a symlink (macOS `/var`) is itself
+        // a multi-hop link, which these fixtures must not hit by accident.
+        let base = dir.path().canonicalize().unwrap();
+        let storage = base.join("storage");
         let tools = storage.join("bin/tools");
         std::fs::create_dir_all(tools.join("pkg")).unwrap();
-        let home = dir.path().join("home");
+        let home = base.join("home");
         std::fs::create_dir_all(&home).unwrap();
         std::os::unix::fs::symlink(&storage, home.join(".bun")).unwrap();
-        let alias = dir.path().join("alias");
+        let alias = base.join("alias");
         std::os::unix::fs::symlink(&tools, &alias).unwrap();
         let mut config = Config::default_for_test();
         config.roots = vec![alias.clone()];
@@ -1105,23 +1114,28 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn an_indirect_protected_route_blocks_every_mcp_delete() {
-        // `~/.bun -> data/A` and `data/A/bin -> outside/B` (B is the protected
-        // directory). The route passes through `data/A`, which is neither above nor
-        // inside B, so deleting it would break Bun without touching the runtime.
-        // Rather than work out which directories the route depends on, the agent
-        // delete refuses everything while the route is indirect, and says why.
+        // `~/.bun -> data/A`, `data/A/bin -> ../C/link2`, `data/C/link2 -> outside/B`
+        // (B is the protected directory). The link `bin` points at another link, so
+        // the route depends on `data/C`, which is neither above nor inside B. Rather
+        // than work out which directories that is, the agent delete refuses
+        // everything while the route is indirect, and says why.
         let dir = TempDir::new().unwrap();
-        let data = dir.path().join("data");
-        let a = data.join("A");
-        let b = dir.path().join("outside/B");
-        std::fs::create_dir_all(&a).unwrap();
-        std::fs::create_dir_all(&b).unwrap();
+        // Canonical: a link target spelled through a symlink (macOS `/var`) is itself
+        // a multi-hop link, which this fixture must not hit by accident.
+        let base = dir.path().canonicalize().unwrap();
+        let data = base.join("data");
+        let (a, c) = (data.join("A"), data.join("C"));
+        let b = base.join("outside/B");
+        for d in [&a, &c, &b] {
+            std::fs::create_dir_all(d).unwrap();
+        }
         std::fs::write(b.join("bun"), b"runtime").unwrap();
-        std::os::unix::fs::symlink(&b, a.join("bin")).unwrap();
+        std::os::unix::fs::symlink(&b, c.join("link2")).unwrap();
+        std::os::unix::fs::symlink("../C/link2", a.join("bin")).unwrap();
         let other = data.join("other");
         std::fs::create_dir_all(&other).unwrap();
         std::fs::write(other.join("f"), b"x").unwrap();
-        let home = dir.path().join("home");
+        let home = base.join("home");
         std::fs::create_dir_all(&home).unwrap();
         std::os::unix::fs::symlink(&a, home.join(".bun")).unwrap();
         let mut config = Config::default_for_test();
@@ -1129,8 +1143,8 @@ mod tests {
         let mut server = CcmdMcp::new(&config);
         server.protected_dirs = vec![home.join(".bun/bin")];
 
-        let result = call_delete(&server, &[&a, &other], true).await;
-        assert!(a.join("bin").exists(), "the route must survive: {result}");
+        let result = call_delete(&server, &[&c, &other], true).await;
+        assert!(c.join("link2").exists(), "the route must survive: {result}");
         assert!(other.exists(), "so does everything else: {result}");
         let reasons = result["skipped"].to_string();
         assert!(reasons.contains("symlink"), "must say why: {result}");
@@ -1145,7 +1159,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["items"][0]["would_delete"], false, "{v}");
 
-        // Control: the same layout with a DIRECT route deletes an unrelated sibling.
+        // Control: with nothing protected the same sibling is deleted.
         let mut direct = CcmdMcp::new(&config);
         direct.protected_dirs = vec![];
         let result = call_delete(&direct, &[&other], true).await;
@@ -1157,15 +1171,53 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn a_directory_holding_a_link_on_a_clean_route_is_refused_but_siblings_are_not() {
+        // `home/.bun -> data/A`, `data/A/bin -> outside/B`: two CLEAN hops, so the
+        // route is not indirect, but `data/A` holds the link `bin`. It is refused;
+        // an unrelated sibling is still deleted.
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let data = base.join("data");
+        let a = data.join("A");
+        let b = base.join("outside/B");
+        for d in [&a, &b] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(b.join("bun"), b"runtime").unwrap();
+        std::os::unix::fs::symlink(&b, a.join("bin")).unwrap();
+        let other = data.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("f"), b"x").unwrap();
+        let home = base.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::os::unix::fs::symlink(&a, home.join(".bun")).unwrap();
+        let mut config = Config::default_for_test();
+        config.roots = vec![data.clone()];
+        let mut server = CcmdMcp::new(&config);
+        server.protected_dirs = vec![home.join(".bun/bin")];
+
+        let result = call_delete(&server, &[&a, &other], true).await;
+        assert!(
+            a.join("bin").exists(),
+            "the route's link must survive: {result}"
+        );
+        assert!(!other.exists(), "an unrelated sibling is deleted: {result}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn a_runtime_installed_after_the_server_started_is_still_protected() {
         // An MCP server can run for days. `~/.bun/bin` does not exist when it
         // starts; Bun is installed later. Deleting the entry that now holds it
         // must be refused: the protected set is resolved at each decision, not once.
         let dir = TempDir::new().unwrap();
-        let data = dir.path().join("data");
+        // Canonical: a link target spelled through a symlink (macOS `/var`) is itself
+        // a multi-hop link, which these fixtures must not hit by accident.
+        let base = dir.path().canonicalize().unwrap();
+        let data = base.join("data");
         let storage = data.join("storage");
         std::fs::create_dir_all(&storage).unwrap();
-        let home = dir.path().join("home");
+        let home = base.join("home");
         std::fs::create_dir_all(&home).unwrap();
         std::os::unix::fs::symlink(&storage, home.join(".bun")).unwrap();
         let mut config = Config::default_for_test();

@@ -307,9 +307,15 @@ pub struct ProtectedSet {
     identities: Vec<(u64, u64)>,
     /// The protected directories as resolved paths.
     #[cfg_attr(not(feature = "mcp"), allow(dead_code))] // only the MCP delete uses these
-    canonical: Vec<PathBuf>,
-    /// True if reaching a protected directory leaves the directory that holds it
-    /// (`~/.bun/bin` is a link that points elsewhere): the route is indirect.
+    finals: Vec<PathBuf>,
+    /// The resolved form of every directory on the path AS SPELLED to a protected
+    /// directory (`~`, `~/.bun`, `~/.bun/bin` each resolved): removing any of them
+    /// removes the route.
+    #[cfg_attr(not(feature = "mcp"), allow(dead_code))]
+    routes: Vec<PathBuf>,
+    /// True if some link on the spelled path is not a clean single hop (its target
+    /// is itself a link, or passes through links): the route then depends on
+    /// directories this set does not enumerate.
     #[cfg_attr(not(feature = "mcp"), allow(dead_code))]
     indirect: bool,
 }
@@ -329,17 +335,13 @@ impl ProtectedSet {
             let (Some(id), Ok(canonical)) = (identity(dir), std::fs::canonicalize(dir)) else {
                 continue;
             };
-            // Direct: the resolved directory still lies inside its resolved
-            // container (`~/.bun -> storage` keeps `storage/bin` inside `storage`).
-            // Indirect: it does not (`A/bin -> B`), so the route passes through a
-            // directory that is neither above nor inside the protected one.
-            let direct = dir
-                .parent()
-                .and_then(|container| std::fs::canonicalize(container).ok())
-                .is_some_and(|container| canonical.starts_with(container));
-            set.indirect |= !direct;
+            set.indirect |= !clean_hops(dir);
+            set.routes.extend(
+                dir.ancestors()
+                    .filter_map(|p| std::fs::canonicalize(p).ok()),
+            );
             set.identities.push(id);
-            set.canonical.push(canonical);
+            set.finals.push(canonical);
         }
         set
     }
@@ -351,16 +353,14 @@ impl ProtectedSet {
     #[cfg_attr(not(feature = "mcp"), allow(dead_code))] // only the MCP delete uses this
     pub fn holds(&self, target: &Path) -> bool {
         std::fs::canonicalize(target).is_ok_and(|t| {
-            self.canonical
-                .iter()
-                .any(|protected| protected != &t && protected.starts_with(&t))
+            !self.finals.contains(&t) && self.routes.iter().any(|route| route.starts_with(&t))
         })
     }
 
-    /// True if a protected directory is reached through a link that leaves the
-    /// directory holding it. Which other directories the route then depends on
-    /// is not worked out: callers that cannot prove a delete safe refuse it
-    /// (the MCP delete does).
+    /// True if a protected directory is reached through a link that is not a
+    /// clean single hop. Which other directories the route then depends on is not
+    /// worked out: callers that cannot prove a delete safe refuse it (the MCP
+    /// delete does).
     #[cfg_attr(not(feature = "mcp"), allow(dead_code))] // only the MCP delete uses this
     pub fn indirect(&self) -> bool {
         self.indirect
@@ -383,6 +383,54 @@ impl ProtectedSet {
             .filter_map(identity)
             .any(|id| self.identities.contains(&id))
     }
+}
+
+/// True if every symlink on `path` (as spelled, from the root down) is a clean
+/// single hop: its target, taken against the resolved directory holding the link,
+/// is exactly what the link resolves to. A target that is itself a link, or passes
+/// through links, resolves somewhere else and is not clean. Ordinary system links
+/// (`/var -> private/var`) are clean single hops, so they do not count.
+#[cfg(unix)]
+fn clean_hops(path: &Path) -> bool {
+    use std::path::Component;
+    /// Resolve `.` and `..` lexically; valid because the base is already resolved.
+    fn normalize(path: &Path) -> PathBuf {
+        let mut out = PathBuf::new();
+        for c in path.components() {
+            match c {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    out.pop();
+                }
+                other => out.push(other.as_os_str()),
+            }
+        }
+        out
+    }
+    path.ancestors().all(|prefix| {
+        let is_link = std::fs::symlink_metadata(prefix).is_ok_and(|m| m.file_type().is_symlink());
+        if !is_link {
+            return true;
+        }
+        let (Ok(target), Some(Ok(base)), Ok(resolved)) = (
+            std::fs::read_link(prefix),
+            prefix.parent().map(std::fs::canonicalize),
+            std::fs::canonicalize(prefix),
+        ) else {
+            return false; // cannot tell: not clean
+        };
+        let expected = if target.is_absolute() {
+            normalize(&target)
+        } else {
+            normalize(&base.join(target))
+        };
+        expected == resolved
+    })
+}
+
+#[cfg(not(unix))]
+fn clean_hops(_path: &Path) -> bool {
+    true
 }
 
 /// (device, inode) of what `path` resolves to; `None` if it does not exist.
@@ -729,48 +777,111 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_route_that_leaves_its_container_is_indirect() {
+    fn only_links_that_are_not_clean_single_hops_make_a_route_indirect() {
+        // Canonical: a target spelled through a symlink (macOS `/var`) is itself a
+        // multi-hop link, which these cases must not hit by accident.
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        let home = root.join("home");
-        std::fs::create_dir_all(&home).unwrap();
+        let root = &tmp.path().canonicalize().unwrap();
+        let mk = |p: &std::path::Path| std::fs::create_dir_all(p).unwrap();
+        let link = |to: &std::path::Path, at: &std::path::Path| {
+            std::os::unix::fs::symlink(to, at).unwrap()
+        };
 
-        // Plain real directories: direct.
+        // Plain real directories: not indirect.
         let plain = root.join("plain/.bun/bin");
-        std::fs::create_dir_all(&plain).unwrap();
+        mk(&plain);
         assert!(!ProtectedSet::from_dirs(&[plain]).indirect());
 
-        // `~/.bun -> storage`: `storage/bin` stays inside `storage`, so direct.
-        let storage = root.join("storage");
-        std::fs::create_dir_all(storage.join("bin")).unwrap();
-        std::os::unix::fs::symlink(&storage, home.join(".bun")).unwrap();
+        // `~/.bun -> storage`: one clean hop.
+        let (storage, home) = (root.join("storage"), root.join("home"));
+        mk(&storage.join("bin"));
+        mk(&home);
+        link(&storage, &home.join(".bun"));
         assert!(!ProtectedSet::from_dirs(&[home.join(".bun/bin")]).indirect());
 
-        // `~/.bun -> A` and `A/bin -> B`: B is not inside A, so the route passes
-        // through a directory that is neither above nor inside the protected one.
+        // `~/.bun -> A` and `A/bin -> B`: two clean hops. Not indirect: A is held
+        // by the resolved form of the spelled `~/.bun`, so it is covered by `holds`.
         let (a, b) = (root.join("A"), root.join("B"));
-        std::fs::create_dir_all(&a).unwrap();
-        std::fs::create_dir_all(&b).unwrap();
-        std::os::unix::fs::symlink(&b, a.join("bin")).unwrap();
+        mk(&a);
+        mk(&b);
+        link(&b, &a.join("bin"));
         let home2 = root.join("home2");
-        std::fs::create_dir_all(&home2).unwrap();
-        std::os::unix::fs::symlink(&a, home2.join(".bun")).unwrap();
-        assert!(ProtectedSet::from_dirs(&[home2.join(".bun/bin")]).indirect());
+        mk(&home2);
+        link(&a, &home2.join(".bun"));
+        let two = ProtectedSet::from_dirs(&[home2.join(".bun/bin")]);
+        assert!(!two.indirect());
+        assert!(two.holds(&a), "A holds the link `bin`");
 
-        // A longer chain (`A2/bin -> ../C/link2`, `C/link2 -> B`) is indirect too.
-        let (a2, c) = (root.join("A2"), root.join("C"));
-        std::fs::create_dir_all(&a2).unwrap();
-        std::fs::create_dir_all(&c).unwrap();
-        std::os::unix::fs::symlink(&b, c.join("link2")).unwrap();
-        std::os::unix::fs::symlink("../C/link2", a2.join("bin")).unwrap();
+        // A relative target with `..` is still one clean hop.
+        let (a3, c3) = (root.join("A3"), root.join("C3"));
+        mk(&a3);
+        mk(&c3.join("real-bin"));
+        link(Path::new("../C3/real-bin"), &a3.join("bin"));
         let home3 = root.join("home3");
-        std::fs::create_dir_all(&home3).unwrap();
-        std::os::unix::fs::symlink(&a2, home3.join(".bun")).unwrap();
-        assert!(ProtectedSet::from_dirs(&[home3.join(".bun/bin")]).indirect());
+        mk(&home3);
+        link(&a3, &home3.join(".bun"));
+        assert!(!ProtectedSet::from_dirs(&[home3.join(".bun/bin")]).indirect());
+
+        // `A4/bin -> ../C4/link2` and `C4/link2 -> B`: the target is itself a link.
+        let (a4, c4) = (root.join("A4"), root.join("C4"));
+        mk(&a4);
+        mk(&c4);
+        link(&b, &c4.join("link2"));
+        link(Path::new("../C4/link2"), &a4.join("bin"));
+        let home4 = root.join("home4");
+        mk(&home4);
+        link(&a4, &home4.join(".bun"));
+        assert!(ProtectedSet::from_dirs(&[home4.join(".bun/bin")]).indirect());
 
         // Nothing to protect, nothing indirect.
         assert!(!ProtectedSet::from_dirs(&[root.join("missing/.bun/bin")]).indirect());
         assert!(!ProtectedSet::default().indirect());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_multi_hop_link_above_the_final_directory_is_indirect() {
+        // `~/.bun -> D/L` and `D/L -> A`: the protected `A/bin` lies inside its
+        // resolved container `A`, which looks direct, but the route passes through
+        // `D`, which is neither above nor inside the protected directory.
+        let tmp = tempfile::tempdir().unwrap();
+        // Canonical: a target spelled through a symlink (macOS `/var`) is itself a
+        // multi-hop link, which these cases must not hit by accident.
+        let root = &tmp.path().canonicalize().unwrap();
+        let (d, a) = (root.join("D"), root.join("A"));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::create_dir_all(a.join("bin")).unwrap();
+        std::os::unix::fs::symlink(&a, d.join("L")).unwrap();
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::os::unix::fs::symlink(d.join("L"), home.join(".bun")).unwrap();
+        let set = ProtectedSet::from_dirs(&[home.join(".bun/bin")]);
+        assert!(set.contains(&a.join("bin")), "it does resolve to A/bin");
+        assert!(set.indirect(), "a link whose target is itself a link");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_holding_a_link_on_the_spelled_route_is_held() {
+        // `tools/bun-link -> X`: `tools` is a lexical ancestor of the protected
+        // `tools/bun-link/bin`, and removing it removes the link, though `tools` is
+        // not an ancestor of the resolved `X/bin`.
+        let tmp = tempfile::tempdir().unwrap();
+        // Canonical: a target spelled through a symlink (macOS `/var`) is itself a
+        // multi-hop link, which these cases must not hit by accident.
+        let root = &tmp.path().canonicalize().unwrap();
+        let x = root.join("X");
+        std::fs::create_dir_all(x.join("bin")).unwrap();
+        let tools = root.join("tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        std::os::unix::fs::symlink(&x, tools.join("bun-link")).unwrap();
+        let set = ProtectedSet::from_dirs(&[tools.join("bun-link/bin")]);
+        assert!(!set.indirect(), "a single clean hop");
+        assert!(set.holds(&tools), "tools holds the link");
+        assert!(set.holds(&x), "and X holds bin");
+        let other = root.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        assert!(!set.holds(&other), "control");
     }
 
     #[cfg(unix)]
