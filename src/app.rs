@@ -96,6 +96,13 @@ impl App {
     }
 
     pub fn init(&mut self) {
+        // `Config::load` warned on stderr, which the alternate screen hides.
+        if self.config.privacy.block_lookups {
+            self.status_msg = Some(
+                "config file unusable — package lookups (OSV, registries) disabled; see the warning printed at startup"
+                    .to_string(),
+            );
+        }
         let roots = self.config.roots.clone();
         self.send_scan_request(crate::scanner::ScanRequest::ScanRoots(roots));
     }
@@ -170,9 +177,16 @@ impl App {
                         node.size = size;
                     }
                 }
-                ScanResult::VulnsScanned(scanned, outcome) => {
+                ScanResult::VulnsScanned(attempted, outcome) => {
                     let unscanned = outcome.unscanned_packages;
                     let cached_hits = outcome.cached_hits;
+                    // `attempted` counts every discovered package; the ones the
+                    // privacy policy withheld were never looked up, so they
+                    // must not be reported as scanned (#95).
+                    let skipped = outcome.skipped_private;
+                    let scanned = attempted.saturating_sub(skipped);
+                    let private_suffix =
+                        private_skip_suffix(skipped, self.config.privacy.block_lookups);
                     self.vuln_results.extend(outcome.results);
                     self.vulnscan_in_progress = false;
                     self.recompute_node_status();
@@ -189,7 +203,11 @@ impl App {
                     } else {
                         String::new()
                     };
-                    let cache_suffix = cache_hit_suffix(cached_hits, scanned);
+                    let cache_suffix = format!(
+                        "{}{}",
+                        cache_hit_suffix(cached_hits, scanned),
+                        private_suffix
+                    );
                     if vuln_count > 0 {
                         had_informative_vuln = true;
                         tick_parts.push(format!(
@@ -201,7 +219,9 @@ impl App {
                             cache_suffix,
                         ));
                     } else if !had_informative_vuln {
-                        let tail = if unscanned > 0 {
+                        let tail = if scanned == 0 && skipped > 0 {
+                            format!("nothing scanned{}", cache_suffix)
+                        } else if unscanned > 0 {
                             format!(
                                 "scan incomplete — {} package{} unscanned (network error?){}",
                                 unscanned,
@@ -217,9 +237,13 @@ impl App {
                         tick_parts.push(tail);
                     }
                 }
-                ScanResult::VersionsChecked(checked, outcome) => {
+                ScanResult::VersionsChecked(attempted, outcome) => {
                     let unchecked = outcome.unchecked_packages;
                     let cached_hits = outcome.cached_hits;
+                    let skipped = outcome.skipped_private;
+                    let checked = attempted.saturating_sub(skipped);
+                    let private_suffix =
+                        private_skip_suffix(skipped, self.config.privacy.block_lookups);
                     self.version_results.extend(outcome.results);
                     self.versioncheck_in_progress = false;
                     self.recompute_node_status();
@@ -234,7 +258,11 @@ impl App {
                     } else {
                         String::new()
                     };
-                    let cache_suffix = cache_hit_suffix(cached_hits, checked);
+                    let cache_suffix = format!(
+                        "{}{}",
+                        cache_hit_suffix(cached_hits, checked),
+                        private_suffix
+                    );
                     if outdated > 0 {
                         had_informative_version = true;
                         tick_parts.push(format!(
@@ -242,7 +270,9 @@ impl App {
                             checked, outdated, incomplete_suffix, cache_suffix,
                         ));
                     } else if !had_informative_version {
-                        let tail = if unchecked > 0 {
+                        let tail = if checked == 0 && skipped > 0 {
+                            format!("nothing checked{}", cache_suffix)
+                        } else if unchecked > 0 {
                             format!(
                                 "version check incomplete — {} package{} unchecked (network error?){}",
                                 unchecked,
@@ -1137,6 +1167,22 @@ pub(crate) fn cache_hit_suffix(cached_hits: usize, attempted: usize) -> String {
     format!(" [cache: {}/{} ({}%)]", cached_hits, attempted, pct)
 }
 
+/// Status-line note for packages the privacy policy kept off the network
+/// (#95). Empty when none were: the common case stays silent.
+///
+/// `blocked` is the config-file-unusable case (`PrivacyConfig::block_lookups`):
+/// there the user has no `[privacy]` policy to look for, and the real cause is
+/// the file.
+pub(crate) fn private_skip_suffix(skipped: usize, blocked: bool) -> String {
+    if skipped == 0 {
+        return String::new();
+    }
+    if blocked {
+        return format!(" [{skipped} not sent: config file unusable, lookups disabled]");
+    }
+    format!(" [{skipped} withheld by [privacy] policy, not sent]")
+}
+
 fn extract_package_name(name: &str) -> String {
     let stripped = if let Some(rest) = name.strip_prefix('[') {
         rest.split_once("] ").map(|(_, n)| n).unwrap_or(name)
@@ -1217,6 +1263,7 @@ mod tests {
             vulncheck: VulncheckConfig::default(),
             versioncheck: VersioncheckConfig::default(),
             updater: crate::config::UpdaterConfig::default(),
+            privacy: crate::config::PrivacyConfig::default(),
         }
     }
 
@@ -1511,6 +1558,7 @@ mod tests {
                 results,
                 unscanned_packages: 0,
                 cached_hits: 0,
+                skipped_private: 0,
             },
         ))
         .unwrap();
@@ -1541,6 +1589,120 @@ mod tests {
     }
 
     #[test]
+    fn private_skip_suffix_is_silent_when_nothing_was_withheld() {
+        assert_eq!(private_skip_suffix(0, false), "");
+        assert!(private_skip_suffix(3, false).contains("3 withheld"));
+    }
+
+    #[test]
+    fn private_skip_suffix_names_the_broken_config_as_the_cause() {
+        // "withheld by [privacy] policy" would send someone with no [privacy]
+        // section hunting for a policy they never wrote.
+        let msg = private_skip_suffix(412, true);
+        assert!(msg.contains("412"), "{msg}");
+        assert!(msg.contains("config"), "{msg}");
+        assert!(!msg.contains("[privacy] policy"), "{msg}");
+    }
+
+    #[test]
+    fn a_broken_config_is_announced_when_the_app_starts() {
+        // The warning printed by Config::load is wiped by the alternate
+        // screen, so the app must say it itself.
+        let mut config = bare_config();
+        config.privacy.block_lookups = true;
+        let (mut app, _tx, _rx) = build_app(config);
+        app.init();
+        let msg = app.status_msg.as_deref().unwrap_or("");
+        assert!(msg.contains("config"), "got: {msg}");
+        assert!(msg.contains("disabled"), "got: {msg}");
+    }
+
+    #[test]
+    fn tick_vulns_blames_the_config_when_lookups_are_blocked() {
+        let mut config = bare_config();
+        config.privacy.block_lookups = true;
+        let (mut app, tx, _rx) = build_app(config);
+        app.tree.set_roots(vec![mk_node("ok", 1, CacheKind::Cargo)]);
+        tx.send(ScanResult::VulnsScanned(
+            5,
+            crate::security::VulnScanOutcome {
+                results: HashMap::new(),
+                unscanned_packages: 0,
+                cached_hits: 0,
+                skipped_private: 5,
+            },
+        ))
+        .unwrap();
+        app.tick();
+        let msg = app.status_msg.as_deref().unwrap_or("");
+        assert!(msg.contains("nothing scanned"), "got: {msg}");
+        assert!(msg.contains("config"), "got: {msg}");
+    }
+
+    #[test]
+    fn tick_vulns_does_not_count_withheld_packages_as_scanned_or_clean() {
+        // 10 discovered, 4 withheld: the status must say 6 scanned, and must
+        // say so, rather than "10 packages — no vulnerabilities found".
+        let (mut app, tx, _rx) = build_app(bare_config());
+        app.tree.set_roots(vec![mk_node("ok", 1, CacheKind::Cargo)]);
+        tx.send(ScanResult::VulnsScanned(
+            10,
+            crate::security::VulnScanOutcome {
+                results: HashMap::new(),
+                unscanned_packages: 0,
+                cached_hits: 0,
+                skipped_private: 4,
+            },
+        ))
+        .unwrap();
+        app.tick();
+        let msg = app.status_msg.as_deref().unwrap_or("");
+        assert!(msg.contains("Scanned 6 packages"), "got: {msg}");
+        assert!(msg.contains("4 withheld"), "got: {msg}");
+    }
+
+    #[test]
+    fn tick_vulns_says_nothing_was_scanned_when_everything_was_withheld() {
+        // Blocked config: "no vulnerabilities found" would be false comfort.
+        let (mut app, tx, _rx) = build_app(bare_config());
+        app.tree.set_roots(vec![mk_node("ok", 1, CacheKind::Cargo)]);
+        tx.send(ScanResult::VulnsScanned(
+            5,
+            crate::security::VulnScanOutcome {
+                results: HashMap::new(),
+                unscanned_packages: 0,
+                cached_hits: 0,
+                skipped_private: 5,
+            },
+        ))
+        .unwrap();
+        app.tick();
+        let msg = app.status_msg.as_deref().unwrap_or("");
+        assert!(msg.contains("nothing scanned"), "got: {msg}");
+        assert!(!msg.contains("no vulnerabilities"), "got: {msg}");
+    }
+
+    #[test]
+    fn tick_versions_does_not_say_all_up_to_date_when_everything_was_withheld() {
+        let (mut app, tx, _rx) = build_app(bare_config());
+        app.tree.set_roots(vec![mk_node("ok", 1, CacheKind::Cargo)]);
+        tx.send(ScanResult::VersionsChecked(
+            5,
+            crate::security::VersionCheckOutcome {
+                results: HashMap::new(),
+                unchecked_packages: 0,
+                cached_hits: 0,
+                skipped_private: 5,
+            },
+        ))
+        .unwrap();
+        app.tick();
+        let msg = app.status_msg.as_deref().unwrap_or("");
+        assert!(msg.contains("nothing checked"), "got: {msg}");
+        assert!(!msg.contains("up to date"), "got: {msg}");
+    }
+
+    #[test]
     fn tick_vulns_surfaces_cache_ratio_in_status() {
         let (mut app, tx, _rx) = build_app(bare_config());
         app.tree.set_roots(vec![mk_node("ok", 1, CacheKind::Cargo)]);
@@ -1550,6 +1712,7 @@ mod tests {
                 results: HashMap::new(),
                 unscanned_packages: 0,
                 cached_hits: 7,
+                skipped_private: 0,
             },
         ))
         .unwrap();
@@ -1571,6 +1734,7 @@ mod tests {
                 results: HashMap::new(),
                 unchecked_packages: 0,
                 cached_hits: 4,
+                skipped_private: 0,
             },
         ))
         .unwrap();
@@ -1607,6 +1771,7 @@ mod tests {
                 results: HashMap::new(),
                 unscanned_packages: 3,
                 cached_hits: 0,
+                skipped_private: 0,
             },
         ))
         .unwrap();
@@ -1643,6 +1808,7 @@ mod tests {
                 results,
                 unchecked_packages: 0,
                 cached_hits: 0,
+                skipped_private: 0,
             },
         ))
         .unwrap();
@@ -1679,6 +1845,7 @@ mod tests {
                 results: HashMap::new(),
                 unchecked_packages: 4,
                 cached_hits: 0,
+                skipped_private: 0,
             },
         ))
         .unwrap();
@@ -1755,6 +1922,7 @@ mod tests {
                 results: vuln,
                 unscanned_packages: 0,
                 cached_hits: 0,
+                skipped_private: 0,
             },
         ))
         .unwrap();
@@ -1774,6 +1942,7 @@ mod tests {
                 results: versions,
                 unchecked_packages: 0,
                 cached_hits: 0,
+                skipped_private: 0,
             },
         ))
         .unwrap();
@@ -1829,6 +1998,7 @@ mod tests {
                 results: vuln,
                 unscanned_packages: 0,
                 cached_hits: 0,
+                skipped_private: 0,
             },
         ))
         .unwrap();

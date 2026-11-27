@@ -1,6 +1,7 @@
 pub mod walker;
 
 use crate::providers;
+use crate::security::privacy::PrivacyPolicy;
 use crate::tree::node::TreeNode;
 use rayon::{ThreadPool, ThreadPoolBuilder};
 use std::path::PathBuf;
@@ -89,9 +90,15 @@ fn send_result<T>(tx: &mpsc::Sender<T>, result: T) {
 /// worker stops processing new requests and exits cleanly.
 /// If `None`, the scanner runs indefinitely (no shutdown signal).
 /// Returns the request tx handle.
-pub fn start(
+///
+/// `policy` is the outbound privacy policy (#95): packages it marks private are
+/// never sent to OSV or a registry. It is a required argument so no caller can
+/// start a scanner that discloses everything by omission; pass
+/// `PrivacyPolicy::default()` to say that on purpose.
+pub fn start_with_policy(
     result_tx: mpsc::Sender<ScanResult>,
     shutdown: Option<Arc<AtomicBool>>,
+    policy: PrivacyPolicy,
 ) -> mpsc::Sender<ScanRequest> {
     let (request_tx, request_rx) = mpsc::channel::<ScanRequest>();
 
@@ -100,7 +107,13 @@ pub fn start(
     let pool = build_pool(8);
 
     std::thread::spawn(move || {
-        worker_loop(request_rx, result_tx, Some(pool), shutdown.clone());
+        worker_loop(
+            request_rx,
+            result_tx,
+            Some(pool),
+            shutdown.clone(),
+            Arc::new(policy),
+        );
     });
 
     request_tx
@@ -111,6 +124,7 @@ fn worker_loop(
     result_tx: mpsc::Sender<ScanResult>,
     pool: Option<ThreadPool>,
     shutdown: Option<Arc<AtomicBool>>,
+    policy: Arc<PrivacyPolicy>,
 ) {
     while let Ok(request) = request_rx.recv() {
         // Check shutdown flag before processing each request.
@@ -158,6 +172,7 @@ fn worker_loop(
             }
             ScanRequest::ScanVulns(roots) => {
                 let tx = result_tx.clone();
+                let policy = Arc::clone(&policy);
                 if let Some(ref pool) = pool {
                     pool.spawn(move || {
                         let packages = discover_packages(&roots);
@@ -166,14 +181,16 @@ fn worker_loop(
                         let outcome = match path.as_deref() {
                             Some(p) => {
                                 let mut c = crate::security::cache::VulnCache::load(p);
-                                let out = crate::security::scan_vulns_with_cache(&packages, &mut c);
+                                let out = crate::security::scan_vulns_with_cache(
+                                    &packages, &mut c, &policy,
+                                );
                                 c.prune_expired(now_secs());
                                 if let Err(e) = c.save(p) {
                                     eprintln!("warning: could not save vuln cache: {e}");
                                 }
                                 out
                             }
-                            None => crate::security::scan_vulns(&packages),
+                            None => crate::security::scan_vulns(&packages, &policy),
                         };
                         send_result(&tx, ScanResult::VulnsScanned(count, outcome));
                     });
@@ -185,14 +202,16 @@ fn worker_loop(
                         let outcome = match path.as_deref() {
                             Some(p) => {
                                 let mut c = crate::security::cache::VulnCache::load(p);
-                                let out = crate::security::scan_vulns_with_cache(&packages, &mut c);
+                                let out = crate::security::scan_vulns_with_cache(
+                                    &packages, &mut c, &policy,
+                                );
                                 c.prune_expired(now_secs());
                                 if let Err(e) = c.save(p) {
                                     eprintln!("warning: could not save vuln cache: {e}");
                                 }
                                 out
                             }
-                            None => crate::security::scan_vulns(&packages),
+                            None => crate::security::scan_vulns(&packages, &policy),
                         };
                         send_result(&tx, ScanResult::VulnsScanned(count, outcome));
                     });
@@ -200,6 +219,7 @@ fn worker_loop(
             }
             ScanRequest::CheckVersions(roots) => {
                 let tx = result_tx.clone();
+                let policy = Arc::clone(&policy);
                 if let Some(ref pool) = pool {
                     pool.spawn(move || {
                         let packages = discover_packages(&roots);
@@ -208,15 +228,16 @@ fn worker_loop(
                         let outcome = match path.as_deref() {
                             Some(p) => {
                                 let mut c = crate::security::cache::VersionCache::load(p);
-                                let out =
-                                    crate::security::check_versions_with_cache(&packages, &mut c);
+                                let out = crate::security::check_versions_with_cache(
+                                    &packages, &mut c, &policy,
+                                );
                                 c.prune_expired(now_secs());
                                 if let Err(e) = c.save(p) {
                                     eprintln!("warning: could not save version cache: {e}");
                                 }
                                 out
                             }
-                            None => crate::security::check_versions(&packages),
+                            None => crate::security::check_versions(&packages, &policy),
                         };
                         send_result(&tx, ScanResult::VersionsChecked(count, outcome));
                     });
@@ -228,15 +249,16 @@ fn worker_loop(
                         let outcome = match path.as_deref() {
                             Some(p) => {
                                 let mut c = crate::security::cache::VersionCache::load(p);
-                                let out =
-                                    crate::security::check_versions_with_cache(&packages, &mut c);
+                                let out = crate::security::check_versions_with_cache(
+                                    &packages, &mut c, &policy,
+                                );
                                 c.prune_expired(now_secs());
                                 if let Err(e) = c.save(p) {
                                     eprintln!("warning: could not save version cache: {e}");
                                 }
                                 out
                             }
-                            None => crate::security::check_versions(&packages),
+                            None => crate::security::check_versions(&packages, &policy),
                         };
                         send_result(&tx, ScanResult::VersionsChecked(count, outcome));
                     });

@@ -7,6 +7,19 @@ found by an Aikido scan and by review rounds on each fix. Two behavior changes
 are called out under Changed.
 
 ### Security
+- **Private package names can be kept off the network (#95)**: a
+  `[privacy] private_packages` list in the config file withholds matching
+  packages from OSV.dev and the registries, for the TUI and the MCP tools. The
+  policy is applied before a request is built, so nothing is sent, cached, or
+  reported as clean; the status line and the MCP reports count what was
+  withheld. A config file that exists but cannot be used disables all package
+  lookups instead of falling back to defaults. The file is now strict: any
+  unknown key at any level (not only under `[privacy]`) makes it unusable, so a
+  misspelt `[privcy]`, or a list written inside `[vulncheck]`, cannot leave the
+  list silently empty. Packages marked private are also removed from the
+  on-disk lookup caches the next time a scan runs. Config files with
+  stale or misspelt keys that used to be ignored now disable lookups until
+  they are fixed; the warning and the status line name the cause.
 - **MCP delete is limited to discovered entries (#119)**: `delete_packages`
   only removes entries that discovery lists (what `search_packages` returns),
   never a configured root, a provider container, a symlink, or a path inside a
@@ -70,8 +83,10 @@ are called out under Changed.
   default).
 
 ### Known limitations
-- Private or internal package names are sent to OSV and the public registries
-  like any other; there is no deny list yet (#95, documented in the README).
+- The lookup caches are last-writer-wins across ccmd processes, as they always
+  were. A process that loaded a cache before a package was marked private can
+  write that entry back when it saves; the next scan under the new list removes
+  it again. Nothing is sent meanwhile: the list is applied before any request.
 - Tree expansion and provider file reads still follow symlinked directories;
   only sizing was fixed (#92, #93).
 - pnpm 11 and later global stores are not identified for vulnerability scanning

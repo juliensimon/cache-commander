@@ -36,6 +36,23 @@ fn key(pkg: &PackageId) -> String {
     format!("{}|{}|{}", pkg.ecosystem, pkg.name, pkg.version)
 }
 
+/// Whether a cache key (`ecosystem|name|version`) names a package the policy
+/// withholds.
+///
+/// `|` is not escaped, and both a name and a version can come from a file name
+/// anyone can write, so where the name ends is not knowable from the key.
+/// Every split is tried: the key is private if the policy withholds ANY prefix
+/// that ends before a `|`. That can only over-match, which here means a cached
+/// entry is dropped and fetched again; reading the wrong boundary could leave a
+/// private name on disk. A key of another shape names nothing and is kept.
+fn key_is_private(key: &str, policy: &crate::security::privacy::PrivacyPolicy) -> bool {
+    let Some((ecosystem, rest)) = key.split_once('|') else {
+        return false;
+    };
+    rest.match_indices('|')
+        .any(|(end, _)| policy.is_private_name(ecosystem, &rest[..end]))
+}
+
 fn now_secs() -> u64 {
     // If the clock is set before 1970 we can't compute age correctly.
     // Returning u64::MAX makes every entry appear expired instead of
@@ -179,6 +196,20 @@ impl VulnCache {
     /// scanner calls this before `save()` so the disk file doesn't grow
     /// unbounded as packages get upgraded (stale `(name, version)` tuples
     /// would otherwise linger, just ignored on read).
+    /// Remove entries for packages the privacy policy withholds, returning how
+    /// many were dropped. Withholding the lookup is not enough: the caller
+    /// saves this cache, and a name cached before it was marked private would
+    /// stay in the file. A policy that blocks everything because the config
+    /// is unusable names nothing in particular, so it drops nothing.
+    pub fn purge_private(&mut self, policy: &crate::security::privacy::PrivacyPolicy) -> usize {
+        if policy.blocks_everything() {
+            return 0;
+        }
+        let before = self.entries.len();
+        self.entries.retain(|key, _| !key_is_private(key, policy));
+        before - self.entries.len()
+    }
+
     pub fn prune_expired(&mut self, now: u64) {
         let ttl = self.ttl_secs;
         self.entries
@@ -274,6 +305,20 @@ impl VersionCache {
         }
     }
 
+    /// Remove entries for packages the privacy policy withholds, returning how
+    /// many were dropped. Withholding the lookup is not enough: the caller
+    /// saves this cache, and a name cached before it was marked private would
+    /// stay in the file. A policy that blocks everything because the config
+    /// is unusable names nothing in particular, so it drops nothing.
+    pub fn purge_private(&mut self, policy: &crate::security::privacy::PrivacyPolicy) -> usize {
+        if policy.blocks_everything() {
+            return 0;
+        }
+        let before = self.entries.len();
+        self.entries.retain(|key, _| !key_is_private(key, policy));
+        before - self.entries.len()
+    }
+
     pub fn prune_expired(&mut self, now: u64) {
         let ttl = self.ttl_secs;
         self.entries
@@ -325,6 +370,32 @@ pub fn default_paths() -> Option<(PathBuf, PathBuf)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn key_is_private_reads_the_name_whole_and_keeps_odd_keys() {
+        use crate::security::privacy::PrivacyPolicy;
+        let policy = PrivacyPolicy::new(["acme|x"]);
+        // A name containing `|`: the version is what follows the LAST one.
+        assert!(key_is_private("npm|acme|x|1.0.0", &policy));
+        assert!(!key_is_private("npm|other|1.0.0", &policy));
+        // Keys of another shape name nothing; they are kept, not guessed at.
+        assert!(!key_is_private("garbage", &PrivacyPolicy::new(["garbage"])));
+        assert!(!key_is_private(
+            "npm|only-two",
+            &PrivacyPolicy::new(["only-two"])
+        ));
+    }
+
+    #[test]
+    fn key_is_private_cannot_be_hidden_by_a_delimiter_in_the_version() {
+        // `|` is not escaped in the key, and a version comes from a file name
+        // anyone can write. `PyPI|private|1.0|secret` must not be read as the
+        // package `private|1.0`.
+        let policy = crate::security::privacy::PrivacyPolicy::new(["private"]);
+        assert!(key_is_private("PyPI|private|1.0|secret", &policy));
+        assert!(key_is_private("PyPI|private|1.0", &policy));
+        assert!(!key_is_private("PyPI|other|1.0|private", &policy));
+    }
+
     use super::*;
 
     fn pkg(name: &str, version: &str) -> PackageId {
