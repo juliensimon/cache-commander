@@ -54,6 +54,11 @@ pub struct App {
     /// startup, which can be hours earlier) so the confirmation dialog and the
     /// decision share a current view.
     protected: crate::providers::ProtectedSet,
+    /// Package directories the last scan found but could not identify (#117).
+    /// Kept here, not only in the tick that reported it: discovery reports
+    /// before the network answers, so the scan summary arrives in a later tick
+    /// and would otherwise replace the warning with "no vulnerabilities found".
+    unidentified_manifests: usize,
 }
 
 impl App {
@@ -92,6 +97,7 @@ impl App {
             update_rx,
             protected: crate::providers::ProtectedSet::resolve(),
             protected_dirs: crate::providers::protected_dirs(),
+            unidentified_manifests: 0,
         }
     }
 
@@ -204,9 +210,10 @@ impl App {
                         String::new()
                     };
                     let cache_suffix = format!(
-                        "{}{}",
+                        "{}{}{}",
                         cache_hit_suffix(cached_hits, scanned),
-                        private_suffix
+                        private_suffix,
+                        self.unidentified_suffix()
                     );
                     if vuln_count > 0 {
                         had_informative_vuln = true;
@@ -259,9 +266,10 @@ impl App {
                         String::new()
                     };
                     let cache_suffix = format!(
-                        "{}{}",
+                        "{}{}{}",
                         cache_hit_suffix(cached_hits, checked),
-                        private_suffix
+                        private_suffix,
+                        self.unidentified_suffix()
                     );
                     if outdated > 0 {
                         had_informative_version = true;
@@ -286,6 +294,17 @@ impl App {
                             )
                         };
                         tick_parts.push(tail);
+                    }
+                }
+                ScanResult::ManifestsUnidentified(n) => {
+                    self.unidentified_manifests = n;
+                    // Not scanned: the user must not read their absence as clean.
+                    if n > 0 {
+                        let part = unidentified_text(n);
+                        // A vuln scan and a version check both report.
+                        if !tick_parts.contains(&part) {
+                            tick_parts.push(part);
+                        }
                     }
                 }
                 ScanResult::BrewOutdatedCompleted(results) => {
@@ -388,6 +407,14 @@ impl App {
             return None;
         }
         Some(node.path.clone())
+    }
+
+    /// Appended to a scan summary while the last discovery skipped manifests.
+    fn unidentified_suffix(&self) -> String {
+        if self.unidentified_manifests == 0 {
+            return String::new();
+        }
+        format!(" [{}]", unidentified_text(self.unidentified_manifests))
     }
 
     fn handle_normal_key(&mut self, key: KeyEvent) {
@@ -1192,6 +1219,15 @@ pub(crate) fn cache_hit_suffix(cached_hits: usize, attempted: usize) -> String {
     format!(" [cache: {}/{} ({}%)]", cached_hits, attempted, pct)
 }
 
+fn unidentified_text(n: usize) -> String {
+    format!(
+        "{} package manifest{} could not be identified and {} not scanned",
+        n,
+        if n == 1 { "" } else { "s" },
+        if n == 1 { "was" } else { "were" }
+    )
+}
+
 /// Status-line note for packages the privacy policy kept off the network
 /// (#95). Empty when none were: the common case stays silent.
 ///
@@ -1756,6 +1792,105 @@ mod tests {
             rx.try_recv(),
             Ok(ScanRequest::ExpandNode(p)) if p == PathBuf::from("/tmp/dir")
         ));
+    }
+
+    #[test]
+    fn tick_says_when_manifests_could_not_be_identified() {
+        // #117: not scanned must not read as clean.
+        let (mut app, tx, _rx) = build_app(bare_config());
+        tx.send(ScanResult::ManifestsUnidentified(3)).unwrap();
+        app.tick();
+        let msg = app.status_msg.as_deref().unwrap_or("");
+        assert!(msg.contains("3 package manifests"), "got: {msg}");
+        assert!(msg.contains("not scanned"), "got: {msg}");
+        tx.send(ScanResult::ManifestsUnidentified(1)).unwrap();
+        app.tick();
+        let msg = app.status_msg.as_deref().unwrap_or("");
+        assert!(msg.contains("1 package manifest could not"), "got: {msg}");
+        assert!(msg.contains("was not scanned"), "got: {msg}");
+    }
+
+    #[test]
+    fn a_later_scan_result_does_not_erase_the_unidentified_warning() {
+        // Discovery reports before the network answers, so the two arrive in
+        // different ticks. "Scanned 200 packages: no vulnerabilities found"
+        // must not be the last word when 1 manifest was not scanned (#117).
+        let (mut app, tx, _rx) = build_app(bare_config());
+        app.tree.set_roots(vec![mk_node("ok", 1, CacheKind::Cargo)]);
+        tx.send(ScanResult::ManifestsUnidentified(1)).unwrap();
+        app.tick();
+        tx.send(ScanResult::VulnsScanned(
+            200,
+            crate::security::VulnScanOutcome {
+                results: HashMap::new(),
+                unscanned_packages: 0,
+                cached_hits: 0,
+                skipped_private: 0,
+            },
+        ))
+        .unwrap();
+        app.tick();
+        let msg = app.status_msg.as_deref().unwrap_or("");
+        assert!(msg.contains("no vulnerabilities found"), "got: {msg}");
+        assert!(msg.contains("1 package manifest"), "got: {msg}");
+        assert!(msg.contains("not scanned"), "got: {msg}");
+    }
+
+    #[test]
+    fn a_later_version_check_does_not_erase_the_unidentified_warning() {
+        let (mut app, tx, _rx) = build_app(bare_config());
+        app.tree.set_roots(vec![mk_node("ok", 1, CacheKind::Cargo)]);
+        tx.send(ScanResult::ManifestsUnidentified(2)).unwrap();
+        app.tick();
+        tx.send(ScanResult::VersionsChecked(
+            50,
+            crate::security::VersionCheckOutcome {
+                results: HashMap::new(),
+                unchecked_packages: 0,
+                cached_hits: 0,
+                skipped_private: 0,
+            },
+        ))
+        .unwrap();
+        app.tick();
+        let msg = app.status_msg.as_deref().unwrap_or("");
+        assert!(msg.contains("all up to date"), "got: {msg}");
+        assert!(msg.contains("2 package manifests"), "got: {msg}");
+    }
+
+    #[test]
+    fn a_vuln_scan_and_a_version_check_report_the_warning_once() {
+        let (mut app, tx, _rx) = build_app(bare_config());
+        app.tree.set_roots(vec![mk_node("ok", 1, CacheKind::Cargo)]);
+        tx.send(ScanResult::ManifestsUnidentified(2)).unwrap();
+        tx.send(ScanResult::ManifestsUnidentified(2)).unwrap();
+        app.tick();
+        let msg = app.status_msg.as_deref().unwrap_or("");
+        assert_eq!(msg.matches("could not be identified").count(), 1, "{msg}");
+    }
+
+    #[test]
+    fn a_clean_rescan_clears_the_unidentified_warning() {
+        // The count belongs to the last discovery, not to the session.
+        let (mut app, tx, _rx) = build_app(bare_config());
+        app.tree.set_roots(vec![mk_node("ok", 1, CacheKind::Cargo)]);
+        tx.send(ScanResult::ManifestsUnidentified(3)).unwrap();
+        app.tick();
+        tx.send(ScanResult::ManifestsUnidentified(0)).unwrap();
+        app.tick();
+        tx.send(ScanResult::VulnsScanned(
+            10,
+            crate::security::VulnScanOutcome {
+                results: HashMap::new(),
+                unscanned_packages: 0,
+                cached_hits: 0,
+                skipped_private: 0,
+            },
+        ))
+        .unwrap();
+        app.tick();
+        let msg = app.status_msg.as_deref().unwrap_or("");
+        assert!(!msg.contains("manifest"), "got: {msg}");
     }
 
     #[test]

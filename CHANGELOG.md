@@ -74,6 +74,16 @@ are called out under Changed.
   root to browse it. For a file, such as the links to blobs in a Hugging Face
   snapshot, the size is the blob's, counted where the blob lives; the parent
   directory already treated links as 0.
+- **Unidentified npm manifests are reported (#117)**: a package directory under
+  `node_modules` whose `package.json` is missing, malformed, over 1 MiB, or has
+  an invalid name or version used to vanish from the scan, so the package looked
+  absent or clean. The TUI status line now says how many were skipped, and the
+  MCP `scan_vulnerabilities` / `check_outdated` reports carry
+  `unidentified_manifests` (exact count) and `unidentified` (the first 100, with
+  path and reason). It covers the vulnerability scan and the version check, and
+  the count is of directories: the same broken package copied into several
+  caches counts once per copy, and each path is listed. Only npm manifests are
+  covered; other providers identify a package from its path or file name.
 - **Behavior change (MCP)**: an agent can no longer delete a root, a container
   such as `~/.cache/huggingface`, a symlink, or a path inside a package. Delete
   the discovered entries instead.

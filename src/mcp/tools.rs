@@ -63,8 +63,24 @@ pub struct VulnScanReport {
     /// True when the config file was unusable, so EVERY package was withheld
     /// (as opposed to a `[privacy]` list matching some of them).
     pub lookups_blocked: bool,
+    /// npm package directories found but not scanned because their manifest
+    /// could not be identified (#117). Absence from `packages` means nothing
+    /// for them. Counted per directory, not per distinct package.
+    pub unidentified_manifests: usize,
+    /// The first of them, with the reason (capped; see `unidentified_manifests`).
+    pub unidentified: Vec<UnidentifiedEntry>,
     pub packages: Vec<VulnResult>,
 }
+
+/// A package directory discovery could not identify.
+#[derive(Debug, Clone, Serialize)]
+pub struct UnidentifiedEntry {
+    pub path: String,
+    pub reason: String,
+}
+
+/// How many unidentified entries a report lists; the count is always exact.
+pub const MAX_UNIDENTIFIED_LISTED: usize = 100;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct VulnResult {
@@ -93,6 +109,10 @@ pub struct OutdatedReport {
     pub skipped_private: usize,
     /// True when the config file was unusable, so EVERY package was withheld.
     pub lookups_blocked: bool,
+    /// npm package directories not checked because their manifest could not be
+    /// identified (#117).
+    pub unidentified_manifests: usize,
+    pub unidentified: Vec<UnidentifiedEntry>,
     pub packages: Vec<OutdatedResult>,
 }
 
