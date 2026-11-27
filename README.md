@@ -248,6 +248,8 @@ When you press `V` (or pass `--vulncheck`):
 4. Filters out vulnerabilities already fixed by the installed version
 5. Displays results in the detail panel with fix version, upgrade command, and advisory link
 
+A package that cannot be identified is not silently skipped: if an npm package directory has a missing, malformed, oversized or invalid `package.json`, the status line says how many manifests were not scanned, and the MCP scan reports list them with the reason.
+
 ### What Leaves Your Machine
 
 Scanning and browsing your caches is local. Apart from the update check (on by default, last row), nothing about your packages is sent until you ask for it. These are the only network requests `ccmd` makes, and what each one contains:

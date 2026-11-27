@@ -40,13 +40,44 @@ pub enum ScanResult {
     BrewOutdatedCompleted(
         std::collections::HashMap<String, crate::providers::homebrew::BrewOutdatedEntry>,
     ),
+    /// How many package directories discovery found but could not turn into a
+    /// package (#117). They are not scanned, so the UI must say so.
+    ManifestsUnidentified(usize),
+}
+
+/// A package directory whose manifest could not be turned into an identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnidentifiedManifest {
+    pub path: PathBuf,
+    pub reason: &'static str,
+}
+
+/// What discovery found: the identified packages, and what it had to skip.
+#[derive(Debug, Default)]
+pub struct Discovery {
+    pub packages: Vec<(PathBuf, crate::providers::PackageId)>,
+    pub unidentified: Vec<UnidentifiedManifest>,
 }
 
 /// Walk a set of root paths to find all identifiable packages.
 /// Deduplicates by (ecosystem, name, version) — each unique package is returned once.
+/// Use [`discover`] to also learn what could not be identified.
+#[allow(dead_code)] // the binary uses `discover`; tests and library callers use this
 pub fn discover_packages(roots: &[PathBuf]) -> Vec<(PathBuf, crate::providers::PackageId)> {
+    discover(roots).packages
+}
+
+/// [`discover_packages`], plus the npm package directories whose manifest could
+/// not be turned into a package (#117): missing, malformed, oversized, or with
+/// an invalid name or version. Without this they vanish from the scan and the
+/// package looks absent or clean. Only npm manifests are covered; other
+/// providers decide identity from paths or file names.
+pub fn discover(roots: &[PathBuf]) -> Discovery {
     let mut seen = std::collections::HashSet::new();
     let mut packages = Vec::new();
+    let mut unidentified = Vec::new();
+    // Overlapping roots walk the same directory twice; a path is reported once.
+    let mut unidentified_paths = std::collections::HashSet::new();
     for root in roots {
         if !root.exists() {
             continue;
@@ -70,10 +101,37 @@ pub fn discover_packages(roots: &[PathBuf]) -> Vec<(PathBuf, crate::providers::P
                 if seen.insert(key) {
                     packages.push((path.to_path_buf(), id));
                 }
+            } else if kind == crate::tree::node::CacheKind::Npm
+                && let Some(reason) = crate::providers::npm::unidentified_reason(&path)
+                && unidentified_paths.insert(path.to_path_buf())
+            {
+                unidentified.push(UnidentifiedManifest {
+                    path: path.to_path_buf(),
+                    reason: reason.describe(),
+                });
             }
         }
     }
-    packages
+    Discovery {
+        packages,
+        unidentified,
+    }
+}
+
+/// Discover packages for a scan and tell the UI at once what was skipped, plus
+/// that count, for the caller to put in the scan's own outcome. The early
+/// message is feedback while the network answers; the outcome's copy is what the
+/// final summary uses, so overlapping scans cannot swap their counts.
+fn discover_for_scan(
+    roots: &[PathBuf],
+    tx: &mpsc::Sender<ScanResult>,
+) -> (Vec<(PathBuf, crate::providers::PackageId)>, usize) {
+    let found = discover(roots);
+    let skipped = found.unidentified.len();
+    if skipped > 0 {
+        send_result(tx, ScanResult::ManifestsUnidentified(skipped));
+    }
+    (found.packages, skipped)
 }
 
 /// Build a rayon-based thread pool with bounded parallelism.
@@ -182,45 +240,13 @@ fn worker_loop(
                 let policy = Arc::clone(&policy);
                 if let Some(ref pool) = pool {
                     pool.spawn(move || {
-                        let packages = discover_packages(&roots);
-                        let count = packages.len();
-                        let path = crate::security::cache::default_paths().map(|(v, _)| v);
-                        let outcome = match path.as_deref() {
-                            Some(p) => {
-                                let mut c = crate::security::cache::VulnCache::load(p);
-                                let out = crate::security::scan_vulns_with_cache(
-                                    &packages, &mut c, &policy,
-                                );
-                                c.prune_expired(now_secs());
-                                if let Err(e) = c.save(p) {
-                                    eprintln!("warning: could not save vuln cache: {e}");
-                                }
-                                out
-                            }
-                            None => crate::security::scan_vulns(&packages, &policy),
-                        };
-                        send_result(&tx, ScanResult::VulnsScanned(count, outcome));
+                        let cache = crate::security::cache::default_paths().map(|(v, _)| v);
+                        run_vuln_scan(&roots, &tx, &policy, cache.as_deref());
                     });
                 } else {
                     std::thread::spawn(move || {
-                        let packages = discover_packages(&roots);
-                        let count = packages.len();
-                        let path = crate::security::cache::default_paths().map(|(v, _)| v);
-                        let outcome = match path.as_deref() {
-                            Some(p) => {
-                                let mut c = crate::security::cache::VulnCache::load(p);
-                                let out = crate::security::scan_vulns_with_cache(
-                                    &packages, &mut c, &policy,
-                                );
-                                c.prune_expired(now_secs());
-                                if let Err(e) = c.save(p) {
-                                    eprintln!("warning: could not save vuln cache: {e}");
-                                }
-                                out
-                            }
-                            None => crate::security::scan_vulns(&packages, &policy),
-                        };
-                        send_result(&tx, ScanResult::VulnsScanned(count, outcome));
+                        let cache = crate::security::cache::default_paths().map(|(v, _)| v);
+                        run_vuln_scan(&roots, &tx, &policy, cache.as_deref());
                     });
                 }
             }
@@ -229,45 +255,13 @@ fn worker_loop(
                 let policy = Arc::clone(&policy);
                 if let Some(ref pool) = pool {
                     pool.spawn(move || {
-                        let packages = discover_packages(&roots);
-                        let count = packages.len();
-                        let path = crate::security::cache::default_paths().map(|(_, v)| v);
-                        let outcome = match path.as_deref() {
-                            Some(p) => {
-                                let mut c = crate::security::cache::VersionCache::load(p);
-                                let out = crate::security::check_versions_with_cache(
-                                    &packages, &mut c, &policy,
-                                );
-                                c.prune_expired(now_secs());
-                                if let Err(e) = c.save(p) {
-                                    eprintln!("warning: could not save version cache: {e}");
-                                }
-                                out
-                            }
-                            None => crate::security::check_versions(&packages, &policy),
-                        };
-                        send_result(&tx, ScanResult::VersionsChecked(count, outcome));
+                        let cache = crate::security::cache::default_paths().map(|(_, v)| v);
+                        run_version_check(&roots, &tx, &policy, cache.as_deref());
                     });
                 } else {
                     std::thread::spawn(move || {
-                        let packages = discover_packages(&roots);
-                        let count = packages.len();
-                        let path = crate::security::cache::default_paths().map(|(_, v)| v);
-                        let outcome = match path.as_deref() {
-                            Some(p) => {
-                                let mut c = crate::security::cache::VersionCache::load(p);
-                                let out = crate::security::check_versions_with_cache(
-                                    &packages, &mut c, &policy,
-                                );
-                                c.prune_expired(now_secs());
-                                if let Err(e) = c.save(p) {
-                                    eprintln!("warning: could not save version cache: {e}");
-                                }
-                                out
-                            }
-                            None => crate::security::check_versions(&packages, &policy),
-                        };
-                        send_result(&tx, ScanResult::VersionsChecked(count, outcome));
+                        let cache = crate::security::cache::default_paths().map(|(_, v)| v);
+                        run_version_check(&roots, &tx, &policy, cache.as_deref());
                     });
                 }
             }
@@ -356,6 +350,59 @@ pub fn expand(path: &std::path::Path) -> (Vec<TreeNode>, Vec<PathBuf>) {
     (children, deferred)
 }
 
+/// One vulnerability scan: discover, tell the UI what discovery skipped, query
+/// OSV (through the cache at `cache_path`, if any) and send the outcome.
+fn run_vuln_scan(
+    roots: &[PathBuf],
+    tx: &mpsc::Sender<ScanResult>,
+    policy: &PrivacyPolicy,
+    cache_path: Option<&std::path::Path>,
+) {
+    let (packages, unidentified) = discover_for_scan(roots, tx);
+    let count = packages.len();
+    let outcome = match cache_path {
+        Some(p) => {
+            let mut c = crate::security::cache::VulnCache::load(p);
+            let out = crate::security::scan_vulns_with_cache(&packages, &mut c, policy);
+            c.prune_expired(now_secs());
+            if let Err(e) = c.save(p) {
+                eprintln!("warning: could not save vuln cache: {e}");
+            }
+            out
+        }
+        None => crate::security::scan_vulns(&packages, policy),
+    };
+    let mut outcome = outcome;
+    outcome.unidentified_manifests = unidentified;
+    send_result(tx, ScanResult::VulnsScanned(count, outcome));
+}
+
+/// One version check; see [`run_vuln_scan`].
+fn run_version_check(
+    roots: &[PathBuf],
+    tx: &mpsc::Sender<ScanResult>,
+    policy: &PrivacyPolicy,
+    cache_path: Option<&std::path::Path>,
+) {
+    let (packages, unidentified) = discover_for_scan(roots, tx);
+    let count = packages.len();
+    let outcome = match cache_path {
+        Some(p) => {
+            let mut c = crate::security::cache::VersionCache::load(p);
+            let out = crate::security::check_versions_with_cache(&packages, &mut c, policy);
+            c.prune_expired(now_secs());
+            if let Err(e) = c.save(p) {
+                eprintln!("warning: could not save version cache: {e}");
+            }
+            out
+        }
+        None => crate::security::check_versions(&packages, policy),
+    };
+    let mut outcome = outcome;
+    outcome.unidentified_manifests = unidentified;
+    send_result(tx, ScanResult::VersionsChecked(count, outcome));
+}
+
 fn run_brew_outdated()
 -> std::collections::HashMap<String, crate::providers::homebrew::BrewOutdatedEntry> {
     let output = match std::process::Command::new("brew")
@@ -389,6 +436,155 @@ mod tests {
         drop(rx); // drop receiver
         // Should log, not panic
         send_result(&tx, ScanResult::RootsScanned(vec![]));
+    }
+
+    fn npx_modules(tmp: &std::path::Path) -> PathBuf {
+        let m = tmp.join(".npm/_npx/abc/node_modules");
+        std::fs::create_dir_all(&m).unwrap();
+        m
+    }
+
+    #[test]
+    fn discover_reports_npm_package_dirs_it_could_not_identify() {
+        // #117: these used to vanish, so the package looked absent or clean.
+        let tmp = tempfile::tempdir().unwrap();
+        let m = npx_modules(tmp.path());
+        let write = |rel: &str, json: Option<&str>| {
+            std::fs::create_dir_all(m.join(rel)).unwrap();
+            if let Some(j) = json {
+                std::fs::write(m.join(rel).join("package.json"), j).unwrap();
+            }
+        };
+        write("good", Some(r#"{"name":"good","version":"1.0.0"}"#));
+        write("malformed", Some("{oops"));
+        write("nomanifest", None);
+        write("badname", Some(r#"{"name":"../x","version":"1.0.0"}"#));
+        write("@acme/scoped", Some("{"));
+        write(".bin", None); // not a package
+
+        let found = discover(&[tmp.path().join(".npm")]);
+
+        let ids: Vec<_> = found
+            .packages
+            .iter()
+            .map(|(_, id)| id.name.as_str())
+            .collect();
+        assert_eq!(ids, vec!["good"]);
+        let mut got: Vec<_> = found
+            .unidentified
+            .iter()
+            .map(|u| {
+                (
+                    u.path.file_name().unwrap().to_str().unwrap().to_string(),
+                    u.reason,
+                )
+            })
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "badname".to_string(),
+                    "package.json name is not a valid npm name"
+                ),
+                ("malformed".to_string(), "package.json is not valid JSON"),
+                ("nomanifest".to_string(), "no package.json"),
+                ("scoped".to_string(), "package.json is not valid JSON"),
+            ]
+        );
+    }
+
+    #[test]
+    fn overlapping_roots_do_not_count_a_broken_package_twice() {
+        let tmp = tempfile::tempdir().unwrap();
+        let m = npx_modules(tmp.path());
+        std::fs::create_dir_all(m.join("bad")).unwrap();
+        // `.npm` and `.npm/_npx` contain the same directory.
+        let found = discover(&[tmp.path().join(".npm"), tmp.path().join(".npm/_npx")]);
+        assert_eq!(found.unidentified.len(), 1, "{:?}", found.unidentified);
+    }
+
+    #[test]
+    fn discover_packages_is_discover_without_the_report() {
+        let tmp = tempfile::tempdir().unwrap();
+        let m = npx_modules(tmp.path());
+        std::fs::create_dir_all(m.join("bad")).unwrap();
+        let roots = [tmp.path().join(".npm")];
+        assert_eq!(
+            discover_packages(&roots).len(),
+            discover(&roots).packages.len()
+        );
+    }
+
+    #[test]
+    fn a_scan_tells_the_ui_how_many_manifests_it_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let m = npx_modules(tmp.path());
+        std::fs::create_dir_all(m.join("bad")).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let (packages, skipped) = discover_for_scan(&[tmp.path().join(".npm")], &tx);
+        assert!(packages.is_empty());
+        assert_eq!(skipped, 1, "the caller needs the count for the outcome");
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ScanResult::ManifestsUnidentified(1))
+        ));
+        // Nothing skipped: nothing to say early.
+        let empty = tempfile::tempdir().unwrap();
+        discover_for_scan(&[empty.path().to_path_buf()], &tx);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_vuln_scan_reports_skipped_manifests_before_its_outcome() {
+        // The wiring that matters for #117: a scan must say what discovery
+        // skipped. Only a broken manifest exists, so no request is made.
+        let tmp = tempfile::tempdir().unwrap();
+        let m = npx_modules(tmp.path());
+        std::fs::create_dir_all(m.join("bad")).unwrap();
+        let (tx, rx) = mpsc::channel();
+        run_vuln_scan(
+            &[tmp.path().join(".npm")],
+            &tx,
+            &PrivacyPolicy::default(),
+            None,
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ScanResult::ManifestsUnidentified(1))
+        ));
+        // The outcome carries the same count, for the summary that follows.
+        match rx.try_recv() {
+            Ok(ScanResult::VulnsScanned(0, outcome)) => {
+                assert_eq!(outcome.unidentified_manifests, 1)
+            }
+            _ => panic!("expected the vuln outcome"),
+        }
+    }
+
+    #[test]
+    fn a_version_check_reports_skipped_manifests_too() {
+        let tmp = tempfile::tempdir().unwrap();
+        let m = npx_modules(tmp.path());
+        std::fs::create_dir_all(m.join("bad")).unwrap();
+        let (tx, rx) = mpsc::channel();
+        run_version_check(
+            &[tmp.path().join(".npm")],
+            &tx,
+            &PrivacyPolicy::default(),
+            None,
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ScanResult::ManifestsUnidentified(1))
+        ));
+        match rx.try_recv() {
+            Ok(ScanResult::VersionsChecked(0, outcome)) => {
+                assert_eq!(outcome.unidentified_manifests, 1)
+            }
+            _ => panic!("expected the version outcome"),
+        }
     }
 
     #[test]

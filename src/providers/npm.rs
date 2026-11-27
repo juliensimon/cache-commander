@@ -119,19 +119,116 @@ fn npx_package_name(path: &Path) -> Option<String> {
 /// cannot spoof it) and both fields must be valid npm coordinates. A
 /// duplicated root key resolves to the last one, as with `JSON.parse` in npm.
 pub fn package_id(path: &Path) -> Option<super::PackageId> {
-    let content = read_package_json(path)?;
-    let root: serde_json::Value = serde_json::from_str(&content).ok()?;
-    let root = root.as_object()?;
-    let name = root.get("name")?.as_str()?;
-    let version = root.get("version")?.as_str()?;
-    if !is_valid_npm_name(name) || !is_valid_npm_version(version) {
-        return None;
+    identity(path).ok()
+}
+
+/// Why a package directory has no identity (#117). A scan that skips such a
+/// directory must say so: otherwise the package looks absent, or clean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unidentified {
+    MissingManifest,
+    TooLarge,
+    Unreadable,
+    NotJson,
+    NoNameOrVersion,
+    InvalidName,
+    InvalidVersion,
+}
+
+impl Unidentified {
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::MissingManifest => "no package.json",
+            Self::TooLarge => "package.json larger than 1 MiB",
+            Self::Unreadable => "package.json unreadable or not UTF-8",
+            Self::NotJson => "package.json is not valid JSON",
+            Self::NoNameOrVersion => "package.json has no string name and version",
+            Self::InvalidName => "package.json name is not a valid npm name",
+            Self::InvalidVersion => "package.json version is not a concrete semver version",
+        }
     }
-    Some(super::PackageId {
+}
+
+/// [`package_id`] with the reason it failed.
+pub fn identity(path: &Path) -> Result<super::PackageId, Unidentified> {
+    let file = std::fs::File::open(path.join("package.json")).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            Unidentified::MissingManifest
+        } else {
+            Unidentified::Unreadable
+        }
+    })?;
+    // Only the length is asked of the file to tell "too large" from "not
+    // UTF-8"; the bytes still go through the bounded reader.
+    let too_large = file
+        .metadata()
+        .is_ok_and(|m| m.len() > MAX_PACKAGE_JSON_BYTES);
+    let content = read_bounded(file, MAX_PACKAGE_JSON_BYTES).ok_or(if too_large {
+        Unidentified::TooLarge
+    } else {
+        Unidentified::Unreadable
+    })?;
+    let root: serde_json::Value =
+        serde_json::from_str(&content).map_err(|_| Unidentified::NotJson)?;
+    let field = |key: &str| {
+        root.as_object()
+            .and_then(|o| o.get(key))
+            .and_then(|v| v.as_str())
+    };
+    let (Some(name), Some(version)) = (field("name"), field("version")) else {
+        return Err(Unidentified::NoNameOrVersion);
+    };
+    if !is_valid_npm_name(name) {
+        return Err(Unidentified::InvalidName);
+    }
+    if !is_valid_npm_version(version) {
+        return Err(Unidentified::InvalidVersion);
+    }
+    Ok(super::PackageId {
         ecosystem: "npm",
         name: name.to_string(),
         version: version.to_string(),
     })
+}
+
+/// Why `path` should have been a package but is not one, or `None` when it is
+/// identified or is not a package location at all.
+///
+/// A package location is a directory directly inside `node_modules` (or inside
+/// an `@scope` directory there). Dot-directories (`.bin`, `.cache`, `.pnpm`)
+/// and scope directories themselves are not packages.
+pub fn unidentified_reason(path: &Path) -> Option<Unidentified> {
+    if !is_package_location(path) {
+        return None;
+    }
+    identity(path).err()
+}
+
+fn is_package_location(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    if name.starts_with('.') || name.starts_with('@') {
+        return false;
+    }
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let parent_name = parent.file_name().and_then(|n| n.to_str());
+    let under_node_modules = match parent_name {
+        Some("node_modules") => true,
+        Some(scope) if scope.starts_with('@') => {
+            parent
+                .parent()
+                .and_then(|g| g.file_name())
+                .and_then(|n| n.to_str())
+                == Some("node_modules")
+        }
+        _ => false,
+    };
+    // The name tests are free; the stat is last, because this runs for every
+    // npm-kind entry the walk could not identify (every file in `_cacache`).
+    under_node_modules && path.is_dir()
 }
 
 /// `pkg` or `@scope/pkg`, at most 214 bytes. Each segment is non-empty, does
@@ -285,6 +382,83 @@ fn detect_install_scripts(path: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    // --- #117: say why a package directory has no identity ---
+
+    fn nm_pkg(root: &Path, rel: &str, json: Option<&str>) -> std::path::PathBuf {
+        let dir = root.join("node_modules").join(rel);
+        std::fs::create_dir_all(&dir).unwrap();
+        if let Some(j) = json {
+            std::fs::write(dir.join("package.json"), j).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn identity_names_the_reason_for_each_failure() {
+        let t = tempfile::tempdir().unwrap();
+        let r = t.path();
+        let case = |rel: &str, json: Option<&str>| identity(&nm_pkg(r, rel, json)).unwrap_err();
+        assert_eq!(case("a", None), Unidentified::MissingManifest);
+        assert_eq!(case("b", Some("{not json")), Unidentified::NotJson);
+        assert_eq!(
+            case("c", Some(r#"{"name":"c"}"#)),
+            Unidentified::NoNameOrVersion
+        );
+        assert_eq!(case("d", Some("[1,2]")), Unidentified::NoNameOrVersion);
+        assert_eq!(
+            case("e", Some(r#"{"name":"../e","version":"1.0.0"}"#)),
+            Unidentified::InvalidName
+        );
+        assert_eq!(
+            case("f", Some(r#"{"name":"f","version":"latest"}"#)),
+            Unidentified::InvalidVersion
+        );
+        let big = format!(
+            r#"{{"name":"g","version":"1.0.0","x":"{}"}}"#,
+            "a".repeat(2 * 1024 * 1024)
+        );
+        assert_eq!(case("g", Some(&big)), Unidentified::TooLarge);
+        let d = nm_pkg(r, "h", None);
+        std::fs::write(d.join("package.json"), [0xff, 0xfe]).unwrap();
+        assert_eq!(identity(&d).unwrap_err(), Unidentified::Unreadable);
+    }
+
+    #[test]
+    fn identity_agrees_with_package_id() {
+        let t = tempfile::tempdir().unwrap();
+        let ok = nm_pkg(t.path(), "ok", Some(r#"{"name":"ok","version":"1.2.3"}"#));
+        assert_eq!(identity(&ok).unwrap(), package_id(&ok).unwrap());
+        let bad = nm_pkg(t.path(), "bad", Some("{"));
+        assert!(identity(&bad).is_err() && package_id(&bad).is_none());
+    }
+
+    #[test]
+    fn only_package_locations_are_reported_as_unidentified() {
+        let t = tempfile::tempdir().unwrap();
+        let r = t.path();
+        // Reported: a package directory, plain and scoped, with a bad manifest.
+        let plain = nm_pkg(r, "broken", Some("{"));
+        let scoped = nm_pkg(r, "@acme/broken", Some("{"));
+        assert_eq!(unidentified_reason(&plain), Some(Unidentified::NotJson));
+        assert_eq!(unidentified_reason(&scoped), Some(Unidentified::NotJson));
+        // Not reported: identified packages, scope dirs, dot dirs, and
+        // directories that are merely inside a package.
+        let good = nm_pkg(r, "good", Some(r#"{"name":"good","version":"1.0.0"}"#));
+        assert_eq!(unidentified_reason(&good), None);
+        assert_eq!(unidentified_reason(&r.join("node_modules/@acme")), None);
+        let bin = nm_pkg(r, ".bin", None);
+        assert_eq!(unidentified_reason(&bin), None);
+        let inner = good.join("lib");
+        std::fs::create_dir_all(&inner).unwrap();
+        assert_eq!(unidentified_reason(&inner), None);
+        // The npx project directory has a manifest with no name; it is not
+        // under node_modules, so it is not a package.
+        let npx = r.join(".npm/_npx/abc");
+        std::fs::create_dir_all(&npx).unwrap();
+        std::fs::write(npx.join("package.json"), r#"{"dependencies":{}}"#).unwrap();
+        assert_eq!(unidentified_reason(&npx), None);
+    }
+
     use super::*;
     use std::path::PathBuf;
 

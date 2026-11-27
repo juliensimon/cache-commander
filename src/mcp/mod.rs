@@ -61,6 +61,17 @@ fn canonical_ecosystem(s: &str) -> Option<&'static str> {
     }
 }
 
+/// The first `MAX_UNIDENTIFIED_LISTED` unidentified manifests, for a report.
+fn unidentified_entries(all: &[scanner::UnidentifiedManifest]) -> Vec<tools::UnidentifiedEntry> {
+    all.iter()
+        .take(tools::MAX_UNIDENTIFIED_LISTED)
+        .map(|u| tools::UnidentifiedEntry {
+            path: u.path.to_string_lossy().to_string(),
+            reason: u.reason.to_string(),
+        })
+        .collect()
+}
+
 /// Check if a provider label matches a user-supplied ecosystem filter.
 /// Works with both CacheKind::label() and PackageId.ecosystem vocabularies.
 fn matches_ecosystem(label: &str, filter: &str) -> bool {
@@ -555,13 +566,19 @@ impl CcmdMcp {
         let lookups_blocked = privacy.blocks_everything();
         let ecosystem_filter = input.0.ecosystem;
 
-        let (result, skipped_private) = tokio::task::spawn_blocking(move || {
-            let mut packages = scanner::discover_packages(&roots);
+        let (result, skipped_private, unidentified) = tokio::task::spawn_blocking(move || {
+            let found = scanner::discover(&roots);
+            let mut packages = found.packages;
+            let mut unidentified = found.unidentified;
             if let Some(ref eco) = ecosystem_filter {
                 packages.retain(|(_, pkg)| matches_ecosystem(pkg.ecosystem, eco));
+                // Unidentified manifests are npm's.
+                if !matches_ecosystem("npm", eco) {
+                    unidentified.clear();
+                }
             }
             if packages.is_empty() {
-                return (Vec::new(), 0);
+                return (Vec::new(), 0, unidentified);
             }
             let vulns = security::scan_vulns(&packages, &privacy);
             let skipped = vulns.skipped_private;
@@ -604,7 +621,7 @@ impl CcmdMcp {
                     }
                 })
                 .collect::<Vec<_>>();
-            (found, skipped)
+            (found, skipped, unidentified)
         })
         .await
         .map_err(|e| format!("spawn_blocking failed: {e}"))?;
@@ -623,6 +640,8 @@ impl CcmdMcp {
                 unfixable: total_vulns - fixable,
                 skipped_private,
                 lookups_blocked,
+                unidentified_manifests: unidentified.len(),
+                unidentified: unidentified_entries(&unidentified),
                 packages: result,
             };
             serde_json::to_string_pretty(&report).map_err(|e| format!("serialization failed: {e}"))
@@ -641,13 +660,19 @@ impl CcmdMcp {
         let lookups_blocked = privacy.blocks_everything();
         let ecosystem_filter = input.0.ecosystem;
 
-        let (result, skipped_private) = tokio::task::spawn_blocking(move || {
-            let mut packages = scanner::discover_packages(&roots);
+        let (result, skipped_private, unidentified) = tokio::task::spawn_blocking(move || {
+            let found = scanner::discover(&roots);
+            let mut packages = found.packages;
+            let mut unidentified = found.unidentified;
             if let Some(ref eco) = ecosystem_filter {
                 packages.retain(|(_, pkg)| matches_ecosystem(pkg.ecosystem, eco));
+                // Unidentified manifests are npm's.
+                if !matches_ecosystem("npm", eco) {
+                    unidentified.clear();
+                }
             }
             if packages.is_empty() {
-                return (Vec::new(), 0);
+                return (Vec::new(), 0, unidentified);
             }
             let versions = security::check_versions(&packages, &privacy);
             let skipped = versions.skipped_private;
@@ -679,7 +704,7 @@ impl CcmdMcp {
                     }
                 })
                 .collect::<Vec<_>>();
-            (found, skipped)
+            (found, skipped, unidentified)
         })
         .await
         .map_err(|e| format!("spawn_blocking failed: {e}"))?;
@@ -694,6 +719,8 @@ impl CcmdMcp {
                 by_ecosystem,
                 skipped_private,
                 lookups_blocked,
+                unidentified_manifests: unidentified.len(),
+                unidentified: unidentified_entries(&unidentified),
                 packages: result,
             };
             serde_json::to_string_pretty(&report).map_err(|e| format!("serialization failed: {e}"))
@@ -1153,6 +1180,76 @@ mod tests {
             .join("11");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("requests-2.31.0-py3-none-any.whl"), "").unwrap();
+    }
+
+    #[tokio::test]
+    async fn both_tools_report_manifests_they_could_not_identify() {
+        // #117. A blocked config keeps this test off the network: the one
+        // identified package is withheld, the broken one must still be listed.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join(".npm");
+        let m = root.join("_npx/abc/node_modules");
+        std::fs::create_dir_all(m.join("broken")).unwrap();
+        std::fs::write(m.join("broken/package.json"), "{").unwrap();
+        std::fs::create_dir_all(m.join("good")).unwrap();
+        std::fs::write(
+            m.join("good/package.json"),
+            r#"{"name":"good","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        let mut config = Config::default_for_test();
+        config.roots = vec![root];
+        config.privacy.block_lookups = true;
+        let server = CcmdMcp::new(&config);
+
+        for out in [
+            server
+                .scan_vulnerabilities(Parameters(tools::EcosystemInput { ecosystem: None }))
+                .await
+                .unwrap(),
+            server
+                .check_outdated(Parameters(tools::EcosystemInput { ecosystem: None }))
+                .await
+                .unwrap(),
+        ] {
+            let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(v["unidentified_manifests"], 1, "{v}");
+            assert!(
+                v["unidentified"][0]["path"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with("broken"),
+                "{v}"
+            );
+            assert_eq!(
+                v["unidentified"][0]["reason"], "package.json is not valid JSON",
+                "{v}"
+            );
+        }
+
+        // A filter that excludes npm excludes its unidentified manifests too.
+        let out = server
+            .scan_vulnerabilities(Parameters(tools::EcosystemInput {
+                ecosystem: Some("pip".into()),
+            }))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["unidentified_manifests"], 0, "{v}");
+    }
+
+    #[test]
+    fn the_unidentified_list_is_capped_but_the_count_is_exact() {
+        let all: Vec<_> = (0..tools::MAX_UNIDENTIFIED_LISTED + 5)
+            .map(|i| scanner::UnidentifiedManifest {
+                path: PathBuf::from(format!("/x/{i}")),
+                reason: "no package.json",
+            })
+            .collect();
+        assert_eq!(
+            unidentified_entries(&all).len(),
+            tools::MAX_UNIDENTIFIED_LISTED
+        );
     }
 
     #[tokio::test]
@@ -1851,6 +1948,8 @@ mod tests {
             unfixable: total_vulns - fixable,
             skipped_private: 0,
             lookups_blocked: false,
+            unidentified_manifests: 0,
+            unidentified: vec![],
             packages,
         };
 
@@ -1901,6 +2000,8 @@ mod tests {
             by_ecosystem,
             skipped_private: 0,
             lookups_blocked: false,
+            unidentified_manifests: 0,
+            unidentified: vec![],
             packages,
         };
 
@@ -1990,6 +2091,8 @@ mod tests {
             unfixable: 1,
             skipped_private: 0,
             lookups_blocked: false,
+            unidentified_manifests: 0,
+            unidentified: vec![],
             packages: vec![],
         };
         let json = serde_json::to_string(&report).unwrap();

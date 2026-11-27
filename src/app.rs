@@ -204,9 +204,10 @@ impl App {
                         String::new()
                     };
                     let cache_suffix = format!(
-                        "{}{}",
+                        "{}{}{}",
                         cache_hit_suffix(cached_hits, scanned),
-                        private_suffix
+                        private_suffix,
+                        unidentified_suffix(outcome.unidentified_manifests)
                     );
                     if vuln_count > 0 {
                         had_informative_vuln = true;
@@ -259,9 +260,10 @@ impl App {
                         String::new()
                     };
                     let cache_suffix = format!(
-                        "{}{}",
+                        "{}{}{}",
                         cache_hit_suffix(cached_hits, checked),
-                        private_suffix
+                        private_suffix,
+                        unidentified_suffix(outcome.unidentified_manifests)
                     );
                     if outdated > 0 {
                         had_informative_version = true;
@@ -286,6 +288,16 @@ impl App {
                             )
                         };
                         tick_parts.push(tail);
+                    }
+                }
+                ScanResult::ManifestsUnidentified(n) => {
+                    // Not scanned: the user must not read their absence as clean.
+                    if n > 0 {
+                        let part = unidentified_text(n);
+                        // A vuln scan and a version check both report.
+                        if !tick_parts.contains(&part) {
+                            tick_parts.push(part);
+                        }
                     }
                 }
                 ScanResult::BrewOutdatedCompleted(results) => {
@@ -1192,6 +1204,23 @@ pub(crate) fn cache_hit_suffix(cached_hits: usize, attempted: usize) -> String {
     format!(" [cache: {}/{} ({}%)]", cached_hits, attempted, pct)
 }
 
+/// Appended to a scan summary: what THAT scan's discovery could not identify.
+fn unidentified_suffix(n: usize) -> String {
+    if n == 0 {
+        return String::new();
+    }
+    format!(" [{}]", unidentified_text(n))
+}
+
+fn unidentified_text(n: usize) -> String {
+    format!(
+        "{} package manifest{} could not be identified and {} not scanned",
+        n,
+        if n == 1 { "" } else { "s" },
+        if n == 1 { "was" } else { "were" }
+    )
+}
+
 /// Status-line note for packages the privacy policy kept off the network
 /// (#95). Empty when none were: the common case stays silent.
 ///
@@ -1584,6 +1613,7 @@ mod tests {
                 unscanned_packages: 0,
                 cached_hits: 0,
                 skipped_private: 0,
+                unidentified_manifests: 0,
             },
         ))
         .unwrap();
@@ -1655,6 +1685,7 @@ mod tests {
                 unscanned_packages: 0,
                 cached_hits: 0,
                 skipped_private: 5,
+                unidentified_manifests: 0,
             },
         ))
         .unwrap();
@@ -1677,6 +1708,7 @@ mod tests {
                 unscanned_packages: 0,
                 cached_hits: 0,
                 skipped_private: 4,
+                unidentified_manifests: 0,
             },
         ))
         .unwrap();
@@ -1698,6 +1730,7 @@ mod tests {
                 unscanned_packages: 0,
                 cached_hits: 0,
                 skipped_private: 5,
+                unidentified_manifests: 0,
             },
         ))
         .unwrap();
@@ -1718,6 +1751,7 @@ mod tests {
                 unchecked_packages: 0,
                 cached_hits: 0,
                 skipped_private: 5,
+                unidentified_manifests: 0,
             },
         ))
         .unwrap();
@@ -1759,6 +1793,107 @@ mod tests {
     }
 
     #[test]
+    fn tick_says_when_manifests_could_not_be_identified() {
+        // #117: not scanned must not read as clean.
+        let (mut app, tx, _rx) = build_app(bare_config());
+        tx.send(ScanResult::ManifestsUnidentified(3)).unwrap();
+        app.tick();
+        let msg = app.status_msg.as_deref().unwrap_or("");
+        assert!(msg.contains("3 package manifests"), "got: {msg}");
+        assert!(msg.contains("not scanned"), "got: {msg}");
+        tx.send(ScanResult::ManifestsUnidentified(1)).unwrap();
+        app.tick();
+        let msg = app.status_msg.as_deref().unwrap_or("");
+        assert!(msg.contains("1 package manifest could not"), "got: {msg}");
+        assert!(msg.contains("was not scanned"), "got: {msg}");
+    }
+
+    fn vuln_outcome(unidentified: usize) -> crate::security::VulnScanOutcome {
+        crate::security::VulnScanOutcome {
+            results: HashMap::new(),
+            unscanned_packages: 0,
+            cached_hits: 0,
+            skipped_private: 0,
+            unidentified_manifests: unidentified,
+        }
+    }
+
+    #[test]
+    fn a_later_scan_result_does_not_erase_the_unidentified_warning() {
+        // Discovery reports before the network answers, so the two arrive in
+        // different ticks. "Scanned 200 packages: no vulnerabilities found"
+        // must not be the last word when 1 manifest was not scanned (#117).
+        let (mut app, tx, _rx) = build_app(bare_config());
+        app.tree.set_roots(vec![mk_node("ok", 1, CacheKind::Cargo)]);
+        tx.send(ScanResult::ManifestsUnidentified(1)).unwrap();
+        app.tick();
+        tx.send(ScanResult::VulnsScanned(200, vuln_outcome(1)))
+            .unwrap();
+        app.tick();
+        let msg = app.status_msg.as_deref().unwrap_or("");
+        assert!(msg.contains("no vulnerabilities found"), "got: {msg}");
+        assert!(msg.contains("1 package manifest"), "got: {msg}");
+        assert!(msg.contains("not scanned"), "got: {msg}");
+    }
+
+    #[test]
+    fn each_scan_result_carries_its_own_unidentified_count() {
+        // A selected scan and an all-roots scan can overlap. Each result says
+        // what ITS discovery skipped, whatever arrived in between.
+        let (mut app, tx, _rx) = build_app(bare_config());
+        app.tree.set_roots(vec![mk_node("ok", 1, CacheKind::Cargo)]);
+        tx.send(ScanResult::ManifestsUnidentified(4)).unwrap(); // scan A
+        tx.send(ScanResult::ManifestsUnidentified(0)).unwrap(); // scan B (clean)
+        tx.send(ScanResult::VulnsScanned(10, vuln_outcome(0)))
+            .unwrap(); // B finishes
+        app.tick();
+        let msg = app.status_msg.as_deref().unwrap_or("").to_string();
+        assert!(
+            !msg.contains("[4 package manifests"),
+            "scan B's summary must not carry scan A's count: {msg}"
+        );
+        tx.send(ScanResult::VulnsScanned(10, vuln_outcome(4)))
+            .unwrap(); // A finishes
+        app.tick();
+        let msg = app.status_msg.as_deref().unwrap_or("");
+        assert!(msg.contains("[4 package manifests"), "got: {msg}");
+    }
+
+    #[test]
+    fn a_later_version_check_does_not_erase_the_unidentified_warning() {
+        let (mut app, tx, _rx) = build_app(bare_config());
+        app.tree.set_roots(vec![mk_node("ok", 1, CacheKind::Cargo)]);
+        tx.send(ScanResult::ManifestsUnidentified(2)).unwrap();
+        app.tick();
+        tx.send(ScanResult::VersionsChecked(
+            50,
+            crate::security::VersionCheckOutcome {
+                results: HashMap::new(),
+                unchecked_packages: 0,
+                cached_hits: 0,
+                skipped_private: 0,
+                unidentified_manifests: 2,
+            },
+        ))
+        .unwrap();
+        app.tick();
+        let msg = app.status_msg.as_deref().unwrap_or("");
+        assert!(msg.contains("all up to date"), "got: {msg}");
+        assert!(msg.contains("2 package manifests"), "got: {msg}");
+    }
+
+    #[test]
+    fn a_vuln_scan_and_a_version_check_report_the_warning_once() {
+        let (mut app, tx, _rx) = build_app(bare_config());
+        app.tree.set_roots(vec![mk_node("ok", 1, CacheKind::Cargo)]);
+        tx.send(ScanResult::ManifestsUnidentified(2)).unwrap();
+        tx.send(ScanResult::ManifestsUnidentified(2)).unwrap();
+        app.tick();
+        let msg = app.status_msg.as_deref().unwrap_or("");
+        assert_eq!(msg.matches("could not be identified").count(), 1, "{msg}");
+    }
+
+    #[test]
     fn tick_vulns_surfaces_cache_ratio_in_status() {
         let (mut app, tx, _rx) = build_app(bare_config());
         app.tree.set_roots(vec![mk_node("ok", 1, CacheKind::Cargo)]);
@@ -1769,6 +1904,7 @@ mod tests {
                 unscanned_packages: 0,
                 cached_hits: 7,
                 skipped_private: 0,
+                unidentified_manifests: 0,
             },
         ))
         .unwrap();
@@ -1791,6 +1927,7 @@ mod tests {
                 unchecked_packages: 0,
                 cached_hits: 4,
                 skipped_private: 0,
+                unidentified_manifests: 0,
             },
         ))
         .unwrap();
@@ -1828,6 +1965,7 @@ mod tests {
                 unscanned_packages: 3,
                 cached_hits: 0,
                 skipped_private: 0,
+                unidentified_manifests: 0,
             },
         ))
         .unwrap();
@@ -1865,6 +2003,7 @@ mod tests {
                 unchecked_packages: 0,
                 cached_hits: 0,
                 skipped_private: 0,
+                unidentified_manifests: 0,
             },
         ))
         .unwrap();
@@ -1902,6 +2041,7 @@ mod tests {
                 unchecked_packages: 4,
                 cached_hits: 0,
                 skipped_private: 0,
+                unidentified_manifests: 0,
             },
         ))
         .unwrap();
@@ -1979,6 +2119,7 @@ mod tests {
                 unscanned_packages: 0,
                 cached_hits: 0,
                 skipped_private: 0,
+                unidentified_manifests: 0,
             },
         ))
         .unwrap();
@@ -1999,6 +2140,7 @@ mod tests {
                 unchecked_packages: 0,
                 cached_hits: 0,
                 skipped_private: 0,
+                unidentified_manifests: 0,
             },
         ))
         .unwrap();
@@ -2055,6 +2197,7 @@ mod tests {
                 unscanned_packages: 0,
                 cached_hits: 0,
                 skipped_private: 0,
+                unidentified_manifests: 0,
             },
         ))
         .unwrap();
