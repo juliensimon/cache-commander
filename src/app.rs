@@ -2267,6 +2267,50 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn perform_delete_refuses_a_candidate_under_a_root_that_is_a_symlink_into_a_protected_dir() {
+        // The configured root is `alias -> storage/bin/tools`, a symlink whose
+        // target is BELOW the protected `storage/bin`. The tree trusts a root node
+        // as spelled, and `alias/pkg` has no protected ancestor as spelled.
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = tmp.path().join("storage");
+        let tools = storage.join("bin/tools");
+        std::fs::create_dir_all(tools.join("pkg")).unwrap();
+        std::fs::write(tools.join("pkg/f"), b"runtime data").unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::os::unix::fs::symlink(&storage, home.join(".bun")).unwrap();
+        let alias = tmp.path().join("alias");
+        std::os::unix::fs::symlink(&tools, &alias).unwrap();
+        let displayed = alias.join("pkg");
+
+        let (mut app, _tx, _rx) = build_app(bare_config());
+        app.protected = crate::providers::ProtectedSet::from_dirs(&[home.join(".bun/bin")]);
+        app.tree.set_roots(vec![expandable_node(
+            "alias",
+            alias.clone(),
+            CacheKind::Unknown,
+        )]);
+        app.tree.insert_children(
+            0,
+            vec![mk_node_with_path(
+                "pkg",
+                displayed.clone(),
+                CacheKind::Unknown,
+            )],
+        );
+        assert!(app.tree.nodes.iter().any(|n| n.path == displayed));
+        app.delete_candidates = vec![displayed];
+
+        app.perform_delete();
+
+        assert!(
+            tools.join("pkg/f").exists(),
+            "data under the protected directory must survive"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn perform_delete_still_deletes_siblings_of_a_protected_dir() {
         // Control for the test above: protection is by identity, not a blanket
         // refusal of the root's contents.

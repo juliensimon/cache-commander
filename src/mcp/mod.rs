@@ -1053,6 +1053,40 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn details_report_unsafe_for_a_path_spelled_through_a_symlink_into_a_protected_dir() {
+        // The configured root is `alias -> storage/bin/tools`, below the protected
+        // `storage/bin`. Details are asked for the path as spelled, which has no
+        // protected ancestor; reporting it Safe would invite the delete.
+        let dir = TempDir::new().unwrap();
+        let storage = dir.path().join("storage");
+        let tools = storage.join("bin/tools");
+        std::fs::create_dir_all(tools.join("pkg")).unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::os::unix::fs::symlink(&storage, home.join(".bun")).unwrap();
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&tools, &alias).unwrap();
+        let mut config = Config::default_for_test();
+        config.roots = vec![alias.clone()];
+        let mut server = CcmdMcp::new(&config);
+        server.protected = providers::ProtectedSet::from_dirs(&[home.join(".bun/bin")]);
+        let out = server
+            .get_package_details(Parameters(tools::DetailsInput {
+                path: Some(alias.join("pkg").to_string_lossy().to_string()),
+                name: None,
+                ecosystem: None,
+            }))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(
+            v["safety_level"].as_str().unwrap().starts_with("Unsafe"),
+            "{v}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn preview_delete_agrees_a_protected_dir_would_not_be_deleted() {
         let (_dir, server, bin, install) = bun_behind_a_symlink_server();
         let out = server

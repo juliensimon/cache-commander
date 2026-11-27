@@ -343,16 +343,22 @@ impl ProtectedSet {
         !self.holders.is_empty() && identity(target).is_some_and(|id| self.holders.contains(&id))
     }
 
-    /// True if `target` is a protected directory or lies under one. Each of its
-    /// ancestors is stat'ed, which follows symlinks, so how the path was spelled
-    /// (through a symlinked parent, a symlinked root, a different name) does not
-    /// matter: only whether a directory on the way IS a protected one.
+    /// True if `target` is a protected directory or lies under one. The
+    /// ancestors of the path AS SPELLED are compared by identity (each stat
+    /// follows symlinks), and so are the ancestors of the path it RESOLVES to:
+    /// with `alias -> storage/bin/tools`, `alias/pkg` has no protected ancestor
+    /// as spelled (`storage/bin` is the parent of the link target, not of the
+    /// link), but it physically lives under one.
     pub fn contains(&self, target: &Path) -> bool {
-        !self.identities.is_empty()
-            && target
-                .ancestors()
-                .filter_map(identity)
-                .any(|id| self.identities.contains(&id))
+        if self.identities.is_empty() {
+            return false;
+        }
+        let resolved = std::fs::canonicalize(target).ok();
+        target
+            .ancestors()
+            .chain(resolved.iter().flat_map(|r| r.ancestors()))
+            .filter_map(identity)
+            .any(|id| self.identities.contains(&id))
     }
 }
 
@@ -664,6 +670,36 @@ mod tests {
         assert!(!set.contains(&storage.join("binx")));
         assert!(!set.contains(&storage.join("install/cache")));
         assert!(!set.contains(&storage));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_path_spelled_through_a_symlink_into_a_protected_dir_is_protected() {
+        // `alias -> storage/bin/tools`: the spelled path `root/alias/pkg` has no
+        // protected directory among its lexical ancestors (`storage/bin` is the
+        // parent of the link TARGET, not of the link), yet `pkg` physically lives
+        // under it. Stat'ing the spelled ancestors only reaches `tools`, so the
+        // RESOLVED path's ancestors must be checked too.
+        let (tmp, storage, home) = bun_behind_a_symlink();
+        let tools = storage.join("bin/tools");
+        std::fs::create_dir_all(tools.join("pkg")).unwrap();
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(&tools, root.join("alias")).unwrap();
+        let set = ProtectedSet::from_dirs(&[home.join(".bun/bin")]);
+        let spelled = root.join("alias/pkg");
+        // Precondition: nothing lexical in the spelled path marks it.
+        assert!(!spelled.to_string_lossy().contains("bin"));
+        assert!(set.contains(&spelled), "pkg lives under the protected dir");
+        assert!(
+            set.contains(&root.join("alias")),
+            "so does the alias itself"
+        );
+        // Control: a symlink to somewhere unprotected stays unprotected.
+        let elsewhere = tmp.path().join("elsewhere/pkg");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("elsewhere"), root.join("ok")).unwrap();
+        assert!(!set.contains(&root.join("ok/pkg")));
     }
 
     #[cfg(unix)]
