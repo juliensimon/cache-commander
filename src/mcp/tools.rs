@@ -57,6 +57,9 @@ pub struct VulnScanReport {
     pub total_vulnerabilities: usize,
     pub fixable: usize,
     pub unfixable: usize,
+    /// Packages the `[privacy]` policy kept off OSV.dev. They were not
+    /// scanned: absence from `packages` means nothing for them (#95).
+    pub skipped_private: usize,
     pub packages: Vec<VulnResult>,
 }
 
@@ -82,6 +85,9 @@ pub struct VulnEntry {
 pub struct OutdatedReport {
     pub outdated_packages: usize,
     pub by_ecosystem: HashMap<String, usize>,
+    /// Packages the `[privacy]` policy kept off the registries. They were not
+    /// checked (#95).
+    pub skipped_private: usize,
     pub packages: Vec<OutdatedResult>,
 }
 

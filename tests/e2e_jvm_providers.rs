@@ -232,12 +232,12 @@ fn e2e_maven_discovery_and_vuln_scan() {
     );
 
     // --- OSV vulnerability scan (network call to osv.dev) ---
-    let vuln_results = ccmd::security::scan_vulns(&packages);
+    let vuln_results = ccmd::security::scan_vulns(&packages, &Default::default());
     assert_vuln_reported(&vuln_results, "log4j-core", "Log4Shell");
     assert_vuln_reported(&vuln_results, "commons-text", "Text4Shell");
 
     // --- Version check (network call to repo1.maven.org) ---
-    let version_results = ccmd::security::check_versions(&packages);
+    let version_results = ccmd::security::check_versions(&packages, &Default::default());
     assert_outdated_reported(&version_results, "guava/20.0", "Guava 20.0");
 }
 
@@ -335,7 +335,7 @@ fn e2e_gradle_discovery_and_vuln_scan() {
     // --- OSV vulnerability scan ---
     // (Maven Central registry-based version-check is covered by the Maven test;
     // the Gradle test focuses on cache format + OSV pipeline.)
-    let vuln_results = ccmd::security::scan_vulns(&packages);
+    let vuln_results = ccmd::security::scan_vulns(&packages, &Default::default());
     assert_vuln_reported(&vuln_results, "log4j-core", "Log4Shell");
     assert_vuln_reported(&vuln_results, "commons-text", "Text4Shell");
 }

@@ -153,7 +153,7 @@ fn e2e_go_discovery_vuln_scan_version_check_and_delete() {
     );
 
     // 2. OSV vuln scan: proxy.golang.org / osv.dev agree this version is vulnerable.
-    let vuln_outcome = ccmd::security::scan_vulns(&packages);
+    let vuln_outcome = ccmd::security::scan_vulns(&packages, &Default::default());
     let cve_count: usize = vuln_outcome
         .results
         .iter()

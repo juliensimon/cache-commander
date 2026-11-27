@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ccmd::providers::PackageId;
 use ccmd::security::cache::{DEFAULT_TTL_SECS, VersionCache, VulnCache};
+use ccmd::security::privacy::PrivacyPolicy;
 use ccmd::security::{SecurityInfo, VersionInfo, check_versions_with_cache, scan_vulns_with_cache};
 
 fn pkg(name: &str, version: &str) -> PackageId {
@@ -114,7 +115,7 @@ fn scan_vulns_with_cache_public_entrypoint_returns_cached_results_without_networ
     // Load + run. If the cache is honored, no network request is made:
     // the first (and only) package is a cache hit.
     let mut c = VulnCache::load(&cache_path);
-    let outcome = scan_vulns_with_cache(&pkgs, &mut c);
+    let outcome = scan_vulns_with_cache(&pkgs, &mut c, &PrivacyPolicy::default());
 
     assert_eq!(outcome.unscanned_packages, 0);
     let entry = outcome
@@ -145,7 +146,7 @@ fn version_cache_second_run_replays_from_disk() {
     }
 
     let mut c = VersionCache::load(&cache_path);
-    let outcome = check_versions_with_cache(&pkgs, &mut c);
+    let outcome = check_versions_with_cache(&pkgs, &mut c, &PrivacyPolicy::default());
 
     assert_eq!(outcome.unchecked_packages, 0);
     let entry = outcome

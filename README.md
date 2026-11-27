@@ -225,6 +225,9 @@ enabled = false           # set true to scan on startup
 
 [versioncheck]
 enabled = false           # set true to check on startup
+
+[privacy]
+private_packages = []     # names never sent to OSV or a registry, see below
 ```
 
 CLI flags override config file values.
@@ -257,7 +260,24 @@ Scanning and browsing your caches is local. Apart from the update check (on by d
 
 The MCP tools `scan_vulnerabilities` and `check_outdated` send the same requests when an agent calls them.
 
-**Private or internal packages are not excluded.** If your caches contain packages whose names you do not want to disclose to OSV or a public registry (an internal npm scope, a company Maven group, a private Go module), those names are sent as well, and a `404` from the registry does not undo that. There is no allow/deny list yet (tracked in [#95](https://github.com/juliensimon/cache-commander/issues/95)); until there is, do not run the vulnerability or version scans on such caches.
+#### Keeping private package names off the network
+
+Nothing is private by default. If your caches contain packages whose names you do not want to disclose to OSV or a public registry (an internal npm scope, a company Maven group, a private Go module), list them in the config file:
+
+```toml
+[privacy]
+private_packages = [
+  "@acme",               # npm scope: @acme/ui, @acme/api, ...
+  "github.com/acme",     # Go module prefix, as with GOPRIVATE
+  "com.acme",            # Maven group and its subgroups: com.acme:lib, com.acme.sub:lib
+  "acme-*",              # `*` matches any run of characters
+  "internal-tool",       # one exact name
+]
+```
+
+A pattern with no `*` matches the name itself and anything that continues it after a `/`, `:` or `.`. Matching is case-insensitive, and PyPI names are compared in their normalised form (`Acme_Core`, `acme-core` and `acme.core` are one project). The same list covers the vulnerability scan, the version check and the MCP tools. A listed package is **withheld before any request is built**: it is not sent, not cached, and the status line (and the MCP reports' `skipped_private`) says how many were withheld, so a withheld package is never reported as clean or up to date.
+
+If the config file exists but cannot be read or parsed (including an unknown key such as a misspelt `private_package`), `ccmd` prints a warning and **disables every package lookup** until it is fixed, because falling back to the defaults would send the names the file was meant to hold back. A missing file is not an error: the defaults apply and nothing is withheld.
 
 ### npm Supply Chain Detection
 

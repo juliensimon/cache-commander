@@ -1,5 +1,6 @@
 pub mod cache;
 pub mod osv;
+pub mod privacy;
 pub mod registry;
 pub mod version;
 
@@ -45,6 +46,9 @@ pub struct VulnScanOutcome {
     pub results: HashMap<PathBuf, SecurityInfo>,
     pub unscanned_packages: usize,
     pub cached_hits: usize,
+    /// Packages the privacy policy kept off the network (#95). Reported so a
+    /// skipped package is never mistaken for a clean one.
+    pub skipped_private: usize,
 }
 
 /// Outcome of a version check. Tracks successful results and the number of
@@ -55,6 +59,8 @@ pub struct VersionCheckOutcome {
     pub results: HashMap<PathBuf, VersionInfo>,
     pub unchecked_packages: usize,
     pub cached_hits: usize,
+    /// Packages the privacy policy kept off the network (#95).
+    pub skipped_private: usize,
 }
 
 /// Returns true if a vulnerability is still active (not fixed) for the given package version.
@@ -144,8 +150,11 @@ fn backfill_and_filter_vulns(
     results.retain(|_, info| !info.vulns.is_empty());
 }
 
-pub fn scan_vulns(packages: &[(PathBuf, PackageId)]) -> VulnScanOutcome {
-    scan_vulns_with_querier(packages, osv::query_osv)
+pub fn scan_vulns(
+    packages: &[(PathBuf, PackageId)],
+    policy: &privacy::PrivacyPolicy,
+) -> VulnScanOutcome {
+    scan_vulns_private(packages, osv::query_osv, None, policy)
 }
 
 /// Run a vuln scan, consulting `cache` for hits and writing misses back into
@@ -153,13 +162,34 @@ pub fn scan_vulns(packages: &[(PathBuf, PackageId)]) -> VulnScanOutcome {
 pub fn scan_vulns_with_cache(
     packages: &[(PathBuf, PackageId)],
     cache: &mut cache::VulnCache,
+    policy: &privacy::PrivacyPolicy,
 ) -> VulnScanOutcome {
-    scan_vulns_with_querier_and_cache(packages, osv::query_osv, Some(cache))
+    scan_vulns_private(packages, osv::query_osv, Some(cache), policy)
+}
+
+/// Apply the privacy policy, then scan what is left. This is the one place
+/// every OSV lookup passes through, so the policy cannot be bypassed by a
+/// caller that forgets it (#95). Private packages never reach the querier or
+/// the cache.
+fn scan_vulns_private<Q>(
+    packages: &[(PathBuf, PackageId)],
+    querier: Q,
+    cache: Option<&mut cache::VulnCache>,
+    policy: &privacy::PrivacyPolicy,
+) -> VulnScanOutcome
+where
+    Q: FnMut(&[PackageId]) -> Result<osv::OsvResponse, String>,
+{
+    let (allowed, skipped) = policy.partition(packages);
+    let mut outcome = scan_vulns_with_querier_and_cache(&allowed, querier, cache);
+    outcome.skipped_private = skipped;
+    outcome
 }
 
 /// Testable core of `scan_vulns`: accepts an OSV querier closure. Tracks
 /// failed-chunk packages in the returned outcome so the caller can
 /// distinguish "no vulns" from "partial scan" (H5).
+#[cfg(test)]
 fn scan_vulns_with_querier<Q>(packages: &[(PathBuf, PackageId)], querier: Q) -> VulnScanOutcome
 where
     Q: FnMut(&[PackageId]) -> Result<osv::OsvResponse, String>,
@@ -214,6 +244,7 @@ where
             results,
             unscanned_packages: 0,
             cached_hits,
+            skipped_private: 0,
         };
     }
 
@@ -266,6 +297,7 @@ where
         results,
         unscanned_packages: unscanned,
         cached_hits,
+        skipped_private: 0,
     }
 }
 
@@ -300,8 +332,11 @@ fn fetch_fix_versions(vuln_ids: &[String]) -> HashMap<String, osv::OsvVulnDetail
     }
 }
 
-pub fn check_versions(packages: &[(PathBuf, PackageId)]) -> VersionCheckOutcome {
-    check_versions_inner(packages, registry::check_latest)
+pub fn check_versions(
+    packages: &[(PathBuf, PackageId)],
+    policy: &privacy::PrivacyPolicy,
+) -> VersionCheckOutcome {
+    check_versions_private(packages, registry::check_latest, None, policy)
 }
 
 /// Run a version check, consulting `cache` for hits and writing misses back.
@@ -309,8 +344,26 @@ pub fn check_versions(packages: &[(PathBuf, PackageId)]) -> VersionCheckOutcome 
 pub fn check_versions_with_cache(
     packages: &[(PathBuf, PackageId)],
     cache: &mut cache::VersionCache,
+    policy: &privacy::PrivacyPolicy,
 ) -> VersionCheckOutcome {
-    check_versions_with_cache_inner(packages, registry::check_latest, Some(cache))
+    check_versions_private(packages, registry::check_latest, Some(cache), policy)
+}
+
+/// Apply the privacy policy, then check what is left. The single entry for
+/// every registry lookup (#95); see `scan_vulns_private`.
+fn check_versions_private<F>(
+    packages: &[(PathBuf, PackageId)],
+    checker: F,
+    cache: Option<&mut cache::VersionCache>,
+    policy: &privacy::PrivacyPolicy,
+) -> VersionCheckOutcome
+where
+    F: Fn(&PackageId) -> Result<Option<String>, String> + Send + Sync + 'static + Copy,
+{
+    let (allowed, skipped) = policy.partition(packages);
+    let mut outcome = check_versions_with_cache_inner(&allowed, checker, cache);
+    outcome.skipped_private = skipped;
+    outcome
 }
 
 /// Cache-aware split/merge wrapper. Tested via an injectable `checker` so we
@@ -344,6 +397,7 @@ where
             results,
             unchecked_packages: 0,
             cached_hits,
+            skipped_private: 0,
         };
     }
 
@@ -367,6 +421,7 @@ where
         results,
         unchecked_packages: fresh.unchecked_packages,
         cached_hits,
+        skipped_private: 0,
     }
 }
 
@@ -446,6 +501,7 @@ where
         results,
         unchecked_packages,
         cached_hits: 0,
+        skipped_private: 0,
     }
 }
 
@@ -823,14 +879,14 @@ mod tests {
     #[test]
     fn scan_vulns_empty_input_returns_empty_outcome_without_network() {
         // Early-return path — must not attempt any network call.
-        let out = scan_vulns(&[]);
+        let out = scan_vulns(&[], &privacy::PrivacyPolicy::default());
         assert!(out.results.is_empty());
         assert_eq!(out.unscanned_packages, 0);
     }
 
     #[test]
     fn check_versions_empty_input_returns_empty_outcome_without_network() {
-        let out = check_versions(&[]);
+        let out = check_versions(&[], &privacy::PrivacyPolicy::default());
         assert!(out.results.is_empty());
         assert_eq!(out.unchecked_packages, 0);
     }
@@ -1336,5 +1392,112 @@ mod tests {
         let info = results.get(&PathBuf::from("/test/pkg")).unwrap();
         assert_eq!(info.vulns.len(), 1);
         assert_eq!(info.vulns[0].id, "CVE-active");
+    }
+
+    // --- privacy policy at the network boundary (#95) ---
+
+    fn named(ecosystem: &'static str, name: &str, version: &str) -> PackageId {
+        PackageId {
+            ecosystem,
+            name: name.into(),
+            version: version.into(),
+        }
+    }
+
+    #[test]
+    fn private_packages_never_reach_osv_nor_the_cache() {
+        // The whole point of #95: a private name must not appear in ANY
+        // request, so the fake querier records every name it is offered.
+        let pkgs = vec![
+            (PathBuf::from("/a"), named("npm", "@acme/ui", "1.0.0")),
+            (PathBuf::from("/b"), named("npm", "left-pad", "1.3.0")),
+        ];
+        let policy = privacy::PrivacyPolicy::new(["@acme"]);
+        let mut cache = cache::VulnCache::with_default_ttl();
+        let sent: std::cell::RefCell<Vec<String>> = Default::default();
+        let out = scan_vulns_private(
+            &pkgs,
+            |ids| {
+                sent.borrow_mut().extend(ids.iter().map(|i| i.name.clone()));
+                Ok(osv::OsvResponse {
+                    results: ids
+                        .iter()
+                        .map(|_| osv::OsvQueryResult { vulns: vec![] })
+                        .collect(),
+                })
+            },
+            Some(&mut cache),
+            &policy,
+        );
+        assert_eq!(*sent.borrow(), vec!["left-pad".to_string()]);
+        assert_eq!(out.skipped_private, 1);
+        assert_eq!(out.unscanned_packages, 0, "withheld is not a failure");
+        assert!(
+            cache.get(&pkgs[0].1).is_none(),
+            "a withheld package must not be cached as 'clean'"
+        );
+    }
+
+    #[test]
+    fn a_private_package_with_a_cached_result_is_still_withheld() {
+        // An entry cached before the pattern was added must not be replayed
+        // as a result for a package the user now marks private.
+        let pkgs = vec![(PathBuf::from("/a"), named("npm", "@acme/ui", "1.0.0"))];
+        let mut cache = cache::VulnCache::with_default_ttl();
+        cache.insert(
+            &pkgs[0].1,
+            &SecurityInfo {
+                vulns: vec![Vulnerability {
+                    id: "CVE-OLD".into(),
+                    summary: String::new(),
+                    severity: None,
+                    fix_version: None,
+                }],
+            },
+        );
+        let out = scan_vulns_private(
+            &pkgs,
+            |_| panic!("no request may be made"),
+            Some(&mut cache),
+            &privacy::PrivacyPolicy::new(["@acme"]),
+        );
+        assert_eq!(out.skipped_private, 1);
+        assert!(out.results.is_empty());
+    }
+
+    #[test]
+    fn private_packages_never_reach_a_registry() {
+        use std::sync::Mutex;
+        static SEEN: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        SEEN.lock().unwrap().clear();
+        fn recording(pkg: &PackageId) -> Result<Option<String>, String> {
+            SEEN.lock().unwrap().push(pkg.name.clone());
+            Ok(Some("9.9.9".into()))
+        }
+        let pkgs = vec![
+            (
+                PathBuf::from("/a"),
+                named("crates.io", "acme-core", "1.0.0"),
+            ),
+            (PathBuf::from("/b"), named("crates.io", "serde", "1.0.0")),
+        ];
+        let policy = privacy::PrivacyPolicy::new(["acme-*"]);
+        let out = check_versions_private(&pkgs, recording, None, &policy);
+        assert_eq!(*SEEN.lock().unwrap(), vec!["serde".to_string()]);
+        assert_eq!(out.skipped_private, 1);
+        assert_eq!(out.unchecked_packages, 0, "withheld is not a failure");
+        assert!(!out.results.contains_key(&PathBuf::from("/a")));
+    }
+
+    #[test]
+    fn a_blocking_policy_sends_nothing_at_all() {
+        let pkgs = vec![(PathBuf::from("/b"), named("npm", "left-pad", "1.3.0"))];
+        let out = scan_vulns_private(
+            &pkgs,
+            |_| panic!("no request may be made"),
+            None,
+            &privacy::PrivacyPolicy::block_all(),
+        );
+        assert_eq!(out.skipped_private, 1);
     }
 }

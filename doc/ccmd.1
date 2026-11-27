@@ -162,10 +162,26 @@ enabled = false
 
 [updater]
 enabled = true
+
+[privacy]
+private_packages = ["@acme", "github.com/acme", "com.acme", "acme-*"]
 .fi
 .RE
 .PP
 CLI options override the corresponding configuration values.
+.PP
+Packages matching
+.B private_packages
+are never sent to OSV.dev or a package registry, and are reported as withheld.
+A pattern without
+.B *
+matches the name and anything continuing it after
+.BR / ,
+.B :
+or
+.BR . .
+If the configuration file exists but is unreadable or invalid, all package
+lookups are disabled until it is fixed.
 .SH SUPPORTED CACHES
 .B ccmd
 recognizes and provides rich metadata for the following cache ecosystems:

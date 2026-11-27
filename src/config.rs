@@ -83,6 +83,17 @@ impl SortField {
     }
 }
 
+/// Result of looking for the config file.
+enum FileConfig {
+    Absent,
+    Loaded(Config),
+    /// Present but unreadable or invalid. Distinct from `Absent`: the user
+    /// wrote something, possibly a `[privacy]` list, that was not applied.
+    Unusable,
+}
+
+const LOOKUPS_DISABLED: &str = "package lookups (OSV.dev, registries) are disabled until the config file is fixed, so that names it may have marked private are not sent";
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct VulncheckConfig {
@@ -107,6 +118,39 @@ impl Default for UpdaterConfig {
     }
 }
 
+/// What may leave the machine in package lookups (#95).
+///
+/// ```toml
+/// [privacy]
+/// private_packages = ["@acme", "github.com/acme", "com.acme", "acme-*"]
+/// ```
+///
+/// Unknown keys are an error: a misspelt `private_package` must not quietly
+/// leave the deny list empty.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PrivacyConfig {
+    /// Packages never sent to OSV.dev or a registry. See
+    /// `security::privacy::PrivacyPolicy::is_private` for the syntax.
+    pub private_packages: Vec<String>,
+    /// Set when the config file exists but could not be used. Not read from
+    /// the file. Every lookup is refused until the file is fixed, because
+    /// falling back to defaults would send the very names the file was
+    /// meant to hold back.
+    #[serde(skip)]
+    pub block_lookups: bool,
+}
+
+impl PrivacyConfig {
+    pub fn policy(&self) -> crate::security::privacy::PrivacyPolicy {
+        if self.block_lookups {
+            crate::security::privacy::PrivacyPolicy::block_all()
+        } else {
+            crate::security::privacy::PrivacyPolicy::new(&self.private_packages)
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -117,6 +161,7 @@ pub struct Config {
     pub vulncheck: VulncheckConfig,
     pub versioncheck: VersioncheckConfig,
     pub updater: UpdaterConfig,
+    pub privacy: PrivacyConfig,
 }
 
 impl Default for Config {
@@ -206,6 +251,7 @@ impl Default for Config {
             vulncheck: VulncheckConfig::default(),
             versioncheck: VersioncheckConfig::default(),
             updater: UpdaterConfig::default(),
+            privacy: PrivacyConfig::default(),
         }
     }
 }
@@ -228,12 +274,13 @@ impl Config {
             vulncheck: VulncheckConfig::default(),
             versioncheck: VersioncheckConfig::default(),
             updater: UpdaterConfig::default(),
+            privacy: PrivacyConfig::default(),
         }
     }
 
     pub fn load() -> (Self, Cli) {
         let cli = Cli::parse();
-        let mut config = Self::load_from_file().unwrap_or_default();
+        let mut config = Self::from_file_state(Self::load_from_file());
 
         // CLI overrides
         if !cli.roots.is_empty() {
@@ -288,22 +335,41 @@ impl Config {
         (config, cli)
     }
 
-    fn load_from_file() -> Option<Self> {
-        let proj = ProjectDirs::from("", "", "ccmd")?;
+    /// A missing file means defaults. A file that exists but cannot be used
+    /// also means defaults, EXCEPT that lookups are blocked: the unread file
+    /// may have held a `[privacy]` list, and the defaults send everything.
+    fn from_file_state(state: FileConfig) -> Self {
+        match state {
+            FileConfig::Loaded(config) => config,
+            FileConfig::Absent => Self::default(),
+            FileConfig::Unusable => {
+                let mut config = Self::default();
+                config.privacy.block_lookups = true;
+                config
+            }
+        }
+    }
+
+    fn load_from_file() -> FileConfig {
+        let Some(proj) = ProjectDirs::from("", "", "ccmd") else {
+            return FileConfig::Absent;
+        };
         let config_path = proj.config_dir().join("config.toml");
         let content = match std::fs::read_to_string(&config_path) {
             Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return FileConfig::Absent,
             Err(e) => {
                 eprintln!("warning: could not read {}: {}", config_path.display(), e);
-                return None;
+                eprintln!("warning: {LOOKUPS_DISABLED}");
+                return FileConfig::Unusable;
             }
         };
         match toml::from_str(&content) {
-            Ok(config) => Some(config),
+            Ok(config) => FileConfig::Loaded(config),
             Err(e) => {
                 eprintln!("warning: invalid config {}: {}", config_path.display(), e);
-                None
+                eprintln!("warning: {LOOKUPS_DISABLED}");
+                FileConfig::Unusable
             }
         }
     }
@@ -539,6 +605,86 @@ fn expand_tilde(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- [privacy] (#95) ---
+
+    #[test]
+    fn privacy_list_parses_into_a_policy() {
+        let config: Config =
+            toml::from_str("[privacy]\nprivate_packages = [\"@acme\", \"acme-*\"]\n").unwrap();
+        let policy = config.privacy.policy();
+        let pkg = |name: &str| crate::providers::PackageId {
+            ecosystem: "npm",
+            name: name.into(),
+            version: "1.0.0".into(),
+        };
+        assert!(policy.is_private(&pkg("@acme/ui")));
+        assert!(!policy.is_private(&pkg("left-pad")));
+    }
+
+    #[test]
+    fn a_misspelt_privacy_key_is_an_error_not_an_empty_list() {
+        // `private_package` (singular) would otherwise parse, be ignored, and
+        // leave the user believing their names were protected.
+        let err = toml::from_str::<Config>("[privacy]\nprivate_package = [\"@acme\"]\n");
+        assert!(err.is_err(), "unknown [privacy] keys must be rejected");
+    }
+
+    #[test]
+    fn a_config_with_no_privacy_section_withholds_nothing() {
+        let config: Config = toml::from_str("confirm_delete = false\n").unwrap();
+        let pkg = crate::providers::PackageId {
+            ecosystem: "npm",
+            name: "anything".into(),
+            version: "1.0.0".into(),
+        };
+        assert!(!config.privacy.policy().is_private(&pkg));
+    }
+
+    #[test]
+    fn an_unusable_config_file_blocks_lookups() {
+        // The flag is set by `load()` when the file exists but cannot be used.
+        // It must turn into a policy that refuses everything.
+        let mut config = Config::default_for_test();
+        config.privacy.block_lookups = true;
+        let pkg = crate::providers::PackageId {
+            ecosystem: "npm",
+            name: "left-pad".into(),
+            version: "1.0.0".into(),
+        };
+        assert!(config.privacy.policy().is_private(&pkg));
+    }
+
+    #[test]
+    fn unusable_file_blocks_lookups_but_a_missing_file_does_not() {
+        // Missing file: the user never wrote a deny list, defaults apply.
+        assert!(
+            !Config::from_file_state(FileConfig::Absent)
+                .privacy
+                .block_lookups
+        );
+        // Present but broken: it may have held the deny list.
+        assert!(
+            Config::from_file_state(FileConfig::Unusable)
+                .privacy
+                .block_lookups
+        );
+        // Fine file: its own settings, nothing blocked.
+        let loaded: Config = toml::from_str("[privacy]\nprivate_packages = [\"x\"]\n").unwrap();
+        assert!(
+            !Config::from_file_state(FileConfig::Loaded(loaded))
+                .privacy
+                .block_lookups
+        );
+    }
+
+    #[test]
+    fn block_lookups_cannot_be_set_from_the_file() {
+        // `#[serde(skip)]`: the file may not switch the safety off or on.
+        let config: Config =
+            toml::from_str("[privacy]\nblock_lookups = true\n").unwrap_or_default();
+        assert!(!config.privacy.block_lookups);
+    }
 
     // --- SortField ---
 

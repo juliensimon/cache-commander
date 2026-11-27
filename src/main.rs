@@ -50,7 +50,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Scanner channels — shutdown flag coordinates graceful exit.
     let (result_tx, result_rx) = mpsc::channel();
     let shutdown = Arc::new(AtomicBool::new(false));
-    let scan_tx = scanner::start(result_tx, Some(Arc::clone(&shutdown)));
+    let scan_tx = scanner::start_with_policy(
+        result_tx,
+        Some(Arc::clone(&shutdown)),
+        config.privacy.policy(),
+    );
 
     // Background update-check channel
     let update_rx = updater::start(&config);

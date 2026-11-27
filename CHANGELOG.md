@@ -7,6 +7,13 @@ found by an Aikido scan and by review rounds on each fix. Two behavior changes
 are called out under Changed.
 
 ### Security
+- **Private package names can be kept off the network (#95)**: a
+  `[privacy] private_packages` list in the config file withholds matching
+  packages from OSV.dev and the registries, for the TUI and the MCP tools. The
+  policy is applied before a request is built, so nothing is sent, cached, or
+  reported as clean; the status line and the MCP reports count what was
+  withheld. A config file that exists but cannot be used (or has an unknown
+  key) disables all package lookups instead of falling back to defaults.
 - **MCP delete is limited to discovered entries (#119)**: `delete_packages`
   only removes entries that discovery lists (what `search_packages` returns),
   never a configured root, a provider container, a symlink, or a path inside a
@@ -70,8 +77,6 @@ are called out under Changed.
   default).
 
 ### Known limitations
-- Private or internal package names are sent to OSV and the public registries
-  like any other; there is no deny list yet (#95, documented in the README).
 - Tree expansion and provider file reads still follow symlinked directories;
   only sizing was fixed (#92, #93).
 - pnpm 11 and later global stores are not identified for vulnerability scanning

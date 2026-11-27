@@ -31,6 +31,8 @@ pub struct CcmdMcp {
     /// MCP server can run for days, and a runtime installed or replaced after
     /// startup must still be protected.
     protected_dirs: Vec<PathBuf>,
+    /// Packages never sent to OSV.dev or a registry (#95).
+    privacy: security::privacy::PrivacyPolicy,
     tool_router: ToolRouter<Self>,
 }
 
@@ -175,6 +177,7 @@ impl CcmdMcp {
         Self {
             roots: config.roots.clone(),
             protected_dirs: providers::protected_dirs(),
+            privacy: config.privacy.policy(),
             tool_router,
         }
     }
@@ -538,18 +541,20 @@ impl CcmdMcp {
         input: Parameters<tools::EcosystemInput>,
     ) -> Result<String, String> {
         let roots = self.roots.clone();
+        let privacy = self.privacy.clone();
         let ecosystem_filter = input.0.ecosystem;
 
-        let result = tokio::task::spawn_blocking(move || {
+        let (result, skipped_private) = tokio::task::spawn_blocking(move || {
             let mut packages = scanner::discover_packages(&roots);
             if let Some(ref eco) = ecosystem_filter {
                 packages.retain(|(_, pkg)| matches_ecosystem(pkg.ecosystem, eco));
             }
             if packages.is_empty() {
-                return Vec::new();
+                return (Vec::new(), 0);
             }
-            let vulns = security::scan_vulns(&packages);
-            vulns
+            let vulns = security::scan_vulns(&packages, &privacy);
+            let skipped = vulns.skipped_private;
+            let found = vulns
                 .results
                 .into_iter()
                 .map(|(path, info)| {
@@ -587,7 +592,8 @@ impl CcmdMcp {
                             .collect(),
                     }
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            (found, skipped)
         })
         .await
         .map_err(|e| format!("spawn_blocking failed: {e}"))?;
@@ -604,6 +610,7 @@ impl CcmdMcp {
                 total_vulnerabilities: total_vulns,
                 fixable,
                 unfixable: total_vulns - fixable,
+                skipped_private,
                 packages: result,
             };
             serde_json::to_string_pretty(&report).map_err(|e| format!("serialization failed: {e}"))
@@ -618,18 +625,20 @@ impl CcmdMcp {
         input: Parameters<tools::EcosystemInput>,
     ) -> Result<String, String> {
         let roots = self.roots.clone();
+        let privacy = self.privacy.clone();
         let ecosystem_filter = input.0.ecosystem;
 
-        let result = tokio::task::spawn_blocking(move || {
+        let (result, skipped_private) = tokio::task::spawn_blocking(move || {
             let mut packages = scanner::discover_packages(&roots);
             if let Some(ref eco) = ecosystem_filter {
                 packages.retain(|(_, pkg)| matches_ecosystem(pkg.ecosystem, eco));
             }
             if packages.is_empty() {
-                return Vec::new();
+                return (Vec::new(), 0);
             }
-            let versions = security::check_versions(&packages);
-            versions
+            let versions = security::check_versions(&packages, &privacy);
+            let skipped = versions.skipped_private;
+            let found = versions
                 .results
                 .into_iter()
                 .filter(|(_, info)| info.is_outdated)
@@ -656,7 +665,8 @@ impl CcmdMcp {
                         upgrade_command: providers::upgrade_command(kind, &name, &info.latest),
                     }
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            (found, skipped)
         })
         .await
         .map_err(|e| format!("spawn_blocking failed: {e}"))?;
@@ -669,6 +679,7 @@ impl CcmdMcp {
             let report = OutdatedReport {
                 outdated_packages: result.len(),
                 by_ecosystem,
+                skipped_private,
                 packages: result,
             };
             serde_json::to_string_pretty(&report).map_err(|e| format!("serialization failed: {e}"))
@@ -1696,6 +1707,7 @@ mod tests {
             total_vulnerabilities: total_vulns,
             fixable,
             unfixable: total_vulns - fixable,
+            skipped_private: 0,
             packages,
         };
 
@@ -1744,6 +1756,7 @@ mod tests {
         let report = OutdatedReport {
             outdated_packages: packages.len(),
             by_ecosystem,
+            skipped_private: 0,
             packages,
         };
 
@@ -1831,6 +1844,7 @@ mod tests {
             total_vulnerabilities: 2,
             fixable: 1,
             unfixable: 1,
+            skipped_private: 0,
             packages: vec![],
         };
         let json = serde_json::to_string(&report).unwrap();
