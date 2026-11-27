@@ -876,7 +876,7 @@ impl App {
                     .iter()
                     .filter_map(|p| self.tree.nodes.iter().find(|n| &n.path == p))
                     .collect();
-                dialogs::render_delete_confirm(f, &items);
+                dialogs::render_delete_confirm(f, &items, &self.protected);
             }
             AppMode::Help => {
                 dialogs::render_help(f);
@@ -1037,6 +1037,7 @@ impl App {
             &self.vuln_results,
             &self.version_results,
             &self.brew_outdated_results,
+            &self.protected,
         );
     }
 

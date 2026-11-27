@@ -120,12 +120,13 @@ mod control_sequence_tests {
                         &HashMap::new(),
                         &HashMap::new(),
                         &HashMap::new(),
+                        &Default::default(),
                     )
                 }),
             ),
             (
                 "delete dialog",
-                emitted(|f| dialogs::render_delete_confirm(f, &[&n])),
+                emitted(|f| dialogs::render_delete_confirm(f, &[&n], &Default::default())),
             ),
         ]
     }
