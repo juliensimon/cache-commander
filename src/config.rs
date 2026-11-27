@@ -368,7 +368,13 @@ impl Config {
                 return FileConfig::Unusable;
             }
         };
-        match toml::from_str(&content) {
+        Self::parse_file(&content, &config_path)
+    }
+
+    /// Parse the text of the config file. A parse error is `Unusable`, not
+    /// `Absent`: the user wrote something that was not applied.
+    fn parse_file(content: &str, config_path: &std::path::Path) -> FileConfig {
+        match toml::from_str(content) {
             Ok(config) => FileConfig::Loaded(config),
             Err(e) => {
                 eprintln!("warning: invalid config {}: {}", config_path.display(), e);
@@ -684,6 +690,29 @@ mod tests {
             version: "1.0.0".into(),
         };
         assert!(config.privacy.policy().is_private(&pkg));
+    }
+
+    #[test]
+    fn parsing_the_file_text_distinguishes_usable_from_unusable() {
+        let path = std::path::Path::new("config.toml");
+        assert!(matches!(
+            Config::parse_file("confirm_delete = false\n", path),
+            FileConfig::Loaded(_)
+        ));
+        // A typo is not "no file": it must not fall through to defaults.
+        assert!(matches!(
+            Config::parse_file("[privcy]\nprivate_packages = [\"x\"]\n", path),
+            FileConfig::Unusable
+        ));
+        assert!(matches!(
+            Config::parse_file("not toml at all [", path),
+            FileConfig::Unusable
+        ));
+        // Empty text is a valid, empty config.
+        assert!(matches!(
+            Config::parse_file("", path),
+            FileConfig::Loaded(_)
+        ));
     }
 
     #[test]
