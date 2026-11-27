@@ -83,6 +83,17 @@ fn matches_ecosystem(label: &str, filter: &str) -> bool {
 }
 
 /// Check if a path is inside any of the configured cache roots (resolving symlinks).
+/// The canonical configured root that contains the already-canonical `path`
+/// (the longest, if several do). `providers::root_for` compares paths textually,
+/// so it only matches a canonical path against canonical roots.
+fn canonical_root_for(roots: &[PathBuf], canonical: &std::path::Path) -> Option<PathBuf> {
+    roots
+        .iter()
+        .filter_map(|r| std::fs::canonicalize(r).ok())
+        .filter(|r| canonical.starts_with(r))
+        .max_by_key(|r| r.components().count())
+}
+
 fn is_under_roots(path: &std::path::Path, roots: &[PathBuf]) -> bool {
     canonical_under_roots(path, roots).is_some()
 }
@@ -176,7 +187,7 @@ impl CcmdMcp {
         let mut nodes = Vec::new();
         for root in roots {
             for child_path in walker::list_children(root) {
-                Self::collect_nodes(&child_path, 1, with_sizes, &mut nodes);
+                Self::collect_nodes(root, &child_path, 1, with_sizes, &mut nodes);
             }
         }
         nodes
@@ -187,13 +198,19 @@ impl CcmdMcp {
     /// a package_id or a semantic name starting with '[' (typed item like
     /// [model], [npx], [dataset]). Otherwise, if it's a known provider dir,
     /// it's a container — recurse into children.
-    fn collect_nodes(path: &Path, depth: u16, with_sizes: bool, nodes: &mut Vec<TreeNode>) {
+    fn collect_nodes(
+        root: &Path,
+        path: &Path,
+        depth: u16,
+        with_sizes: bool,
+        nodes: &mut Vec<TreeNode>,
+    ) {
         if depth > 4 {
             return;
         }
         let kind = providers::detect(path);
-        let semantic_name = providers::semantic_name(kind, path);
-        let has_package_id = providers::package_id(kind, path).is_some();
+        let semantic_name = providers::semantic_name_in(kind, Some(root), path);
+        let has_package_id = providers::package_id_in(kind, Some(root), path).is_some();
 
         // It's a real package if it has a package_id or a typed semantic name
         let is_package =
@@ -220,13 +237,14 @@ impl CcmdMcp {
                 // Peek at children: if any child has a typed semantic name, recurse
                 walker::list_children(path).iter().any(|child| {
                     let ck = providers::detect(child);
-                    providers::semantic_name(ck, child).is_some_and(|n| n.starts_with('['))
-                        || providers::package_id(ck, child).is_some()
+                    providers::semantic_name_in(ck, Some(root), child)
+                        .is_some_and(|n| n.starts_with('['))
+                        || providers::package_id_in(ck, Some(root), child).is_some()
                 })
             };
             if should_recurse {
                 for child in walker::list_children(path) {
-                    Self::collect_nodes(&child, depth + 1, with_sizes, nodes);
+                    Self::collect_nodes(root, &child, depth + 1, with_sizes, nodes);
                 }
                 return;
             }
@@ -383,9 +401,13 @@ impl CcmdMcp {
                     let safety = providers::safety(node.kind, &node.path);
                     PackageEntry {
                         name: node.name.clone(),
-                        version: providers::package_id(node.kind, &node.path)
-                            .map(|p| p.version)
-                            .unwrap_or_default(),
+                        version: providers::package_id_in(
+                            node.kind,
+                            providers::root_for(&server.roots, &node.path),
+                            &node.path,
+                        )
+                        .map(|p| p.version)
+                        .unwrap_or_default(),
                         ecosystem: node.kind.label().to_string(),
                         path: node.path.to_string_lossy().to_string(),
                         size: format_size(node.size, BINARY),
@@ -457,8 +479,10 @@ impl CcmdMcp {
             return Ok("Path is not inside any configured cache root.".to_string());
         }
 
+        let roots = self.roots.clone();
         let result = tokio::task::spawn_blocking(move || {
             let kind = providers::detect(&path);
+            let root = providers::root_for(&roots, &path);
             let safety = providers::safety(kind, &path);
             let size = walker::dir_size(&path);
             let last_modified = path
@@ -480,13 +504,13 @@ impl CcmdMcp {
 
             PackageDetails {
                 provider: kind.label().to_string(),
-                name: providers::semantic_name(kind, &path).unwrap_or_else(|| {
+                name: providers::semantic_name_in(kind, root, &path).unwrap_or_else(|| {
                     path.file_name()
                         .unwrap_or_default()
                         .to_string_lossy()
                         .to_string()
                 }),
-                version: providers::package_id(kind, &path)
+                version: providers::package_id_in(kind, root, &path)
                     .map(|p| p.version)
                     .unwrap_or_default(),
                 path: path.to_string_lossy().to_string(),
@@ -528,7 +552,8 @@ impl CcmdMcp {
                 .into_iter()
                 .map(|(path, info)| {
                     let kind = providers::detect(&path);
-                    let pkg_id = providers::package_id(kind, &path);
+                    let pkg_id =
+                        providers::package_id_in(kind, providers::root_for(&roots, &path), &path);
                     let (name, version, ecosystem) = pkg_id
                         .map(|p| (p.name.clone(), p.version.clone(), p.ecosystem.to_string()))
                         .unwrap_or_else(|| {
@@ -609,7 +634,8 @@ impl CcmdMcp {
                 .filter(|(_, info)| info.is_outdated)
                 .map(|(path, info)| {
                     let kind = providers::detect(&path);
-                    let pkg_id = providers::package_id(kind, &path);
+                    let pkg_id =
+                        providers::package_id_in(kind, providers::root_for(&roots, &path), &path);
                     let (name, ecosystem) = pkg_id
                         .map(|p| (p.name.clone(), p.ecosystem.to_string()))
                         .unwrap_or_else(|| {
@@ -712,13 +738,15 @@ impl CcmdMcp {
                     let kind = providers::detect(&canonical);
                     let safety = providers::safety(kind, &canonical);
                     let size = walker::dir_size(&canonical);
-                    let name = providers::semantic_name(kind, &canonical).unwrap_or_else(|| {
-                        canonical
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .to_string()
-                    });
+                    let root = canonical_root_for(&roots, &canonical);
+                    let name = providers::semantic_name_in(kind, root.as_deref(), &canonical)
+                        .unwrap_or_else(|| {
+                            canonical
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .to_string()
+                        });
                     let decision = safety::evaluate_delete(&safety, false);
                     let (would_delete, reason) = match decision {
                         safety::DeleteDecision::Allow => {
@@ -813,13 +841,15 @@ impl CcmdMcp {
                 };
                 let kind = providers::detect(&canonical);
                 let safety = providers::safety(kind, &canonical);
-                let name = providers::semantic_name(kind, &canonical).unwrap_or_else(|| {
-                    canonical
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string()
-                });
+                let root = canonical_root_for(&roots, &canonical);
+                let name = providers::semantic_name_in(kind, root.as_deref(), &canonical)
+                    .unwrap_or_else(|| {
+                        canonical
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .to_string()
+                    });
                 match safety::evaluate_delete(&safety, confirm_caution) {
                     safety::DeleteDecision::Allow => {
                         let size = walker::dir_size(&canonical);
@@ -953,6 +983,35 @@ mod tests {
             .expect("shared store must be listed");
         assert!(store.size >= 8192, "store size {}", store.size);
         assert!(nodes.iter().any(|n| n.name == "[model] org/m"));
+    }
+
+    // --- the scan root reaches the providers (#118) ---
+
+    #[tokio::test]
+    async fn package_details_name_a_custom_root_maven_artifact_by_its_scan_root() {
+        // `<tmp>/.m2/custom-repo` is a Maven repository not named `repository`,
+        // with a group id that contains a `repository` component. From the path
+        // alone it reads `acme:widget`; the configured root says otherwise.
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join(".m2").join("custom-repo");
+        let jar_dir = root.join("com/repository/acme/widget/1.0");
+        std::fs::create_dir_all(&jar_dir).unwrap();
+        let jar = jar_dir.join("widget-1.0.jar");
+        std::fs::write(&jar, "x").unwrap();
+        let mut config = Config::default_for_test();
+        config.roots = vec![root];
+        let server = CcmdMcp::new(&config);
+        let out = server
+            .get_package_details(Parameters(tools::DetailsInput {
+                path: Some(jar.to_string_lossy().to_string()),
+                name: None,
+                ecosystem: None,
+            }))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["name"], "com.repository.acme:widget 1.0", "{v}");
+        assert_eq!(v["version"], "1.0", "{v}");
     }
 
     // --- delete scope: only discovered cache entries are deletable (#91) ---

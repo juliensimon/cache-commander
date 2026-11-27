@@ -22,7 +22,7 @@ pub mod xcode;
 pub mod yarn;
 
 use crate::tree::node::CacheKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct MetadataField {
@@ -170,8 +170,28 @@ pub fn detect(path: &Path) -> CacheKind {
     CacheKind::Unknown
 }
 
+/// The configured scan root `path` was found under: the longest root that is a
+/// prefix of it, or `None`. Callers that discover paths under configured roots
+/// pass this to the `*_in` functions so a provider can anchor its layout at the
+/// root instead of inferring it from the path alone (#118).
+pub fn root_for<'a>(roots: &'a [PathBuf], path: &Path) -> Option<&'a Path> {
+    roots
+        .iter()
+        .filter(|r| path.starts_with(r))
+        .max_by_key(|r| r.components().count())
+        .map(PathBuf::as_path)
+}
+
 /// Get a human-readable semantic name for the path, if the provider supports it.
+#[allow(dead_code)] // path-only entry point: public library API and tests; the app passes the root
 pub fn semantic_name(kind: CacheKind, path: &Path) -> Option<String> {
+    semantic_name_in(kind, None, path)
+}
+
+/// Like `semantic_name`, with the configured scan root the path was found under
+/// (see `root_for`). Only providers whose layout is ambiguous from the path
+/// alone use it; the rest ignore it.
+pub fn semantic_name_in(kind: CacheKind, root: Option<&Path>, path: &Path) -> Option<String> {
     match kind {
         CacheKind::HuggingFace => huggingface::semantic_name(path),
         CacheKind::Pip => pip::semantic_name(path),
@@ -189,7 +209,7 @@ pub fn semantic_name(kind: CacheKind, path: &Path) -> Option<String> {
         CacheKind::Yarn => yarn::semantic_name(path),
         CacheKind::Pnpm => pnpm::semantic_name(path),
         CacheKind::Bun => bun::semantic_name(path),
-        CacheKind::Maven => maven::semantic_name(path),
+        CacheKind::Maven => maven::semantic_name_in(root, path),
         CacheKind::Gradle => gradle::semantic_name(path),
         CacheKind::SwiftPm => swiftpm::semantic_name(path),
         CacheKind::Xcode => xcode::semantic_name(path),
@@ -280,6 +300,12 @@ fn npm_name_matches_layout(path: &Path, name: &str) -> bool {
 }
 
 pub fn package_id(kind: CacheKind, path: &Path) -> Option<PackageId> {
+    package_id_in(kind, None, path)
+}
+
+/// Like `package_id`, with the configured scan root the path was found under
+/// (see `root_for`).
+pub fn package_id_in(kind: CacheKind, root: Option<&Path>, path: &Path) -> Option<PackageId> {
     match kind {
         CacheKind::Uv => uv::package_id(path),
         CacheKind::Pip => pip::package_id(path),
@@ -289,7 +315,7 @@ pub fn package_id(kind: CacheKind, path: &Path) -> Option<PackageId> {
         CacheKind::Yarn => yarn::package_id(path),
         CacheKind::Pnpm => pnpm::package_id(path),
         CacheKind::Bun => bun::package_id(path),
-        CacheKind::Maven => maven::package_id(path),
+        CacheKind::Maven => maven::package_id_in(root, path),
         CacheKind::Gradle => gradle::package_id(path),
         CacheKind::Go => go_mod::package_id(path),
         _ => None,
@@ -517,6 +543,49 @@ pub fn pre_delete(kind: CacheKind, path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- #118: scan-root aware dispatch ----
+
+    #[test]
+    fn root_for_picks_the_longest_configured_root_that_contains_the_path() {
+        let roots = vec![
+            PathBuf::from("/home/u/.m2"),
+            PathBuf::from("/home/u/.m2/custom-repo"),
+            PathBuf::from("/other"),
+        ];
+        let p = Path::new("/home/u/.m2/custom-repo/com/acme/w/1.0/w-1.0.jar");
+        assert_eq!(
+            root_for(&roots, p),
+            Some(Path::new("/home/u/.m2/custom-repo"))
+        );
+        // Component-wise, not textual: `/other2` is not under `/other`.
+        assert_eq!(root_for(&roots, Path::new("/other2/x")), None);
+        assert_eq!(root_for(&[], p), None);
+    }
+
+    #[test]
+    fn the_root_reaches_the_maven_provider_through_the_dispatchers() {
+        let root = PathBuf::from("/home/u/.m2/custom-repo");
+        let jar = Path::new("/home/u/.m2/custom-repo/com/repository/acme/w/1.0/w-1.0.jar");
+        assert_eq!(
+            package_id_in(CacheKind::Maven, Some(&root), jar)
+                .unwrap()
+                .name,
+            "com.repository.acme:w"
+        );
+        assert_eq!(
+            semantic_name_in(CacheKind::Maven, Some(&root), jar),
+            Some("com.repository.acme:w 1.0".into())
+        );
+        // The path-only entry points are the `None` case.
+        assert_eq!(package_id(CacheKind::Maven, jar).unwrap().name, "acme:w");
+        // Providers that do not use a root are unaffected by being given one.
+        let npm = Path::new("/home/u/.npm/_cacache/x");
+        assert_eq!(
+            package_id_in(CacheKind::Npm, Some(Path::new("/home/u/.npm")), npm),
+            package_id(CacheKind::Npm, npm)
+        );
+    }
     use std::path::PathBuf;
 
     // --- detect() ---

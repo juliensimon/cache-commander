@@ -59,13 +59,18 @@ fn resolve_parent_dirs(path: &Path) -> Option<Vec<String>> {
 /// ancestor or no `repository` directory below it, rather than guessing a group.
 /// `..` components are resolved lexically first (see `resolve_parent_dirs`).
 ///
-/// Known limit: the root is inferred from the path alone, so a custom root not
-/// named `repository` (e.g. `.m2/custom-repo/com/repository/acme/...`) cannot be
-/// told apart from a nested `.m2/work/repository`; see #118 (needs the scan root).
-fn parse_coordinates(path: &Path) -> Option<(String, String, String)> {
+/// Known limit, only when the scan root is NOT passed (`root` is `None`): the
+/// root is inferred from the path alone, so a custom root not named
+/// `repository` (e.g. `.m2/custom-repo/com/repository/acme/...`) cannot be told
+/// apart from a nested `.m2/work/repository`. With the scan root the repository
+/// root is known where it is unambiguous, see `scan_root_as_repository`.
+fn parse_coordinates(root: Option<&Path>, path: &Path) -> Option<(String, String, String)> {
     let comps = resolve_parent_dirs(path)?;
     let m2 = comps.iter().position(|c| c == ".m2")?;
-    let root = m2 + 1 + comps[m2 + 1..].iter().position(|c| c == "repository")?;
+    let root = match root.and_then(|r| scan_root_as_repository(r, &comps, m2)) {
+        Some(declared) => declared,
+        None => m2 + 1 + comps[m2 + 1..].iter().position(|c| c == "repository")?,
+    };
     // <group...> <artifact> <version> <file>, with at least one group part.
     let rest = &comps[root + 1..];
     if rest.len() < 4 {
@@ -75,22 +80,51 @@ fn parse_coordinates(path: &Path) -> Option<(String, String, String)> {
     Some((group.join("."), tail[0].clone(), tail[1].clone()))
 }
 
+/// Index in `path_comps` (the resolved components of a path under `root`) of the
+/// repository root when the scan root itself is that root, else `None` to fall
+/// back to inference. The scan root is taken to BE the repository only when it
+/// sits strictly below the `.m2` at `m2` and has no `repository` component after
+/// it: then nothing at or above it could be the repository (`.m2/repository`,
+/// `.m2/work/repository`, a subtree of either all keep their inferred root), so
+/// the only repository the path can be in is the root itself (`.m2/custom-repo`).
+/// A root that is `.m2` itself, a root the path is not under, or one with no
+/// `.m2` at or above it says nothing, and also falls back.
+fn scan_root_as_repository(root: &Path, path_comps: &[String], m2: usize) -> Option<usize> {
+    let root_comps = resolve_parent_dirs(root)?;
+    let under_root = path_comps.len() > root_comps.len() && path_comps.starts_with(&root_comps);
+    let strictly_below_m2 = root_comps.len() > m2 + 1;
+    let names_a_repository = root_comps.iter().skip(m2 + 1).any(|c| c == "repository");
+    (under_root && strictly_below_m2 && !names_a_repository).then(|| root_comps.len() - 1)
+}
+
+#[allow(dead_code)] // path-only entry point: public library API and tests; the app passes the root
 pub fn semantic_name(path: &Path) -> Option<String> {
+    semantic_name_in(None, path)
+}
+
+/// Like `semantic_name`, with the configured scan root the path was found under.
+pub fn semantic_name_in(root: Option<&Path>, path: &Path) -> Option<String> {
     let name = path.file_name()?.to_string_lossy().to_string();
     if !name.ends_with(".jar") && !name.ends_with(".pom") {
         return None;
     }
-    let (group, artifact, version) = parse_coordinates(path)?;
+    let (group, artifact, version) = parse_coordinates(root, path)?;
     Some(format!("{group}:{artifact} {version}"))
 }
 
+#[allow(dead_code)] // path-only entry point: public library API and tests; the app passes the root
 pub fn package_id(path: &Path) -> Option<super::PackageId> {
+    package_id_in(None, path)
+}
+
+/// Like `package_id`, with the configured scan root the path was found under.
+pub fn package_id_in(root: Option<&Path>, path: &Path) -> Option<super::PackageId> {
     let name = path.file_name()?.to_string_lossy().to_string();
     // Dedup on .jar — .pom sits alongside and would double-count.
     if !name.ends_with(".jar") {
         return None;
     }
-    let (group, artifact, version) = parse_coordinates(path)?;
+    let (group, artifact, version) = parse_coordinates(root, path)?;
     Some(super::PackageId {
         ecosystem: "Maven",
         name: format!("{group}:{artifact}"),
@@ -184,6 +218,99 @@ mod tests {
             package_id(&interior).unwrap().name,
             "com.repository.acme:widget"
         );
+    }
+
+    // ---- #118: the configured scan root removes the layout ambiguity ----------
+
+    const CUSTOM_JAR: &str =
+        "/home/user/.m2/custom-repo/com/repository/acme/widget/1.0/widget-1.0.jar";
+    const WORK_JAR: &str = "/home/user/.m2/work/repository/com/acme/widget/1.0/widget-1.0.jar";
+
+    #[test]
+    fn a_root_that_is_itself_the_repository_anchors_coordinates() {
+        // From the path alone `.m2/custom-repo/com/repository/acme/...` is read as
+        // `acme:widget` (the first `repository` after `.m2`). Knowing the scan
+        // root is `.m2/custom-repo` makes the repository root known, not inferred.
+        let root = PathBuf::from("/home/user/.m2/custom-repo");
+        let jar = PathBuf::from(CUSTOM_JAR);
+        assert_eq!(
+            package_id_in(Some(&root), &jar).unwrap().name,
+            "com.repository.acme:widget"
+        );
+        assert_eq!(
+            semantic_name_in(Some(&root), &jar),
+            Some("com.repository.acme:widget 1.0".into())
+        );
+        // Without the root the limit is unchanged (documented, and never worse
+        // than before): it is mis-parsed.
+        assert_eq!(package_id(&jar).unwrap().name, "acme:widget");
+    }
+
+    #[test]
+    fn a_custom_named_root_with_no_repository_dir_now_has_coordinates() {
+        let root = PathBuf::from("/home/user/.m2/custom-repo");
+        let jar = PathBuf::from("/home/user/.m2/custom-repo/com/acme/widget/1.0/widget-1.0.jar");
+        assert_eq!(
+            package_id_in(Some(&root), &jar).unwrap().name,
+            "com.acme:widget"
+        );
+        assert!(package_id(&jar).is_none(), "path alone still cannot know");
+    }
+
+    #[test]
+    fn the_standard_roots_are_unaffected_by_passing_them() {
+        for root in [
+            "/home/user/.m2/repository",
+            "/home/user/.m2/work/repository",
+        ] {
+            let root = PathBuf::from(root);
+            let jar = PathBuf::from(format!(
+                "{}/com/repository/acme/widget/1.0/widget-1.0.jar",
+                root.display()
+            ));
+            assert_eq!(
+                package_id_in(Some(&root), &jar).unwrap().name,
+                "com.repository.acme:widget",
+                "root {}",
+                root.display()
+            );
+        }
+        let jar = PathBuf::from(WORK_JAR);
+        assert_eq!(
+            package_id_in(Some(Path::new("/home/user/.m2/work/repository")), &jar)
+                .unwrap()
+                .name,
+            "com.acme:widget"
+        );
+    }
+
+    #[test]
+    fn a_root_inside_a_standard_repository_does_not_move_the_repository_root() {
+        // Scanning a SUBTREE of the repository must not make that subtree the
+        // repository: a `repository` component at or above the root wins.
+        let root = PathBuf::from("/home/user/.m2/repository/com/google");
+        let jar = PathBuf::from(
+            "/home/user/.m2/repository/com/google/guava/guava/32.0.0/guava-32.0.0.jar",
+        );
+        assert_eq!(
+            package_id_in(Some(&root), &jar).unwrap().name,
+            "com.google.guava:guava"
+        );
+    }
+
+    #[test]
+    fn a_root_that_is_m2_itself_or_unrelated_falls_back_to_inference() {
+        let jar = PathBuf::from(CUSTOM_JAR);
+        // `.m2` is not the repository; the repository is somewhere below it.
+        let m2 = PathBuf::from("/home/user/.m2");
+        assert_eq!(package_id_in(Some(&m2), &jar), package_id(&jar));
+        // A root the path is not under says nothing about it.
+        let other = PathBuf::from("/somewhere/else/.m2/custom-repo");
+        assert_eq!(package_id_in(Some(&other), &jar), package_id(&jar));
+        // A root with no `.m2` at or above it cannot vouch for a Maven layout.
+        let no_m2 = PathBuf::from("/data/maven");
+        let no_m2_jar = PathBuf::from("/data/maven/com/acme/widget/1.0/widget-1.0.jar");
+        assert!(package_id_in(Some(&no_m2), &no_m2_jar).is_none());
     }
 
     #[test]

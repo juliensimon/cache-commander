@@ -57,7 +57,7 @@ pub fn discover_packages(roots: &[PathBuf]) -> Vec<(PathBuf, crate::providers::P
         for entry in walk.into_iter().filter_map(|e| e.ok()) {
             let path = entry.path();
             let kind = crate::providers::detect(&path);
-            if let Some(id) = crate::providers::package_id(kind, &path) {
+            if let Some(id) = crate::providers::package_id_in(kind, Some(root), &path) {
                 let key = (id.ecosystem, id.name.clone(), id.version.clone());
                 if seen.insert(key) {
                     packages.push((path.to_path_buf(), id));
@@ -112,6 +112,9 @@ fn worker_loop(
     pool: Option<ThreadPool>,
     shutdown: Option<Arc<AtomicBool>>,
 ) {
+    // The configured roots, as last given in `ScanRoots`: `ExpandNode` only
+    // carries a path, and a provider can need the root it was found under.
+    let mut known_roots: Vec<PathBuf> = Vec::new();
     while let Ok(request) = request_rx.recv() {
         // Check shutdown flag before processing each request.
         if let Some(ref flag) = shutdown
@@ -121,6 +124,7 @@ fn worker_loop(
         }
         match request {
             ScanRequest::ScanRoots(roots) => {
+                known_roots = roots.clone();
                 let mut nodes = Vec::new();
                 for root in &roots {
                     if !root.exists() {
@@ -265,7 +269,10 @@ fn worker_loop(
                         node.last_modified =
                             child_path.metadata().ok().and_then(|m| m.modified().ok());
                         node.kind = providers::detect(child_path);
-                        if let Some(semantic) = providers::semantic_name(node.kind, child_path) {
+                        let root = providers::root_for(&known_roots, child_path);
+                        if let Some(semantic) =
+                            providers::semantic_name_in(node.kind, root, child_path)
+                        {
                             node.name = semantic;
                         }
                         node
@@ -361,5 +368,59 @@ mod tests {
             1,
             "same PyPI (name, version) from two artifact paths should dedup: {packs:?}"
         );
+    }
+
+    // ---- #118: the scan root reaches the providers ----
+
+    /// `<tmp>/.m2/custom-repo`, a Maven repository whose root is not named
+    /// `repository` and whose group id contains a `repository` component. From the
+    /// path alone it parses as `acme:widget`; only the scan root says otherwise.
+    fn custom_maven_repo() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join(".m2").join("custom-repo");
+        let version_dir = root.join("com/repository/acme/widget/1.0");
+        std::fs::create_dir_all(&version_dir).unwrap();
+        std::fs::write(version_dir.join("widget-1.0.jar"), "").unwrap();
+        (tmp, root, version_dir)
+    }
+
+    #[test]
+    fn discovery_anchors_maven_coordinates_at_the_scan_root() {
+        let (_tmp, root, _) = custom_maven_repo();
+        let packs = discover_packages(&[root]);
+        let names: Vec<_> = packs.iter().map(|(_, id)| id.name.as_str()).collect();
+        assert_eq!(names, ["com.repository.acme:widget"], "{packs:?}");
+    }
+
+    #[test]
+    fn expanding_a_node_names_children_using_the_roots_from_scan_roots() {
+        let (_tmp, root, version_dir) = custom_maven_repo();
+        let (result_tx, result_rx) = mpsc::channel();
+        let request_tx = start(result_tx, None);
+        let wait = |want_children: bool| -> Vec<TreeNode> {
+            loop {
+                match result_rx
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .expect("scanner did not answer")
+                {
+                    ScanResult::RootsScanned(n) if !want_children => return n,
+                    ScanResult::ChildrenScanned(_, kids) if want_children => return kids,
+                    _ => {}
+                }
+            }
+        };
+        request_tx
+            .send(ScanRequest::ScanRoots(vec![root.clone()]))
+            .unwrap();
+        wait(false);
+        request_tx
+            .send(ScanRequest::ExpandNode(version_dir))
+            .unwrap();
+        let kids = wait(true);
+        let jar = kids
+            .iter()
+            .find(|n| n.path.ends_with("widget-1.0.jar"))
+            .expect("the jar is listed");
+        assert_eq!(jar.name, "com.repository.acme:widget 1.0");
     }
 }
