@@ -1342,7 +1342,7 @@ mod tests {
     fn a_custom_pnpm_store_is_detected_by_layout() {
         let tmp = tempfile::tempdir().unwrap();
         let v11 = tmp.path().join("pkg-cache/v11");
-        std::fs::create_dir_all(v11.join("files")).unwrap();
+        std::fs::create_dir_all(v11.join("files/ab")).unwrap();
         std::fs::write(v11.join("index.db"), b"").unwrap();
         assert_eq!(detect(&v11.join("index.db")), CacheKind::Pnpm);
         assert_eq!(
@@ -1356,7 +1356,7 @@ mod tests {
         assert_ne!(detect(&other.join("index.db")), CacheKind::Pnpm);
         // And `v<N>` means digits.
         let odd = tmp.path().join("pkg-cache/vault");
-        std::fs::create_dir_all(odd.join("files")).unwrap();
+        std::fs::create_dir_all(odd.join("files/ab")).unwrap();
         std::fs::write(odd.join("index.db"), b"").unwrap();
         assert_ne!(detect(&odd.join("index.db")), CacheKind::Pnpm);
     }

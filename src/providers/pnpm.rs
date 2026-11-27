@@ -448,10 +448,28 @@ fn sidecar_len(db: &Path) -> u64 {
     len("-wal").max(len("-journal"))
 }
 
+/// Whether `files` is pnpm's content store: a directory with at least one
+/// entry that is a directory named by two hex digits (content-addressed
+/// shards, `files/0f/...`).
+fn has_content_shard(files: &Path) -> bool {
+    std::fs::read_dir(files).is_ok_and(|entries| {
+        entries.filter_map(Result::ok).any(|e| {
+            let name = e.file_name();
+            let name = name.as_encoded_bytes();
+            name.len() == 2
+                && name.iter().all(u8::is_ascii_hexdigit)
+                && e.file_type().is_ok_and(|t| t.is_dir())
+        })
+    })
+}
+
 /// Whether `path` is the `index.db` of a pnpm store, by layout rather than by
 /// where the store lives (`pnpm store path` can be anywhere): a file called
-/// `index.db` in a `v<digits>` directory that has a `files/` directory beside
-/// it, as `store/v11/{files,index.db,projects}` does.
+/// `index.db` in a `v<digits>` directory with pnpm's content store, `files/`
+/// holding hex-named shard directories, beside it, as
+/// `store/v11/{files,index.db,projects}` does. Layout is a heuristic, not
+/// proof: it keeps unrelated `index.db` files out, it does not authenticate a
+/// lookalike.
 pub fn is_store_index_db(path: &Path) -> bool {
     if path.file_name().is_none_or(|n| n != "index.db") {
         return false;
@@ -464,7 +482,7 @@ pub fn is_store_index_db(path: &Path) -> bool {
         .and_then(|n| n.to_str())
         .and_then(|n| n.strip_prefix('v'))
         .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()));
-    versioned && dir.join("files").is_dir()
+    versioned && has_content_shard(&dir.join("files"))
 }
 
 /// `<integrity>\t<name>@<version>` to a package, or `None`.
@@ -851,10 +869,44 @@ mod tests {
     }
 
     #[test]
+    fn a_files_directory_that_is_not_pnpms_content_store_does_not_qualify() {
+        // pnpm's `files/` is content-addressed: its entries are two hex digits.
+        // An unrelated application's `v1/files/index.db` is not a pnpm store.
+        let tmp = tempfile::tempdir().unwrap();
+        let db_in = |dir: &Path| {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("index.db"), b"").unwrap();
+            is_store_index_db(&dir.join("index.db"))
+        };
+        let empty = tmp.path().join("a/v11");
+        std::fs::create_dir_all(empty.join("files")).unwrap();
+        assert!(!db_in(&empty), "an empty files/ proves nothing");
+        let named = tmp.path().join("b/v11");
+        std::fs::create_dir_all(named.join("files/uploads")).unwrap();
+        assert!(!db_in(&named), "files/<name> is not content-addressed");
+        let non_hex = tmp.path().join("f/v11");
+        std::fs::create_dir_all(non_hex.join("files/zz")).unwrap();
+        assert!(!db_in(&non_hex), "two characters, but not hex digits");
+        let three = tmp.path().join("c/v11");
+        std::fs::create_dir_all(three.join("files/abc")).unwrap();
+        assert!(!db_in(&three), "two hex digits, not three");
+        let file_not_dir = tmp.path().join("d/v11");
+        std::fs::create_dir_all(file_not_dir.join("files")).unwrap();
+        std::fs::write(file_not_dir.join("files/ab"), b"").unwrap();
+        assert!(
+            !db_in(&file_not_dir),
+            "an entry that is a file is not a shard"
+        );
+        let real = tmp.path().join("e/v11");
+        std::fs::create_dir_all(real.join("files/0f")).unwrap();
+        assert!(db_in(&real));
+    }
+
+    #[test]
     fn is_store_index_db_accepts_only_the_database_itself() {
         let tmp = tempfile::tempdir().unwrap();
         let v11 = tmp.path().join("pkg-cache/v11");
-        std::fs::create_dir_all(v11.join("files")).unwrap();
+        std::fs::create_dir_all(v11.join("files/ab")).unwrap();
         std::fs::write(v11.join("index.db"), b"").unwrap();
         assert!(is_store_index_db(&v11.join("index.db")));
         // Its neighbours are not the database, whatever they sit next to.

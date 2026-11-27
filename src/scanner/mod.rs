@@ -798,7 +798,7 @@ mod tests {
         // `files/` directory beside it.
         let tmp = tempfile::tempdir().unwrap();
         let v11 = tmp.path().join("pkg-cache/v11");
-        std::fs::create_dir_all(v11.join("files")).unwrap();
+        std::fs::create_dir_all(v11.join("files/ab")).unwrap();
         std::fs::write(v11.join("index.db"), REAL_INDEX_DB).unwrap();
         let found = discover(&[tmp.path().join("pkg-cache")]);
         assert_eq!(found.packages.len(), 2, "{:?}", found.unidentified);
