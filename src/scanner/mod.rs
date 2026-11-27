@@ -76,6 +76,8 @@ pub fn discover(roots: &[PathBuf]) -> Discovery {
     let mut seen = std::collections::HashSet::new();
     let mut packages = Vec::new();
     let mut unidentified = Vec::new();
+    // Overlapping roots walk the same directory twice; a path is reported once.
+    let mut unidentified_paths = std::collections::HashSet::new();
     for root in roots {
         if !root.exists() {
             continue;
@@ -101,6 +103,7 @@ pub fn discover(roots: &[PathBuf]) -> Discovery {
                 }
             } else if kind == crate::tree::node::CacheKind::Npm
                 && let Some(reason) = crate::providers::npm::unidentified_reason(&path)
+                && unidentified_paths.insert(path.to_path_buf())
             {
                 unidentified.push(UnidentifiedManifest {
                     path: path.to_path_buf(),
@@ -115,19 +118,20 @@ pub fn discover(roots: &[PathBuf]) -> Discovery {
     }
 }
 
-/// Discover packages for a scan and tell the UI what was skipped.
+/// Discover packages for a scan and tell the UI at once what was skipped, plus
+/// that count, for the caller to put in the scan's own outcome. The early
+/// message is feedback while the network answers; the outcome's copy is what the
+/// final summary uses, so overlapping scans cannot swap their counts.
 fn discover_for_scan(
     roots: &[PathBuf],
     tx: &mpsc::Sender<ScanResult>,
-) -> Vec<(PathBuf, crate::providers::PackageId)> {
+) -> (Vec<(PathBuf, crate::providers::PackageId)>, usize) {
     let found = discover(roots);
-    // Always sent, including 0: the UI keeps the count with the status line,
-    // and a clean rescan must clear the previous one.
-    send_result(
-        tx,
-        ScanResult::ManifestsUnidentified(found.unidentified.len()),
-    );
-    found.packages
+    let skipped = found.unidentified.len();
+    if skipped > 0 {
+        send_result(tx, ScanResult::ManifestsUnidentified(skipped));
+    }
+    (found.packages, skipped)
 }
 
 /// Build a rayon-based thread pool with bounded parallelism.
@@ -354,7 +358,7 @@ fn run_vuln_scan(
     policy: &PrivacyPolicy,
     cache_path: Option<&std::path::Path>,
 ) {
-    let packages = discover_for_scan(roots, tx);
+    let (packages, unidentified) = discover_for_scan(roots, tx);
     let count = packages.len();
     let outcome = match cache_path {
         Some(p) => {
@@ -368,6 +372,8 @@ fn run_vuln_scan(
         }
         None => crate::security::scan_vulns(&packages, policy),
     };
+    let mut outcome = outcome;
+    outcome.unidentified_manifests = unidentified;
     send_result(tx, ScanResult::VulnsScanned(count, outcome));
 }
 
@@ -378,7 +384,7 @@ fn run_version_check(
     policy: &PrivacyPolicy,
     cache_path: Option<&std::path::Path>,
 ) {
-    let packages = discover_for_scan(roots, tx);
+    let (packages, unidentified) = discover_for_scan(roots, tx);
     let count = packages.len();
     let outcome = match cache_path {
         Some(p) => {
@@ -392,6 +398,8 @@ fn run_version_check(
         }
         None => crate::security::check_versions(&packages, policy),
     };
+    let mut outcome = outcome;
+    outcome.unidentified_manifests = unidentified;
     send_result(tx, ScanResult::VersionsChecked(count, outcome));
 }
 
@@ -488,6 +496,16 @@ mod tests {
     }
 
     #[test]
+    fn overlapping_roots_do_not_count_a_broken_package_twice() {
+        let tmp = tempfile::tempdir().unwrap();
+        let m = npx_modules(tmp.path());
+        std::fs::create_dir_all(m.join("bad")).unwrap();
+        // `.npm` and `.npm/_npx` contain the same directory.
+        let found = discover(&[tmp.path().join(".npm"), tmp.path().join(".npm/_npx")]);
+        assert_eq!(found.unidentified.len(), 1, "{:?}", found.unidentified);
+    }
+
+    #[test]
     fn discover_packages_is_discover_without_the_report() {
         let tmp = tempfile::tempdir().unwrap();
         let m = npx_modules(tmp.path());
@@ -505,19 +523,17 @@ mod tests {
         let m = npx_modules(tmp.path());
         std::fs::create_dir_all(m.join("bad")).unwrap();
         let (tx, rx) = mpsc::channel();
-        let packages = discover_for_scan(&[tmp.path().join(".npm")], &tx);
+        let (packages, skipped) = discover_for_scan(&[tmp.path().join(".npm")], &tx);
         assert!(packages.is_empty());
+        assert_eq!(skipped, 1, "the caller needs the count for the outcome");
         assert!(matches!(
             rx.try_recv(),
             Ok(ScanResult::ManifestsUnidentified(1))
         ));
-        // Nothing skipped: still reported, as 0, so a stale count is cleared.
+        // Nothing skipped: nothing to say early.
         let empty = tempfile::tempdir().unwrap();
         discover_for_scan(&[empty.path().to_path_buf()], &tx);
-        assert!(matches!(
-            rx.try_recv(),
-            Ok(ScanResult::ManifestsUnidentified(0))
-        ));
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
@@ -538,7 +554,13 @@ mod tests {
             rx.try_recv(),
             Ok(ScanResult::ManifestsUnidentified(1))
         ));
-        assert!(matches!(rx.try_recv(), Ok(ScanResult::VulnsScanned(0, _))));
+        // The outcome carries the same count, for the summary that follows.
+        match rx.try_recv() {
+            Ok(ScanResult::VulnsScanned(0, outcome)) => {
+                assert_eq!(outcome.unidentified_manifests, 1)
+            }
+            _ => panic!("expected the vuln outcome"),
+        }
     }
 
     #[test]
@@ -557,10 +579,12 @@ mod tests {
             rx.try_recv(),
             Ok(ScanResult::ManifestsUnidentified(1))
         ));
-        assert!(matches!(
-            rx.try_recv(),
-            Ok(ScanResult::VersionsChecked(0, _))
-        ));
+        match rx.try_recv() {
+            Ok(ScanResult::VersionsChecked(0, outcome)) => {
+                assert_eq!(outcome.unidentified_manifests, 1)
+            }
+            _ => panic!("expected the version outcome"),
+        }
     }
 
     #[test]

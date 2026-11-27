@@ -49,6 +49,10 @@ pub struct VulnScanOutcome {
     /// Packages the privacy policy kept off the network (#95). Reported so a
     /// skipped package is never mistaken for a clean one.
     pub skipped_private: usize,
+    /// Package directories the discovery behind this scan could not identify
+    /// (#117). Set by the caller that ran discovery, so each result carries its
+    /// own count and overlapping scans cannot swap them.
+    pub unidentified_manifests: usize,
 }
 
 /// Outcome of a version check. Tracks successful results and the number of
@@ -61,6 +65,8 @@ pub struct VersionCheckOutcome {
     pub cached_hits: usize,
     /// Packages the privacy policy kept off the network (#95).
     pub skipped_private: usize,
+    /// See `VulnScanOutcome::unidentified_manifests`.
+    pub unidentified_manifests: usize,
 }
 
 /// Returns true if a vulnerability is still active (not fixed) for the given package version.
@@ -248,6 +254,7 @@ where
             unscanned_packages: 0,
             cached_hits,
             skipped_private: 0,
+            unidentified_manifests: 0,
         };
     }
 
@@ -301,6 +308,7 @@ where
         unscanned_packages: unscanned,
         cached_hits,
         skipped_private: 0,
+        unidentified_manifests: 0,
     }
 }
 
@@ -404,6 +412,7 @@ where
             unchecked_packages: 0,
             cached_hits,
             skipped_private: 0,
+            unidentified_manifests: 0,
         };
     }
 
@@ -428,6 +437,7 @@ where
         unchecked_packages: fresh.unchecked_packages,
         cached_hits,
         skipped_private: 0,
+        unidentified_manifests: 0,
     }
 }
 
@@ -508,6 +518,7 @@ where
         unchecked_packages,
         cached_hits: 0,
         skipped_private: 0,
+        unidentified_manifests: 0,
     }
 }
 

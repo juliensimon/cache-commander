@@ -117,7 +117,6 @@ are called out under Changed.
 - A custom-named Maven repository whose group id contains a `repository`
   component can be mis-parsed, because the scan root alone cannot tell it from
   a nested standard repository (#118).
-- Packages whose manifests cannot be identified are not reported (#117).
 - PEP 440 and SemVer ordering rest on spec-derived tests, not a reference
   implementation (Maven is checked against the real one).
 
