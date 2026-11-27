@@ -91,19 +91,10 @@ fn send_result<T>(tx: &mpsc::Sender<T>, result: T) {
 /// If `None`, the scanner runs indefinitely (no shutdown signal).
 /// Returns the request tx handle.
 ///
-/// Sends every package name to the public services, i.e. applies no privacy
-/// policy. Production code uses [`start_with_policy`]; this form is for tests
-/// and for callers that have no private packages.
-#[allow(dead_code)] // the binary uses `start_with_policy`; tests use this
-pub fn start(
-    result_tx: mpsc::Sender<ScanResult>,
-    shutdown: Option<Arc<AtomicBool>>,
-) -> mpsc::Sender<ScanRequest> {
-    start_with_policy(result_tx, shutdown, PrivacyPolicy::default())
-}
-
-/// [`start`] with an outbound privacy policy (#95): packages it marks private
-/// are never sent to OSV or a registry.
+/// `policy` is the outbound privacy policy (#95): packages it marks private are
+/// never sent to OSV or a registry. It is a required argument so no caller can
+/// start a scanner that discloses everything by omission; pass
+/// `PrivacyPolicy::default()` to say that on purpose.
 pub fn start_with_policy(
     result_tx: mpsc::Sender<ScanResult>,
     shutdown: Option<Arc<AtomicBool>>,

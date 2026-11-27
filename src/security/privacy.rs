@@ -35,6 +35,17 @@ impl PrivacyPolicy {
             patterns: patterns
                 .into_iter()
                 .map(|p| p.as_ref().trim().to_ascii_lowercase())
+                .map(|p| {
+                    // `@acme/` and `github.com/acme/` are the usual way to
+                    // write a scope or module prefix; the separator is the
+                    // boundary, not part of the name. (A glob keeps them: in
+                    // `acme/*` the slash is part of what is being matched.)
+                    if p.contains('*') {
+                        p
+                    } else {
+                        p.trim_end_matches(NAMESPACE_BOUNDARIES).to_string()
+                    }
+                })
                 .filter(|p| !p.is_empty())
                 .collect(),
             block_all: false,
@@ -47,6 +58,12 @@ impl PrivacyPolicy {
             patterns: Vec::new(),
             block_all: true,
         }
+    }
+
+    /// Whether this policy refuses every lookup (see [`Self::block_all`]).
+    #[cfg_attr(not(feature = "mcp"), allow(dead_code))] // only the MCP reports use it
+    pub fn blocks_everything(&self) -> bool {
+        self.block_all
     }
 
     /// Whether `pkg` must not leave the machine.
@@ -72,11 +89,14 @@ impl PrivacyPolicy {
         let pypi = pkg.ecosystem == "PyPI";
         let normalised = pypi.then(|| pep503(&name));
         self.patterns.iter().any(|pattern| {
-            matches_pattern(pattern, &name)
+            matches_pattern(pattern, &name, NAMESPACE_BOUNDARIES)
                 || (pypi
-                    && normalised
-                        .as_deref()
-                        .is_some_and(|n| matches_pattern(&pep503(pattern), n)))
+                    && normalised.as_deref().is_some_and(|n| {
+                        // Normalised, every separator is `-`, so that is the
+                        // boundary: `acme` then covers `acme.core`,
+                        // `acme-core` and `acme_core` alike.
+                        matches_pattern(&pep503(pattern), n, PYPI_NORMALISED_BOUNDARIES)
+                    }))
         })
     }
 
@@ -114,13 +134,20 @@ fn pep503(name: &str) -> String {
     out
 }
 
-fn matches_pattern(pattern: &str, name: &str) -> bool {
+/// What ends a namespace in a package name: an npm scope (`@acme/ui`), a Go
+/// module path (`github.com/acme/tool`), a Maven group (`com.acme:lib`).
+const NAMESPACE_BOUNDARIES: [char; 3] = ['/', ':', '.'];
+
+/// PEP 503 turns every `.`, `_` and `-` into `-`.
+const PYPI_NORMALISED_BOUNDARIES: [char; 4] = ['/', ':', '.', '-'];
+
+fn matches_pattern<const N: usize>(pattern: &str, name: &str, boundaries: [char; N]) -> bool {
     if pattern.contains('*') {
         return glob(pattern.as_bytes(), name.as_bytes());
     }
     match name.strip_prefix(pattern) {
         Some("") => true,
-        Some(rest) => rest.starts_with(['/', ':', '.']),
+        Some(rest) => rest.starts_with(boundaries),
         None => false,
     }
 }
@@ -230,6 +257,35 @@ mod tests {
         }
         // Normalisation is PyPI's rule; it must not leak into other ecosystems.
         assert!(!private(&["acme-core"], "npm", "acme_core"));
+    }
+
+    #[test]
+    fn a_pattern_written_with_a_trailing_separator_still_matches() {
+        // `@acme/` and `github.com/acme/` are the natural way to write a scope
+        // or a GOPRIVATE-style prefix. The separator must not stop the match.
+        assert!(private(&["@acme/"], "npm", "@acme/ui"));
+        assert!(private(&["github.com/acme/"], "Go", "github.com/acme/tool"));
+        assert!(private(&["com.acme."], "Maven", "com.acme.sub:lib"));
+        assert!(private(&["com.acme:"], "Maven", "com.acme:lib"));
+        // And it is still bounded: not a lookalike.
+        assert!(!private(&["@acme/"], "npm", "@acmecorp/ui"));
+    }
+
+    #[test]
+    fn a_pattern_of_only_separators_matches_nothing() {
+        // Trimming "/" must not leave an empty prefix that matches everything.
+        assert!(!private(&["/", ".", ":"], "npm", "left-pad"));
+    }
+
+    #[test]
+    fn pypi_prefix_covers_every_spelling_of_the_project() {
+        // `acme.core`, `acme-core` and `acme_core` are one project. A prefix
+        // that withholds one spelling must withhold them all, or what leaks
+        // depends on how a cache happens to spell the directory.
+        for name in ["acme.core", "acme-core", "acme_core", "Acme__Core"] {
+            assert!(private(&["acme"], "PyPI", name), "{name}");
+        }
+        assert!(!private(&["acme"], "PyPI", "acmecorp"));
     }
 
     #[test]

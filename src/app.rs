@@ -96,6 +96,13 @@ impl App {
     }
 
     pub fn init(&mut self) {
+        // `Config::load` warned on stderr, which the alternate screen hides.
+        if self.config.privacy.block_lookups {
+            self.status_msg = Some(
+                "config file unusable — package lookups (OSV, registries) disabled; see the warning printed at startup"
+                    .to_string(),
+            );
+        }
         let roots = self.config.roots.clone();
         self.send_scan_request(crate::scanner::ScanRequest::ScanRoots(roots));
     }
@@ -178,7 +185,8 @@ impl App {
                     // must not be reported as scanned (#95).
                     let skipped = outcome.skipped_private;
                     let scanned = attempted.saturating_sub(skipped);
-                    let private_suffix = private_skip_suffix(skipped);
+                    let private_suffix =
+                        private_skip_suffix(skipped, self.config.privacy.block_lookups);
                     self.vuln_results.extend(outcome.results);
                     self.vulnscan_in_progress = false;
                     self.recompute_node_status();
@@ -234,7 +242,8 @@ impl App {
                     let cached_hits = outcome.cached_hits;
                     let skipped = outcome.skipped_private;
                     let checked = attempted.saturating_sub(skipped);
-                    let private_suffix = private_skip_suffix(skipped);
+                    let private_suffix =
+                        private_skip_suffix(skipped, self.config.privacy.block_lookups);
                     self.version_results.extend(outcome.results);
                     self.versioncheck_in_progress = false;
                     self.recompute_node_status();
@@ -1160,9 +1169,16 @@ pub(crate) fn cache_hit_suffix(cached_hits: usize, attempted: usize) -> String {
 
 /// Status-line note for packages the privacy policy kept off the network
 /// (#95). Empty when none were: the common case stays silent.
-pub(crate) fn private_skip_suffix(skipped: usize) -> String {
+///
+/// `blocked` is the config-file-unusable case (`PrivacyConfig::block_lookups`):
+/// there the user has no `[privacy]` policy to look for, and the real cause is
+/// the file.
+pub(crate) fn private_skip_suffix(skipped: usize, blocked: bool) -> String {
     if skipped == 0 {
         return String::new();
+    }
+    if blocked {
+        return format!(" [{skipped} not sent: config file unusable, lookups disabled]");
     }
     format!(" [{skipped} withheld by [privacy] policy, not sent]")
 }
@@ -1574,8 +1590,53 @@ mod tests {
 
     #[test]
     fn private_skip_suffix_is_silent_when_nothing_was_withheld() {
-        assert_eq!(private_skip_suffix(0), "");
-        assert!(private_skip_suffix(3).contains("3 withheld"));
+        assert_eq!(private_skip_suffix(0, false), "");
+        assert!(private_skip_suffix(3, false).contains("3 withheld"));
+    }
+
+    #[test]
+    fn private_skip_suffix_names_the_broken_config_as_the_cause() {
+        // "withheld by [privacy] policy" would send someone with no [privacy]
+        // section hunting for a policy they never wrote.
+        let msg = private_skip_suffix(412, true);
+        assert!(msg.contains("412"), "{msg}");
+        assert!(msg.contains("config"), "{msg}");
+        assert!(!msg.contains("[privacy] policy"), "{msg}");
+    }
+
+    #[test]
+    fn a_broken_config_is_announced_when_the_app_starts() {
+        // The warning printed by Config::load is wiped by the alternate
+        // screen, so the app must say it itself.
+        let mut config = bare_config();
+        config.privacy.block_lookups = true;
+        let (mut app, _tx, _rx) = build_app(config);
+        app.init();
+        let msg = app.status_msg.as_deref().unwrap_or("");
+        assert!(msg.contains("config"), "got: {msg}");
+        assert!(msg.contains("disabled"), "got: {msg}");
+    }
+
+    #[test]
+    fn tick_vulns_blames_the_config_when_lookups_are_blocked() {
+        let mut config = bare_config();
+        config.privacy.block_lookups = true;
+        let (mut app, tx, _rx) = build_app(config);
+        app.tree.set_roots(vec![mk_node("ok", 1, CacheKind::Cargo)]);
+        tx.send(ScanResult::VulnsScanned(
+            5,
+            crate::security::VulnScanOutcome {
+                results: HashMap::new(),
+                unscanned_packages: 0,
+                cached_hits: 0,
+                skipped_private: 5,
+            },
+        ))
+        .unwrap();
+        app.tick();
+        let msg = app.status_msg.as_deref().unwrap_or("");
+        assert!(msg.contains("nothing scanned"), "got: {msg}");
+        assert!(msg.contains("config"), "got: {msg}");
     }
 
     #[test]

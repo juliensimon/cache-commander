@@ -151,8 +151,12 @@ impl PrivacyConfig {
     }
 }
 
+/// Unknown keys are an error here too, not only inside `[privacy]`: a
+/// misspelt `[privcy]` table would otherwise be dropped without a word and the
+/// deny list it held never applied. An unusable file blocks package lookups
+/// (see `FileConfig::Unusable`), and the warning names the offending key.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub roots: Vec<PathBuf>,
     pub sort_by: SortField,
@@ -628,6 +632,19 @@ mod tests {
         // leave the user believing their names were protected.
         let err = toml::from_str::<Config>("[privacy]\nprivate_package = [\"@acme\"]\n");
         assert!(err.is_err(), "unknown [privacy] keys must be rejected");
+    }
+
+    #[test]
+    fn a_misspelt_privacy_section_is_an_error_not_an_ignored_table() {
+        // `[privcy]` parses as an unknown top-level table. If that were
+        // ignored, no list would be applied and no warning given.
+        for header in ["privcy", "Privacy", "privacy_packages"] {
+            let toml = format!("[{header}]\nprivate_packages = [\"@acme\"]\n");
+            assert!(
+                toml::from_str::<Config>(&toml).is_err(),
+                "[{header}] must be rejected"
+            );
+        }
     }
 
     #[test]

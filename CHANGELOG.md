@@ -12,8 +12,12 @@ are called out under Changed.
   packages from OSV.dev and the registries, for the TUI and the MCP tools. The
   policy is applied before a request is built, so nothing is sent, cached, or
   reported as clean; the status line and the MCP reports count what was
-  withheld. A config file that exists but cannot be used (or has an unknown
-  key) disables all package lookups instead of falling back to defaults.
+  withheld. A config file that exists but cannot be used disables all package
+  lookups instead of falling back to defaults. The file is now strict: any
+  unknown key, not only one under `[privacy]`, makes it unusable, so a
+  misspelt `[privcy]` cannot leave the list silently empty. Config files with
+  stale or misspelt keys that used to be ignored now disable lookups until
+  they are fixed; the warning and the status line name the cause.
 - **MCP delete is limited to discovered entries (#119)**: `delete_packages`
   only removes entries that discovery lists (what `search_packages` returns),
   never a configured root, a provider container, a symlink, or a path inside a

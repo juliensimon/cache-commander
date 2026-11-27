@@ -60,6 +60,9 @@ pub struct VulnScanReport {
     /// Packages the `[privacy]` policy kept off OSV.dev. They were not
     /// scanned: absence from `packages` means nothing for them (#95).
     pub skipped_private: usize,
+    /// True when the config file was unusable, so EVERY package was withheld
+    /// (as opposed to a `[privacy]` list matching some of them).
+    pub lookups_blocked: bool,
     pub packages: Vec<VulnResult>,
 }
 
@@ -88,6 +91,8 @@ pub struct OutdatedReport {
     /// Packages the `[privacy]` policy kept off the registries. They were not
     /// checked (#95).
     pub skipped_private: usize,
+    /// True when the config file was unusable, so EVERY package was withheld.
+    pub lookups_blocked: bool,
     pub packages: Vec<OutdatedResult>,
 }
 

@@ -45,7 +45,7 @@ fn scanner_discovers_roots_and_computes_sizes() {
     create_uv_cache(tmp.path());
 
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = ccmd::scanner::start(result_tx, None);
+    let scan_tx = ccmd::scanner::start_with_policy(result_tx, None, Default::default());
 
     scan_tx
         .send(ccmd::scanner::ScanRequest::ScanRoots(vec![
@@ -84,7 +84,7 @@ fn scanner_expand_discovers_children_with_providers() {
     let cache_dir = tmp.path().to_path_buf();
 
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = ccmd::scanner::start(result_tx, None);
+    let scan_tx = ccmd::scanner::start_with_policy(result_tx, None, Default::default());
 
     scan_tx
         .send(ccmd::scanner::ScanRequest::ExpandNode(cache_dir.clone()))
@@ -135,7 +135,7 @@ fn scanner_expand_huggingface_hub_shows_semantic_names() {
     let hub_path = tmp.path().join("huggingface").join("hub");
 
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = ccmd::scanner::start(result_tx, None);
+    let scan_tx = ccmd::scanner::start_with_policy(result_tx, None, Default::default());
 
     scan_tx
         .send(ccmd::scanner::ScanRequest::ExpandNode(hub_path))
@@ -175,7 +175,7 @@ fn scanner_expand_whisper_shows_model_names() {
     let whisper_path = tmp.path().join("whisper");
 
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = ccmd::scanner::start(result_tx, None);
+    let scan_tx = ccmd::scanner::start_with_policy(result_tx, None, Default::default());
 
     scan_tx
         .send(ccmd::scanner::ScanRequest::ExpandNode(whisper_path))
@@ -222,7 +222,7 @@ fn full_tree_workflow_expand_navigate_mark_delete() {
 
     // Use scanner to get children
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = ccmd::scanner::start(result_tx, None);
+    let scan_tx = ccmd::scanner::start_with_policy(result_tx, None, Default::default());
 
     scan_tx
         .send(ccmd::scanner::ScanRequest::ExpandNode(
@@ -374,7 +374,7 @@ fn async_expand_returns_children_with_zero_size() {
     std::fs::create_dir_all(tmp.path().join("sub2")).unwrap();
 
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = ccmd::scanner::start(result_tx, None);
+    let scan_tx = ccmd::scanner::start_with_policy(result_tx, None, Default::default());
 
     scan_tx
         .send(ccmd::scanner::ScanRequest::ExpandNode(
@@ -412,7 +412,7 @@ fn scanner_expand_and_size_update_full_cycle() {
     tree.expanded.insert(0);
 
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = ccmd::scanner::start(result_tx, None);
+    let scan_tx = ccmd::scanner::start_with_policy(result_tx, None, Default::default());
 
     scan_tx
         .send(ccmd::scanner::ScanRequest::ExpandNode(
@@ -827,7 +827,7 @@ fn scanner_expand_yarn_berry_shows_semantic_names() {
     let cache_path = tmp.path().join(".yarn/cache");
 
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = ccmd::scanner::start(result_tx, None);
+    let scan_tx = ccmd::scanner::start_with_policy(result_tx, None, Default::default());
 
     scan_tx
         .send(ccmd::scanner::ScanRequest::ExpandNode(cache_path))
@@ -870,7 +870,7 @@ fn scanner_expand_pnpm_virtual_store_shows_semantic_names() {
     let pnpm_path = tmp.path().join("node_modules/.pnpm");
 
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = ccmd::scanner::start(result_tx, None);
+    let scan_tx = ccmd::scanner::start_with_policy(result_tx, None, Default::default());
 
     scan_tx
         .send(ccmd::scanner::ScanRequest::ExpandNode(pnpm_path))
@@ -971,7 +971,7 @@ fn scanner_expand_bun_cache_shows_semantic_names() {
     let cache_path = tmp.path().join(".bun/install/cache");
 
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = ccmd::scanner::start(result_tx, None);
+    let scan_tx = ccmd::scanner::start_with_policy(result_tx, None, Default::default());
 
     scan_tx
         .send(ccmd::scanner::ScanRequest::ExpandNode(cache_path.clone()))
@@ -1030,7 +1030,7 @@ fn scanner_expand_chroma_shows_onnx_models_and_runtime() {
     let chroma_path = tmp.path().join("chroma");
 
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = ccmd::scanner::start(result_tx, None);
+    let scan_tx = ccmd::scanner::start_with_policy(result_tx, None, Default::default());
 
     scan_tx
         .send(ccmd::scanner::ScanRequest::ExpandNode(chroma_path))
@@ -1071,7 +1071,7 @@ fn scanner_expand_chroma_onnx_models_shows_embed_dirs() {
     let onnx_models_path = tmp.path().join("chroma/onnx_models");
 
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = ccmd::scanner::start(result_tx, None);
+    let scan_tx = ccmd::scanner::start_with_policy(result_tx, None, Default::default());
 
     scan_tx
         .send(ccmd::scanner::ScanRequest::ExpandNode(onnx_models_path))
@@ -1118,7 +1118,7 @@ fn scanner_expand_pre_commit_shows_repos() {
     let pre_commit_path = tmp.path().join("pre-commit");
 
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = ccmd::scanner::start(result_tx, None);
+    let scan_tx = ccmd::scanner::start_with_policy(result_tx, None, Default::default());
 
     scan_tx
         .send(ccmd::scanner::ScanRequest::ExpandNode(pre_commit_path))
@@ -1155,7 +1155,7 @@ fn scanner_expand_pre_commit_repo_shows_hooks_file() {
     let repo_path = tmp.path().join("pre-commit/repoabc123");
 
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = ccmd::scanner::start(result_tx, None);
+    let scan_tx = ccmd::scanner::start_with_policy(result_tx, None, Default::default());
 
     scan_tx
         .send(ccmd::scanner::ScanRequest::ExpandNode(repo_path))
@@ -1199,7 +1199,7 @@ fn scanner_expand_torch_hub_shows_checkpoints_dir() {
     let hub_path = tmp.path().join("torch/hub");
 
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = ccmd::scanner::start(result_tx, None);
+    let scan_tx = ccmd::scanner::start_with_policy(result_tx, None, Default::default());
 
     scan_tx
         .send(ccmd::scanner::ScanRequest::ExpandNode(hub_path))
@@ -1235,7 +1235,7 @@ fn scanner_expand_torch_checkpoints_shows_checkpoint_files() {
     let checkpoints_path = tmp.path().join("torch/hub/checkpoints");
 
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = ccmd::scanner::start(result_tx, None);
+    let scan_tx = ccmd::scanner::start_with_policy(result_tx, None, Default::default());
 
     scan_tx
         .send(ccmd::scanner::ScanRequest::ExpandNode(checkpoints_path))
@@ -1291,7 +1291,7 @@ fn scanner_expand_prisma_shows_branches() {
     let prisma_path = tmp.path().join("prisma");
 
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = ccmd::scanner::start(result_tx, None);
+    let scan_tx = ccmd::scanner::start_with_policy(result_tx, None, Default::default());
 
     scan_tx
         .send(ccmd::scanner::ScanRequest::ExpandNode(prisma_path))
@@ -1332,7 +1332,7 @@ fn scanner_expand_prisma_master_shows_commit_and_platform() {
     let master_path = tmp.path().join("prisma/master");
 
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = ccmd::scanner::start(result_tx, None);
+    let scan_tx = ccmd::scanner::start_with_policy(result_tx, None, Default::default());
 
     scan_tx
         .send(ccmd::scanner::ScanRequest::ExpandNode(master_path))
@@ -1380,7 +1380,7 @@ fn scanner_expand_gh_shows_run_logs() {
     let gh_path = tmp.path().join("gh");
 
     let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = ccmd::scanner::start(result_tx, None);
+    let scan_tx = ccmd::scanner::start_with_policy(result_tx, None, Default::default());
 
     scan_tx
         .send(ccmd::scanner::ScanRequest::ExpandNode(gh_path))

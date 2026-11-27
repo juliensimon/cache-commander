@@ -275,9 +275,9 @@ private_packages = [
 ]
 ```
 
-A pattern with no `*` matches the name itself and anything that continues it after a `/`, `:` or `.`. Matching is case-insensitive, and PyPI names are compared in their normalised form (`Acme_Core`, `acme-core` and `acme.core` are one project). The same list covers the vulnerability scan, the version check and the MCP tools. A listed package is **withheld before any request is built**: it is not sent, not cached, and the status line (and the MCP reports' `skipped_private`) says how many were withheld, so a withheld package is never reported as clean or up to date.
+A pattern with no `*` matches the name itself and anything that continues it after a `/`, `:` or `.`; a trailing separator (`@acme/`) is allowed. Matching is case-insensitive. PyPI names are compared in their normalised form, where `acme.core`, `acme-core` and `acme_core` are one project, and there a prefix also ends at `-`: `acme` covers `acme-core` and `acme-utils`. The same list covers the vulnerability scan, the version check and the MCP tools. A listed package is **withheld before any request is built**: it is not sent, not cached, and the status line (and the MCP reports' `skipped_private`) says how many were withheld, so a withheld package is never reported as clean or up to date.
 
-If the config file exists but cannot be read or parsed (including an unknown key such as a misspelt `private_package`), `ccmd` prints a warning and **disables every package lookup** until it is fixed, because falling back to the defaults would send the names the file was meant to hold back. A missing file is not an error: the defaults apply and nothing is withheld.
+If the config file exists but cannot be read or parsed, `ccmd` prints a warning, says so in the status line, and **disables every package lookup** until it is fixed, because falling back to the defaults would send the names the file was meant to hold back. This includes **any unknown key**, such as a misspelt `[privcy]` section or `private_package`: the file is strict so that a typo cannot leave the list silently empty. A missing file is not an error: the defaults apply and nothing is withheld.
 
 ### npm Supply Chain Detection
 

@@ -542,6 +542,7 @@ impl CcmdMcp {
     ) -> Result<String, String> {
         let roots = self.roots.clone();
         let privacy = self.privacy.clone();
+        let lookups_blocked = privacy.blocks_everything();
         let ecosystem_filter = input.0.ecosystem;
 
         let (result, skipped_private) = tokio::task::spawn_blocking(move || {
@@ -611,6 +612,7 @@ impl CcmdMcp {
                 fixable,
                 unfixable: total_vulns - fixable,
                 skipped_private,
+                lookups_blocked,
                 packages: result,
             };
             serde_json::to_string_pretty(&report).map_err(|e| format!("serialization failed: {e}"))
@@ -626,6 +628,7 @@ impl CcmdMcp {
     ) -> Result<String, String> {
         let roots = self.roots.clone();
         let privacy = self.privacy.clone();
+        let lookups_blocked = privacy.blocks_everything();
         let ecosystem_filter = input.0.ecosystem;
 
         let (result, skipped_private) = tokio::task::spawn_blocking(move || {
@@ -680,6 +683,7 @@ impl CcmdMcp {
                 outdated_packages: result.len(),
                 by_ecosystem,
                 skipped_private,
+                lookups_blocked,
                 packages: result,
             };
             serde_json::to_string_pretty(&report).map_err(|e| format!("serialization failed: {e}"))
@@ -1128,6 +1132,63 @@ mod tests {
             v["safety_level"].as_str().unwrap().starts_with("Unsafe"),
             "{v}"
         );
+    }
+
+    /// A discoverable package: a Poetry wheel (`name-version-...whl`).
+    fn make_poetry_wheel(root: &Path) {
+        let dir = root
+            .join("pypoetry")
+            .join("artifacts")
+            .join("aa")
+            .join("11");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("requests-2.31.0-py3-none-any.whl"), "").unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_blocked_config_makes_both_tools_send_nothing_and_say_why() {
+        // No network is reachable from this test: if either tool tried to
+        // look the package up, it would be counted as unscanned/unchecked
+        // rather than withheld.
+        let tmp = tempfile::tempdir().unwrap();
+        make_poetry_wheel(tmp.path());
+        let mut config = Config::default_for_test();
+        config.roots = vec![tmp.path().to_path_buf()];
+        config.privacy.block_lookups = true;
+        let server = CcmdMcp::new(&config);
+
+        let out = server
+            .scan_vulnerabilities(Parameters(tools::EcosystemInput { ecosystem: None }))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["skipped_private"], 1, "{v}");
+        assert_eq!(v["lookups_blocked"], true, "{v}");
+
+        let out = server
+            .check_outdated(Parameters(tools::EcosystemInput { ecosystem: None }))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["skipped_private"], 1, "{v}");
+        assert_eq!(v["lookups_blocked"], true, "{v}");
+    }
+
+    #[tokio::test]
+    async fn a_privacy_list_is_applied_by_the_mcp_tools_without_claiming_a_block() {
+        let tmp = tempfile::tempdir().unwrap();
+        make_poetry_wheel(tmp.path());
+        let mut config = Config::default_for_test();
+        config.roots = vec![tmp.path().to_path_buf()];
+        config.privacy.private_packages = vec!["requests".into()];
+        let server = CcmdMcp::new(&config);
+        let out = server
+            .scan_vulnerabilities(Parameters(tools::EcosystemInput { ecosystem: None }))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["skipped_private"], 1, "{v}");
+        assert_eq!(v["lookups_blocked"], false, "{v}");
     }
 
     #[cfg(unix)]
@@ -1708,6 +1769,7 @@ mod tests {
             fixable,
             unfixable: total_vulns - fixable,
             skipped_private: 0,
+            lookups_blocked: false,
             packages,
         };
 
@@ -1757,6 +1819,7 @@ mod tests {
             outdated_packages: packages.len(),
             by_ecosystem,
             skipped_private: 0,
+            lookups_blocked: false,
             packages,
         };
 
@@ -1845,6 +1908,7 @@ mod tests {
             fixable: 1,
             unfixable: 1,
             skipped_private: 0,
+            lookups_blocked: false,
             packages: vec![],
         };
         let json = serde_json::to_string(&report).unwrap();
