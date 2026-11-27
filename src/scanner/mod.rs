@@ -60,7 +60,7 @@ pub fn discover_packages(roots: &[PathBuf]) -> Vec<(PathBuf, crate::providers::P
             // through it would send names from outside the root to OSV and the
             // registries (#92). Its target, if inside the root, is found by
             // its own path.
-            if entry.file_type().is_symlink() {
+            if entry.depth() > 0 && entry.file_type().is_symlink() {
                 continue;
             }
             let path = entry.path();
@@ -286,41 +286,7 @@ fn worker_loop(
                 }
             }
             ScanRequest::ExpandNode(path) => {
-                let children_paths = walker::list_children(&path);
-                let mut children: Vec<TreeNode> = children_paths
-                    .iter()
-                    .map(|child_path| {
-                        let mut node = TreeNode::new(child_path.clone(), 0, None);
-                        if walker::is_symlink(child_path) {
-                            // A leaf: listed so the user sees it, but not
-                            // classified, named or sized through its target
-                            // (#93).
-                            node.last_modified = std::fs::symlink_metadata(child_path)
-                                .ok()
-                                .and_then(|m| m.modified().ok());
-                            return node;
-                        }
-                        node.last_modified =
-                            child_path.metadata().ok().and_then(|m| m.modified().ok());
-                        node.kind = providers::detect(child_path);
-                        if let Some(semantic) = providers::semantic_name(node.kind, child_path) {
-                            node.name = semantic;
-                        }
-                        node
-                    })
-                    .collect();
-
-                let mut deferred: Vec<PathBuf> = Vec::new();
-                for (i, child_path) in children_paths.iter().enumerate() {
-                    if walker::is_symlink(child_path) {
-                        continue; // size stays 0: a link is not its target's bytes
-                    }
-                    if let Some(size) = walker::quick_size(child_path) {
-                        children[i].size = size;
-                    } else {
-                        deferred.push(child_path.clone());
-                    }
-                }
+                let (children, deferred) = expand(&path);
 
                 send_result(
                     &result_tx,
@@ -347,6 +313,47 @@ fn worker_loop(
             }
         }
     }
+}
+
+/// The children of `path` as tree nodes, and the children whose size was too
+/// large for `quick_size` and must be measured in the background.
+///
+/// A child that is a symlink is a leaf (#93): listed so the user sees it, but
+/// never classified, named or sized through its target, and never queued for a
+/// size walk. `path` itself may be a link (a root the user named).
+pub fn expand(path: &std::path::Path) -> (Vec<TreeNode>, Vec<PathBuf>) {
+    let children_paths = walker::list_children(path);
+    let mut children: Vec<TreeNode> = children_paths
+        .iter()
+        .map(|child_path| {
+            let mut node = TreeNode::new(child_path.clone(), 0, None);
+            if walker::is_symlink(child_path) {
+                node.last_modified = std::fs::symlink_metadata(child_path)
+                    .ok()
+                    .and_then(|m| m.modified().ok());
+                return node;
+            }
+            node.last_modified = child_path.metadata().ok().and_then(|m| m.modified().ok());
+            node.kind = providers::detect(child_path);
+            if let Some(semantic) = providers::semantic_name(node.kind, child_path) {
+                node.name = semantic;
+            }
+            node
+        })
+        .collect();
+
+    let mut deferred: Vec<PathBuf> = Vec::new();
+    for (i, child_path) in children_paths.iter().enumerate() {
+        if walker::is_symlink(child_path) {
+            continue; // size stays 0: a link is not its target's bytes
+        }
+        if let Some(size) = walker::quick_size(child_path) {
+            children[i].size = size;
+        } else {
+            deferred.push(child_path.clone());
+        }
+    }
+    (children, deferred)
 }
 
 fn run_brew_outdated()

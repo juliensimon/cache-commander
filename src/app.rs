@@ -485,7 +485,14 @@ impl App {
                 }
             }
             KeyCode::Char('r') => {
-                if let Some(idx) = self.tree.selected_node_index() {
+                // Only a node that can have children is refreshed. A leaf, such
+                // as a symlink (#93), must not be listed: the listing would
+                // read through the link.
+                if let Some(idx) = self
+                    .tree
+                    .selected_node_index()
+                    .filter(|&idx| self.tree.nodes[idx].has_children)
+                {
                     let path = self.tree.nodes[idx].path.clone();
                     self.tree.nodes[idx].children_loaded = false;
                     // Remove existing children
@@ -1700,6 +1707,37 @@ mod tests {
         let msg = app.status_msg.as_deref().unwrap_or("");
         assert!(msg.contains("nothing checked"), "got: {msg}");
         assert!(!msg.contains("up to date"), "got: {msg}");
+    }
+
+    #[test]
+    fn refresh_does_not_expand_a_node_that_is_a_leaf() {
+        // `r` re-sends ExpandNode for the selected node. For a symlink (a leaf
+        // by the symlink rule, #93) that would list the link's target, which
+        // is exactly what the rule forbids.
+        let (mut app, _tx, rx) = build_app(bare_config());
+        app.tree
+            .set_roots(vec![mk_node("link", 0, CacheKind::Unknown)]);
+        assert!(!app.tree.nodes[0].has_children);
+        app.process_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        assert!(
+            rx.try_recv().is_err(),
+            "no ExpandNode may be sent for a leaf"
+        );
+    }
+
+    #[test]
+    fn refresh_still_expands_a_directory() {
+        let (mut app, _tx, rx) = build_app(bare_config());
+        app.tree.set_roots(vec![expandable_node(
+            "dir",
+            PathBuf::from("/tmp/dir"),
+            CacheKind::Unknown,
+        )]);
+        app.process_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ScanRequest::ExpandNode(p)) if p == PathBuf::from("/tmp/dir")
+        ));
     }
 
     #[test]

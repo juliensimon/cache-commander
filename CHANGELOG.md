@@ -67,9 +67,12 @@ are called out under Changed.
   on purpose, to surface upstream releases.
 
 ### Changed
-- **Behavior change (tree)**: a symlinked directory below a root, for example
-  `~/.cache/pip` pointing at another volume, is shown as a leaf with no size
-  and cannot be expanded. Add its target as a root to browse it.
+- **Behavior change (tree)**: a symlink below a root is shown as a leaf with no
+  size and is not classified. For a directory, such as `~/.cache/pip` pointing
+  at another volume, that also means it cannot be expanded: add its target as a
+  root to browse it. For a file, such as the links to blobs in a Hugging Face
+  snapshot, the size is the blob's, counted where the blob lives; the parent
+  directory already treated links as 0.
 - **Behavior change (MCP)**: an agent can no longer delete a root, a container
   such as `~/.cache/huggingface`, a symlink, or a path inside a package. Delete
   the discovered entries instead.

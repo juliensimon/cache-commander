@@ -242,7 +242,11 @@ impl CcmdMcp {
         if kind != CacheKind::Unknown && path.is_dir() {
             let should_recurse = semantic_name.is_none() || {
                 // Peek at children: if any child has a typed semantic name, recurse
+                // A link is never read for this decision either (#92).
                 walker::list_children(path).iter().any(|child| {
+                    if walker::is_symlink(child) {
+                        return false;
+                    }
                     let ck = providers::detect(child);
                     providers::semantic_name(ck, child).is_some_and(|n| n.starts_with('['))
                         || providers::package_id(ck, child).is_some()
@@ -1234,6 +1238,38 @@ mod tests {
         );
         let whisper = nodes.iter().find(|n| n.kind == CacheKind::Whisper);
         assert_eq!(whisper.map(|n| n.size), Some(100), "control: {listed:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deciding_to_recurse_into_a_container_does_not_read_through_its_links() {
+        // `collect_nodes` peeks at a container's children to decide whether to
+        // recurse. A child that is a link must not be read for that decision:
+        // here the only evidence that `_npx` holds packages is behind a link.
+        let tmp = tempfile::tempdir().unwrap();
+        let tmp = tmp.path().canonicalize().unwrap();
+        let root = tmp.join(".npm");
+        let outside = tmp.join("outside/abc");
+        std::fs::create_dir_all(root.join("_npx")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(
+            outside.join("package.json"),
+            r#"{"_npx":{"packages":["secret-tool"]}}"#,
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("_npx/abc")).unwrap();
+
+        let nodes = CcmdMcp::walk_root_nodes(&[root.clone()], true);
+        let listed: Vec<_> = nodes.iter().map(|n| (n.name.as_str(), &n.path)).collect();
+
+        assert!(
+            nodes.iter().all(|n| !n.name.contains("secret-tool")),
+            "a name read through the link surfaced: {listed:?}"
+        );
+        assert!(
+            nodes.iter().all(|n| n.path != root.join("_npx/abc")),
+            "the container was recursed into on the strength of the link's target: {listed:?}"
+        );
     }
 
     #[cfg(unix)]

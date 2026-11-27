@@ -10,13 +10,9 @@
 
 #![cfg(unix)]
 
+use ccmd::tree::node::TreeNode;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
-use std::time::Duration;
-
-use ccmd::scanner::{ScanRequest, ScanResult};
-use ccmd::tree::node::TreeNode;
 
 /// An npm package directory with a `package.json`, under a path `detect`
 /// recognises (`.npm/_npx/<hash>/node_modules/<name>`).
@@ -79,41 +75,24 @@ fn discovery_still_walks_a_root_that_is_itself_a_symlink() {
     assert_eq!(found, vec!["real-pkg".to_string()]);
 }
 
-/// Expand `dir` through the real scanner thread and collect what comes back,
-/// including any later size updates.
-fn expand(dir: &Path) -> (Vec<TreeNode>, Vec<(PathBuf, u64)>) {
-    let (result_tx, result_rx) = mpsc::channel();
-    let scan_tx = ccmd::scanner::start(result_tx, None);
-    scan_tx
-        .send(ScanRequest::ExpandNode(dir.to_path_buf()))
-        .unwrap();
-    let mut children = Vec::new();
-    let mut sizes = Vec::new();
-    // The children arrive first; later messages are size updates for large
-    // children. A quiet second is enough to know none are coming.
-    while let Ok(msg) = result_rx.recv_timeout(Duration::from_secs(1)) {
-        match msg {
-            ScanResult::ChildrenScanned(_, nodes) => children = nodes,
-            ScanResult::SizeUpdated(path, size) => sizes.push((path, size)),
-            _ => {}
-        }
-    }
-    (children, sizes)
-}
-
 #[test]
 fn expanding_a_node_shows_a_symlink_as_a_leaf_without_measuring_its_target() {
     let tmp = tempfile::tempdir().unwrap();
     let tmp = tmp.path().canonicalize().unwrap();
+    // Enough entries that `quick_size` gives up and the size would be queued
+    // for a background walk, which is where a followed link used to be
+    // measured. No timing involved: the queue is returned.
     let outside = tmp.join("outside");
     std::fs::create_dir_all(&outside).unwrap();
-    std::fs::write(outside.join("big.bin"), vec![0u8; 64 * 1024]).unwrap();
+    for i in 0..60 {
+        std::fs::write(outside.join(format!("f{i}.bin")), vec![0u8; 1024]).unwrap();
+    }
     let root = tmp.join("root");
     std::fs::create_dir_all(root.join("real")).unwrap();
     std::fs::write(root.join("real/a.bin"), vec![0u8; 100]).unwrap();
     symlink(&outside, root.join("huggingface")).unwrap();
 
-    let (children, sizes) = expand(&root);
+    let (children, deferred) = ccmd::scanner::expand(&root);
 
     let link = children
         .iter()
@@ -133,13 +112,33 @@ fn expanding_a_node_shows_a_symlink_as_a_leaf_without_measuring_its_target() {
         "and not classified by its name: that would read through it"
     );
     assert!(
-        sizes.iter().all(|(p, _)| *p != root.join("huggingface")),
-        "no later size update may measure the link target: {sizes:?}"
+        !deferred.contains(&root.join("huggingface")),
+        "and must not be queued for a background size walk: {deferred:?}"
     );
 
     let real = children.iter().find(|n| n.name == "real").unwrap();
     assert!(real.has_children, "control: a real directory expands");
     assert_eq!(real.size, 100, "control: and is sized");
+}
+
+#[test]
+fn a_symlink_to_a_file_is_a_leaf_of_size_zero_too() {
+    // Hugging Face snapshots hold links to blobs. Their size is the blob's,
+    // counted where the blob lives; showing it again under the link would
+    // double-count, and deleting a link frees nothing. The parent directory
+    // already treats them as 0 (`dir_size` does not follow links).
+    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tmp.path().canonicalize().unwrap();
+    let snapshot = tmp.join("snapshot");
+    std::fs::create_dir_all(&snapshot).unwrap();
+    std::fs::write(tmp.join("blob"), vec![0u8; 4096]).unwrap();
+    symlink(tmp.join("blob"), snapshot.join("model.safetensors")).unwrap();
+
+    let (children, _) = ccmd::scanner::expand(&snapshot);
+    let file = &children[0];
+    assert_eq!(file.name, "model.safetensors");
+    assert_eq!(file.size, 0);
+    assert!(!file.has_children);
 }
 
 #[test]
@@ -155,6 +154,24 @@ fn a_symlinked_root_is_still_expandable() {
         TreeNode::root(tmp.join("linked_root")).has_children,
         "a root behind a link must still open"
     );
-    let (children, _) = expand(&tmp.join("linked_root"));
+    let (children, _) = ccmd::scanner::expand(&tmp.join("linked_root"));
     assert_eq!(children.len(), 1, "and its children are listed");
+}
+
+#[test]
+fn a_root_that_is_itself_a_link_to_a_package_is_still_discovered() {
+    // `discover_packages` skips link entries below the root. The root is the
+    // walk's own depth-0 entry and is exempt, like every other root.
+    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tmp.path().canonicalize().unwrap();
+    let real = tmp.join("elsewhere/real-pkg");
+    npm_package(&real, "real-pkg", "1.0.0");
+    let modules = tmp.join("home/.npm/_npx/abc/node_modules");
+    std::fs::create_dir_all(&modules).unwrap();
+    symlink(&real, modules.join("real-pkg")).unwrap();
+
+    let found = names(&ccmd::scanner::discover_packages(&[
+        modules.join("real-pkg")
+    ]));
+    assert_eq!(found, vec!["real-pkg".to_string()]);
 }
