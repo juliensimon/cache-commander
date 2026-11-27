@@ -26,6 +26,11 @@ use tools::*;
 #[derive(Clone)]
 pub struct CcmdMcp {
     roots: Vec<PathBuf>,
+    /// Where each provider keeps what deletion must never touch (#122). Their
+    /// identities are resolved at each decision (`protected()`), not once here: an
+    /// MCP server can run for days, and a runtime installed or replaced after
+    /// startup must still be protected.
+    protected_dirs: Vec<PathBuf>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -101,6 +106,8 @@ fn canonical_under_roots(path: &std::path::Path, roots: &[PathBuf]) -> Option<Pa
     if under_root { Some(canonical) } else { None }
 }
 
+const INDIRECT_PROTECTED_ROUTE: &str = "A protected directory (such as Bun's runtime) is reached through a symlink chain, so this server cannot prove that deleting anything is safe and refuses all deletes; use the TUI";
+
 const NOT_A_DISCOVERED_ENTRY: &str = "Not a discovered cache entry: configured roots, provider containers, symlinks and paths inside a package cannot be deleted via MCP";
 
 /// The canonical paths a client may delete: exactly the entries discovery
@@ -141,6 +148,7 @@ fn resolve_deletable(
     path: &Path,
     roots: &[PathBuf],
     deletable: &HashSet<PathBuf>,
+    protected: &providers::ProtectedSet,
 ) -> Result<PathBuf, &'static str> {
     let normalized: PathBuf = path.components().collect();
     if std::fs::symlink_metadata(&normalized).is_ok_and(|m| m.file_type().is_symlink()) {
@@ -148,11 +156,17 @@ fn resolve_deletable(
     }
     let canonical =
         canonical_under_roots(path, roots).ok_or("Path is not inside any configured cache root")?;
-    if deletable.contains(&canonical) {
-        Ok(canonical)
-    } else {
-        Err(NOT_A_DISCOVERED_ENTRY)
+    if !deletable.contains(&canonical) {
+        return Err(NOT_A_DISCOVERED_ENTRY);
     }
+    // Fail closed, but only for an entry that would otherwise be deletable (so an
+    // unrelated refusal keeps its own, more specific reason): when the route to a
+    // protected directory is indirect, which other directories it depends on is not
+    // worked out, so nothing is deletable.
+    if protected.indirect() {
+        return Err(INDIRECT_PROTECTED_ROUTE);
+    }
+    Ok(canonical)
 }
 
 impl CcmdMcp {
@@ -160,6 +174,7 @@ impl CcmdMcp {
         let tool_router = Self::tool_router();
         Self {
             roots: config.roots.clone(),
+            protected_dirs: providers::protected_dirs(),
             tool_router,
         }
     }
@@ -241,6 +256,11 @@ impl CcmdMcp {
         nodes.push(node);
     }
 
+    /// The protected set as it is NOW.
+    fn protected(&self) -> providers::ProtectedSet {
+        providers::ProtectedSet::from_dirs(&self.protected_dirs)
+    }
+
     fn provider_label(node: &TreeNode) -> String {
         let label = node.kind.label();
         if !label.is_empty() {
@@ -289,6 +309,7 @@ impl CcmdMcp {
         let mut safe_count = 0usize;
         let mut caution_count = 0usize;
         let mut unsafe_count = 0usize;
+        let protected = self.protected();
 
         for node in &nodes {
             total_size += node.size;
@@ -297,7 +318,7 @@ impl CcmdMcp {
             entry.0 += node.size;
             entry.1 += 1;
 
-            match providers::safety(node.kind, &node.path) {
+            match providers::safety_resolved_deep(node.kind, &node.path, &protected) {
                 providers::SafetyLevel::Safe => safe_count += 1,
                 providers::SafetyLevel::Caution => caution_count += 1,
                 providers::SafetyLevel::Unsafe => unsafe_count += 1,
@@ -368,6 +389,7 @@ impl CcmdMcp {
 
         let result = tokio::task::spawn_blocking(move || {
             let nodes = server.walk_roots();
+            let protected = server.protected();
             let matches: Vec<PackageEntry> = nodes
                 .into_iter()
                 .filter(|node| {
@@ -380,7 +402,7 @@ impl CcmdMcp {
                     name_match && eco_match
                 })
                 .map(|node| {
-                    let safety = providers::safety(node.kind, &node.path);
+                    let safety = providers::safety_resolved_deep(node.kind, &node.path, &protected);
                     PackageEntry {
                         name: node.name.clone(),
                         version: providers::package_id(node.kind, &node.path)
@@ -457,9 +479,13 @@ impl CcmdMcp {
             return Ok("Path is not inside any configured cache root.".to_string());
         }
 
+        let protected_dirs = self.protected_dirs.clone();
         let result = tokio::task::spawn_blocking(move || {
+            // Built here, on the blocking thread and right before use: it stats the
+            // filesystem, and a snapshot taken earlier could be stale by now.
+            let protected = providers::ProtectedSet::from_dirs(&protected_dirs);
             let kind = providers::detect(&path);
-            let safety = providers::safety(kind, &path);
+            let safety = providers::safety_resolved_deep(kind, &path, &protected);
             let size = walker::dir_size(&path);
             let last_modified = path
                 .metadata()
@@ -659,9 +685,12 @@ impl CcmdMcp {
         #[allow(clippy::unnecessary_filter_map)]
         let paths: Vec<PathBuf> = input.0.paths.iter().map(PathBuf::from).collect();
         let roots = self.roots.clone();
+        let protected_dirs = self.protected_dirs.clone();
 
         #[allow(clippy::unnecessary_filter_map)]
         let result = tokio::task::spawn_blocking(move || {
+            // Built on the blocking thread, right before use (see get_package_details).
+            let protected = providers::ProtectedSet::from_dirs(&protected_dirs);
             let deletable = deletable_paths(&roots);
             let mut total_deletable: u64 = 0;
             let mut deletable_count = 0usize;
@@ -690,7 +719,7 @@ impl CcmdMcp {
                     // safety check and size calculation. This closes the
                     // TOCTOU window where a racing symlink swap could escape
                     // the root between the check and the actual delete.
-                    let canonical = match resolve_deletable(path, &roots, &deletable) {
+                    let canonical = match resolve_deletable(path, &roots, &deletable, &protected) {
                         Ok(canonical) => canonical,
                         Err(reason) => {
                             rejected_count += 1;
@@ -710,7 +739,7 @@ impl CcmdMcp {
                         }
                     };
                     let kind = providers::detect(&canonical);
-                    let safety = providers::safety(kind, &canonical);
+                    let safety = providers::safety_resolved_deep(kind, &canonical, &protected);
                     let size = walker::dir_size(&canonical);
                     let name = providers::semantic_name(kind, &canonical).unwrap_or_else(|| {
                         canonical
@@ -772,8 +801,11 @@ impl CcmdMcp {
         let paths: Vec<PathBuf> = input.paths.iter().map(PathBuf::from).collect();
         let confirm_caution = input.confirm_caution;
         let roots = self.roots.clone();
+        let protected_dirs = self.protected_dirs.clone();
 
         let result = tokio::task::spawn_blocking(move || {
+            // Built on the blocking thread, right before use (see get_package_details).
+            let protected = providers::ProtectedSet::from_dirs(&protected_dirs);
             let deletable = deletable_paths(&roots);
             let mut deleted = Vec::new();
             let mut skipped = Vec::new();
@@ -796,7 +828,7 @@ impl CcmdMcp {
                 // actual deletion. This closes the TOCTOU window where a
                 // racing symlink swap could escape the root between the
                 // `is_under_roots` check and the `remove_dir_all` call.
-                let canonical = match resolve_deletable(path, &roots, &deletable) {
+                let canonical = match resolve_deletable(path, &roots, &deletable, &protected) {
                     Ok(canonical) => canonical,
                     Err(reason) => {
                         skipped.push(SkippedItem {
@@ -812,7 +844,7 @@ impl CcmdMcp {
                     }
                 };
                 let kind = providers::detect(&canonical);
-                let safety = providers::safety(kind, &canonical);
+                let safety = providers::safety_resolved_deep(kind, &canonical, &protected);
                 let name = providers::semantic_name(kind, &canonical).unwrap_or_else(|| {
                     canonical
                         .file_name()
@@ -953,6 +985,342 @@ mod tests {
             .expect("shared store must be listed");
         assert!(store.size >= 8192, "store size {}", store.size);
         assert!(nodes.iter().any(|n| n.name == "[model] org/m"));
+    }
+
+    // --- protected locations by file identity (#122) ---
+
+    /// `home/.bun -> storage/`, with `storage/` a configured root holding the
+    /// Bun runtime in `storage/bin` and an ordinary `storage/install`. The paths
+    /// the server sees contain no `.bun`, so name-based safety calls `storage/bin`
+    /// Caution, which `confirm_caution` would then delete.
+    #[cfg(unix)]
+    fn bun_behind_a_symlink_server() -> (TempDir, CcmdMcp, PathBuf, PathBuf) {
+        let dir = TempDir::new().unwrap();
+        // Canonical: a link target spelled through a symlink (macOS `/var`) is itself
+        // a multi-hop link, which these fixtures must not hit by accident.
+        let base = dir.path().canonicalize().unwrap();
+        let storage = base.join("storage");
+        std::fs::create_dir_all(storage.join("bin")).unwrap();
+        std::fs::write(storage.join("bin/bun"), b"runtime").unwrap();
+        std::fs::create_dir_all(storage.join("install")).unwrap();
+        std::fs::write(storage.join("install/f"), b"x").unwrap();
+        let home = base.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::os::unix::fs::symlink(&storage, home.join(".bun")).unwrap();
+        let mut config = Config::default_for_test();
+        config.roots = vec![storage.clone()];
+        let mut server = CcmdMcp::new(&config);
+        server.protected_dirs = vec![home.join(".bun/bin")];
+        (dir, server, storage.join("bin"), storage.join("install"))
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn delete_refuses_a_protected_dir_even_with_confirm_caution() {
+        let (_dir, server, bin, install) = bun_behind_a_symlink_server();
+        // Precondition: both are discovered entries, and the protected one is
+        // only Caution by name, so confirm_caution is what would let it through.
+        let kind = providers::detect(&bin);
+        assert_ne!(
+            providers::safety(kind, &bin),
+            providers::SafetyLevel::Unsafe,
+            "fixture must be invisible to name-based classification"
+        );
+        let result = call_delete(&server, &[&bin, &install], true).await;
+        assert!(
+            bin.join("bun").exists(),
+            "the runtime must survive: {result}"
+        );
+        let skipped: Vec<_> = result["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["path"].as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            skipped.iter().any(|p| p.ends_with("storage/bin")),
+            "refusal must be reported: {result}"
+        );
+        // Control: the unprotected sibling is deleted.
+        assert!(!install.exists(), "unprotected sibling: {result}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn delete_refuses_an_entry_that_contains_a_protected_dir() {
+        // The review's case: the target does not lie UNDER the protected directory,
+        // it CONTAINS it. `~/.bun -> data/storage`, so the runtime is
+        // `data/storage/bin`; with `data/` the configured root, `data/storage` is a
+        // discovered, deletable entry whose removal takes the runtime with it.
+        let dir = TempDir::new().unwrap();
+        // Canonical: a link target spelled through a symlink (macOS `/var`) is itself
+        // a multi-hop link, which these fixtures must not hit by accident.
+        let base = dir.path().canonicalize().unwrap();
+        let data = base.join("data");
+        let storage = data.join("storage");
+        std::fs::create_dir_all(storage.join("bin")).unwrap();
+        std::fs::write(storage.join("bin/bun"), b"runtime").unwrap();
+        let other = data.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("f"), b"x").unwrap();
+        let home = base.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::os::unix::fs::symlink(&storage, home.join(".bun")).unwrap();
+        let mut config = Config::default_for_test();
+        config.roots = vec![data.clone()];
+        let mut server = CcmdMcp::new(&config);
+        server.protected_dirs = vec![home.join(".bun/bin")];
+
+        let result = call_delete(&server, &[&storage, &other], true).await;
+        assert!(
+            storage.join("bin/bun").exists(),
+            "an entry that contains the runtime must not be deleted: {result}"
+        );
+        assert!(
+            !other.exists(),
+            "control: an unrelated sibling is: {result}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn details_report_unsafe_for_a_path_spelled_through_a_symlink_into_a_protected_dir() {
+        // The configured root is `alias -> storage/bin/tools`, below the protected
+        // `storage/bin`. Details are asked for the path as spelled, which has no
+        // protected ancestor; reporting it Safe would invite the delete.
+        let dir = TempDir::new().unwrap();
+        // Canonical: a link target spelled through a symlink (macOS `/var`) is itself
+        // a multi-hop link, which these fixtures must not hit by accident.
+        let base = dir.path().canonicalize().unwrap();
+        let storage = base.join("storage");
+        let tools = storage.join("bin/tools");
+        std::fs::create_dir_all(tools.join("pkg")).unwrap();
+        let home = base.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::os::unix::fs::symlink(&storage, home.join(".bun")).unwrap();
+        let alias = base.join("alias");
+        std::os::unix::fs::symlink(&tools, &alias).unwrap();
+        let mut config = Config::default_for_test();
+        config.roots = vec![alias.clone()];
+        let mut server = CcmdMcp::new(&config);
+        server.protected_dirs = vec![home.join(".bun/bin")];
+        let out = server
+            .get_package_details(Parameters(tools::DetailsInput {
+                path: Some(alias.join("pkg").to_string_lossy().to_string()),
+                name: None,
+                ecosystem: None,
+            }))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(
+            v["safety_level"].as_str().unwrap().starts_with("Unsafe"),
+            "{v}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_indirect_protected_route_blocks_every_mcp_delete() {
+        // `~/.bun -> data/A`, `data/A/bin -> ../C/link2`, `data/C/link2 -> outside/B`
+        // (B is the protected directory). The link `bin` points at another link, so
+        // the route depends on `data/C`, which is neither above nor inside B. Rather
+        // than work out which directories that is, the agent delete refuses
+        // everything while the route is indirect, and says why.
+        let dir = TempDir::new().unwrap();
+        // Canonical: a link target spelled through a symlink (macOS `/var`) is itself
+        // a multi-hop link, which this fixture must not hit by accident.
+        let base = dir.path().canonicalize().unwrap();
+        let data = base.join("data");
+        let (a, c) = (data.join("A"), data.join("C"));
+        let b = base.join("outside/B");
+        for d in [&a, &c, &b] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(b.join("bun"), b"runtime").unwrap();
+        std::os::unix::fs::symlink(&b, c.join("link2")).unwrap();
+        std::os::unix::fs::symlink("../C/link2", a.join("bin")).unwrap();
+        let other = data.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("f"), b"x").unwrap();
+        let home = base.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::os::unix::fs::symlink(&a, home.join(".bun")).unwrap();
+        let mut config = Config::default_for_test();
+        config.roots = vec![data.clone()];
+        let mut server = CcmdMcp::new(&config);
+        server.protected_dirs = vec![home.join(".bun/bin")];
+
+        let result = call_delete(&server, &[&c, &other], true).await;
+        assert!(c.join("link2").exists(), "the route must survive: {result}");
+        assert!(other.exists(), "so does everything else: {result}");
+        let reasons = result["skipped"].to_string();
+        assert!(reasons.contains("symlink"), "must say why: {result}");
+
+        // The preview agrees.
+        let out = server
+            .preview_delete(Parameters(tools::PreviewDeleteInput {
+                paths: vec![other.to_string_lossy().to_string()],
+            }))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["items"][0]["would_delete"], false, "{v}");
+
+        // Control: with nothing protected the same sibling is deleted.
+        let mut direct = CcmdMcp::new(&config);
+        direct.protected_dirs = vec![];
+        let result = call_delete(&direct, &[&other], true).await;
+        assert!(
+            !other.exists(),
+            "control: no protected route, deleted: {result}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_indirect_route_does_not_mask_the_real_reason_a_path_is_refused() {
+        // The indirect-route refusal applies to otherwise deletable entries. A path
+        // outside every configured root keeps its own, more specific reason, so an
+        // unrelated cache is not told that Bun is to blame.
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let data = base.join("data");
+        let (a, c) = (data.join("A"), data.join("C"));
+        let b = base.join("outside/B");
+        for d in [&a, &c, &b] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::os::unix::fs::symlink(&b, c.join("link2")).unwrap();
+        std::os::unix::fs::symlink("../C/link2", a.join("bin")).unwrap();
+        let home = base.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::os::unix::fs::symlink(&a, home.join(".bun")).unwrap();
+        let mut config = Config::default_for_test();
+        config.roots = vec![data.clone()];
+        let mut server = CcmdMcp::new(&config);
+        server.protected_dirs = vec![home.join(".bun/bin")];
+        let elsewhere = base.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+
+        let result = call_delete(&server, &[&elsewhere], true).await;
+        let reasons = result["skipped"].to_string();
+        assert!(
+            reasons.contains("not inside any configured cache root"),
+            "its own reason, not the Bun one: {result}"
+        );
+        assert!(!reasons.contains("symlink chain"), "{result}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_directory_holding_a_link_on_a_clean_route_is_refused_but_siblings_are_not() {
+        // `home/.bun -> data/A`, `data/A/bin -> outside/B`: two CLEAN hops, so the
+        // route is not indirect, but `data/A` holds the link `bin`. It is refused;
+        // an unrelated sibling is still deleted.
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let data = base.join("data");
+        let a = data.join("A");
+        let b = base.join("outside/B");
+        for d in [&a, &b] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(b.join("bun"), b"runtime").unwrap();
+        std::os::unix::fs::symlink(&b, a.join("bin")).unwrap();
+        let other = data.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("f"), b"x").unwrap();
+        let home = base.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::os::unix::fs::symlink(&a, home.join(".bun")).unwrap();
+        let mut config = Config::default_for_test();
+        config.roots = vec![data.clone()];
+        let mut server = CcmdMcp::new(&config);
+        server.protected_dirs = vec![home.join(".bun/bin")];
+
+        let result = call_delete(&server, &[&a, &other], true).await;
+        assert!(
+            a.join("bin").exists(),
+            "the route's link must survive: {result}"
+        );
+        assert!(!other.exists(), "an unrelated sibling is deleted: {result}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_runtime_installed_after_the_server_started_is_still_protected() {
+        // An MCP server can run for days. `~/.bun/bin` does not exist when it
+        // starts; Bun is installed later. Deleting the entry that now holds it
+        // must be refused: the protected set is resolved at each decision, not once.
+        let dir = TempDir::new().unwrap();
+        // Canonical: a link target spelled through a symlink (macOS `/var`) is itself
+        // a multi-hop link, which these fixtures must not hit by accident.
+        let base = dir.path().canonicalize().unwrap();
+        let data = base.join("data");
+        let storage = data.join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let home = base.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::os::unix::fs::symlink(&storage, home.join(".bun")).unwrap();
+        let mut config = Config::default_for_test();
+        config.roots = vec![data.clone()];
+        let mut server = CcmdMcp::new(&config);
+        server.protected_dirs = vec![home.join(".bun/bin")];
+
+        // Before: nothing to protect, so the entry is an ordinary Caution item.
+        let out = server
+            .preview_delete(Parameters(tools::PreviewDeleteInput {
+                paths: vec![storage.to_string_lossy().to_string()],
+            }))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(
+            !v["items"][0]["safety_level"]
+                .as_str()
+                .unwrap()
+                .starts_with("Unsafe"),
+            "precondition: {v}"
+        );
+
+        // Bun is installed while the server runs.
+        std::fs::create_dir_all(storage.join("bin")).unwrap();
+        std::fs::write(storage.join("bin/bun"), b"runtime").unwrap();
+
+        let result = call_delete(&server, &[&storage], true).await;
+        assert!(
+            storage.join("bin/bun").exists(),
+            "the runtime installed after startup must survive: {result}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn preview_delete_agrees_a_protected_dir_would_not_be_deleted() {
+        let (_dir, server, bin, install) = bun_behind_a_symlink_server();
+        let out = server
+            .preview_delete(Parameters(tools::PreviewDeleteInput {
+                paths: vec![
+                    bin.to_string_lossy().to_string(),
+                    install.to_string_lossy().to_string(),
+                ],
+            }))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let items = v["items"].as_array().unwrap();
+        let by_suffix = |s: &str| {
+            items
+                .iter()
+                .find(|i| i["path"].as_str().unwrap().ends_with(s))
+                .unwrap()
+        };
+        let level = |s: &str| by_suffix(s)["safety_level"].as_str().unwrap().to_string();
+        assert!(level("storage/bin").starts_with("Unsafe"), "{v}");
+        assert_eq!(by_suffix("storage/bin")["would_delete"], false, "{v}");
+        // Control: preview must not over-refuse.
+        assert!(!level("storage/install").starts_with("Unsafe"), "{v}");
     }
 
     // --- delete scope: only discovered cache entries are deletable (#91) ---

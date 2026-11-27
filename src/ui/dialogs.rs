@@ -6,7 +6,11 @@ use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
-pub fn render_delete_confirm(f: &mut Frame, items: &[&TreeNode]) {
+pub fn render_delete_confirm(
+    f: &mut Frame,
+    items: &[&TreeNode],
+    protected: &crate::providers::ProtectedSet,
+) {
     let area = centered_rect(50, 40, f.area());
 
     f.render_widget(Clear, area);
@@ -57,7 +61,12 @@ pub fn render_delete_confirm(f: &mut Frame, items: &[&TreeNode]) {
     let mut caution_count = 0usize;
     let mut unsafe_count = 0usize;
     for item in items {
-        match crate::providers::safety(item.kind, &item.path) {
+        match crate::providers::safety_for_node(
+            item.kind,
+            &item.path,
+            protected,
+            item.parent.is_none(),
+        ) {
             crate::providers::SafetyLevel::Safe => {}
             crate::providers::SafetyLevel::Caution => caution_count += 1,
             crate::providers::SafetyLevel::Unsafe => unsafe_count += 1,
@@ -223,10 +232,53 @@ mod tests {
         out
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn delete_confirm_warns_about_an_item_inside_a_protected_dir() {
+        // #122: nothing in the path says Unsafe, but the directory it lives in is
+        // protected by identity, so deletion will refuse it. The dialog must say so
+        // BEFORE the user confirms instead of promising "safe to delete".
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("storage/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let protected = crate::providers::ProtectedSet::from_dirs(&[bin.clone()]);
+        let mut node = make_node("tool", CacheKind::Unknown, 10);
+        node.path = bin.join("tool");
+        let out = render_dialog(|f| render_delete_confirm(f, &[&node], &protected));
+        assert!(
+            out.contains("will be refused on confirm"),
+            "must warn before confirmation:\n{out}"
+        );
+        // Control: the same node with nothing protected is not flagged Unsafe.
+        let plain = render_dialog(|f| render_delete_confirm(f, &[&node], &Default::default()));
+        assert!(!plain.contains("will be refused on confirm"), "{plain}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_confirm_warns_about_a_non_root_dir_that_holds_a_protected_dir() {
+        // The directory CONTAINS the runtime. Deleting it is refused for a child,
+        // so the dialog must say so; a root node is deliberately deletable and is
+        // not flagged.
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = tmp.path().join("storage");
+        std::fs::create_dir_all(storage.join("bin")).unwrap();
+        let protected = crate::providers::ProtectedSet::from_dirs(&[storage.join("bin")]);
+        let mut child = make_node("storage", CacheKind::Unknown, 10);
+        child.path = storage.clone();
+        child.parent = Some(0); // a child; a node with no parent is a root
+        let out = render_dialog(|f| render_delete_confirm(f, &[&child], &protected));
+        assert!(out.contains("will be refused on confirm"), "{out}");
+        let mut root = child.clone();
+        root.parent = None;
+        let out = render_dialog(|f| render_delete_confirm(f, &[&root], &protected));
+        assert!(!out.contains("will be refused on confirm"), "{out}");
+    }
+
     #[test]
     fn delete_confirm_single_item_uses_singular_title_and_all_safe() {
         let node = make_node("serde 1.0.200", CacheKind::Cargo, 1024 * 1024);
-        let out = render_dialog(|f| render_delete_confirm(f, &[&node]));
+        let out = render_dialog(|f| render_delete_confirm(f, &[&node], &Default::default()));
         assert!(out.contains("Delete 1 item?"), "singular title:\n{out}");
         assert!(out.contains("serde 1.0.200"), "item name:\n{out}");
         assert!(out.contains("1 MiB"), "item size:\n{out}");
@@ -244,7 +296,7 @@ mod tests {
     fn delete_confirm_plural_title_and_total_freed() {
         let a = make_node("a", CacheKind::Cargo, 1024 * 1024);
         let b = make_node("b", CacheKind::Npm, 2 * 1024 * 1024);
-        let out = render_dialog(|f| render_delete_confirm(f, &[&a, &b]));
+        let out = render_dialog(|f| render_delete_confirm(f, &[&a, &b], &Default::default()));
         assert!(out.contains("Delete 2 items?"), "plural title:\n{out}");
         assert!(out.contains("3 MiB"), "summed total:\n{out}");
     }
@@ -255,7 +307,7 @@ mod tests {
             .map(|i| make_node(&format!("pkg-{i}"), CacheKind::Cargo, 1024))
             .collect();
         let refs: Vec<&TreeNode> = nodes.iter().collect();
-        let out = render_dialog(|f| render_delete_confirm(f, &refs));
+        let out = render_dialog(|f| render_delete_confirm(f, &refs, &Default::default()));
         assert!(out.contains("Delete 15 items?"));
         assert!(out.contains("pkg-0"), "first shown:\n{out}");
         assert!(out.contains("pkg-9"), "tenth shown:\n{out}");
@@ -270,7 +322,7 @@ mod tests {
     fn delete_confirm_unknown_kind_shows_caution_summary() {
         // Unknown kind resolves to Caution via providers::safety().
         let node = make_node("mystery", CacheKind::Unknown, 1024);
-        let out = render_dialog(|f| render_delete_confirm(f, &[&node]));
+        let out = render_dialog(|f| render_delete_confirm(f, &[&node], &Default::default()));
         assert!(
             out.contains("Caution") || out.contains("caution"),
             "expected caution banner:\n{out}"
@@ -296,7 +348,7 @@ mod tests {
             4096,
             "/project/.yarn/cache/pkg-1.0.0",
         );
-        let out = render_dialog(|f| render_delete_confirm(f, &[&node]));
+        let out = render_dialog(|f| render_delete_confirm(f, &[&node], &Default::default()));
         assert!(
             out.contains("caution") || out.contains("Caution"),
             "expected caution banner:\n{out}"
@@ -317,7 +369,7 @@ mod tests {
             1024 * 1024,
             "/home/user/.bun/bin/bun",
         );
-        let out = render_dialog(|f| render_delete_confirm(f, &[&node]));
+        let out = render_dialog(|f| render_delete_confirm(f, &[&node], &Default::default()));
         assert!(
             out.contains("unsafe") || out.contains("Unsafe") || out.contains("refuse"),
             "expected Unsafe/refuse banner:\n{out}"
@@ -334,7 +386,9 @@ mod tests {
         );
         let unsafe_item =
             make_node_with_path("bun", CacheKind::Bun, 1024, "/home/user/.bun/bin/bun");
-        let out = render_dialog(|f| render_delete_confirm(f, &[&safe, &unsafe_item]));
+        let out = render_dialog(|f| {
+            render_delete_confirm(f, &[&safe, &unsafe_item], &Default::default())
+        });
         // Even though one item is Safe, the Unsafe item must be flagged.
         assert!(
             out.contains("unsafe") || out.contains("Unsafe") || out.contains("refuse"),

@@ -19,6 +19,7 @@ pub fn render(
         String,
         crate::providers::homebrew::BrewOutdatedEntry,
     >,
+    protected: &crate::providers::ProtectedSet,
 ) {
     let node = match tree.selected_node() {
         Some(n) => n,
@@ -113,7 +114,8 @@ pub fn render(
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled("SAFETY", theme::DIM)));
 
-    let safety = providers::safety(node.kind, &node.path);
+    let safety =
+        providers::safety_for_node(node.kind, &node.path, protected, node.parent.is_none());
     let safety_style = match safety {
         SafetyLevel::Safe => theme::SAFE,
         SafetyLevel::Caution => theme::CAUTION,
@@ -450,7 +452,7 @@ mod tests {
         terminal
             .draw(|f| {
                 let area = f.area();
-                render(f, area, tree, vuln, ver, brew);
+                render(f, area, tree, vuln, ver, brew, &Default::default());
             })
             .unwrap();
         let buf = terminal.backend().buffer().clone();
@@ -462,6 +464,46 @@ mod tests {
             out.push('\n');
         }
         out
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn detail_panel_labels_an_entry_inside_a_protected_dir_unsafe() {
+        // #122: the badge must match what deletion will decide.
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("storage/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let protected = crate::providers::ProtectedSet::from_dirs(&[bin.clone()]);
+        let mut node = TreeNode::new(bin.join("tool"), 0, None);
+        node.name = "tool".into();
+        node.kind = CacheKind::Unknown;
+        node.is_root = true;
+        let mut tree = TreeState::new(SortField::Size, true);
+        tree.set_roots(vec![node]);
+        let draw = |p: &crate::providers::ProtectedSet| {
+            let mut terminal = Terminal::new(TestBackend::new(80, 40)).unwrap();
+            terminal
+                .draw(|f| {
+                    let area = f.area();
+                    render(
+                        f,
+                        area,
+                        &tree,
+                        &HashMap::new(),
+                        &HashMap::new(),
+                        &HashMap::new(),
+                        p,
+                    );
+                })
+                .unwrap();
+            let buf = terminal.backend().buffer().clone();
+            (0..buf.area.height)
+                .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+                .map(|(x, y)| buf[(x, y)].symbol().to_string())
+                .collect::<String>()
+        };
+        assert!(draw(&protected).contains("Unsafe"), "badge must say Unsafe");
+        assert!(!draw(&Default::default()).contains("Unsafe"), "control");
     }
 
     // ---- render: empty state --------------------------------------------------

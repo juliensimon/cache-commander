@@ -48,6 +48,12 @@ pub struct App {
     pub scanner_dead: bool,
     pub update_info: Option<crate::updater::UpdateInfo>,
     update_rx: mpsc::Receiver<crate::updater::UpdateMsg>,
+    /// Where each provider keeps what deletion must never touch (#122).
+    protected_dirs: Vec<std::path::PathBuf>,
+    /// Their file identities, taken when a delete is started (not only at
+    /// startup, which can be hours earlier) so the confirmation dialog and the
+    /// decision share a current view.
+    protected: crate::providers::ProtectedSet,
 }
 
 impl App {
@@ -84,6 +90,8 @@ impl App {
             scanner_dead: false,
             update_info: None,
             update_rx,
+            protected: crate::providers::ProtectedSet::resolve(),
+            protected_dirs: crate::providers::protected_dirs(),
         }
     }
 
@@ -394,6 +402,7 @@ impl App {
                     .iter()
                     .filter_map(|&idx| self.tree.nodes.get(idx).map(|n| n.path.clone()))
                     .collect();
+                self.protected = crate::providers::ProtectedSet::from_dirs(&self.protected_dirs);
                 if self.config.confirm_delete {
                     self.mode = AppMode::Deleting;
                 } else {
@@ -639,7 +648,16 @@ impl App {
             // H3: refuse Unsafe items outright — these typically contain
             // runtime binaries or state that deletion would irreversibly break.
             let kind = crate::providers::detect(path);
-            if crate::providers::safety(kind, path) == crate::providers::SafetyLevel::Unsafe {
+            // A root is a node with no parent. (`is_root` is set from the depth at
+            // construction and not cleared when a child is inserted, so it is not used.)
+            let is_root = self
+                .tree
+                .nodes
+                .iter()
+                .any(|n| n.parent.is_none() && n.path == *path);
+            if crate::providers::safety_for_node(kind, path, &self.protected, is_root)
+                == crate::providers::SafetyLevel::Unsafe
+            {
                 refused_unsafe += 1;
                 continue;
             }
@@ -664,8 +682,12 @@ impl App {
             let unsafe_target = std::iter::once(target)
                 .chain(logical.iter().map(|p| p.as_path()))
                 .any(|candidate| {
-                    crate::providers::safety(crate::providers::detect(candidate), candidate)
-                        == crate::providers::SafetyLevel::Unsafe
+                    crate::providers::safety_for_node(
+                        crate::providers::detect(candidate),
+                        candidate,
+                        &self.protected,
+                        is_root,
+                    ) == crate::providers::SafetyLevel::Unsafe
                 });
             if unsafe_target {
                 refused_unsafe += 1;
@@ -868,7 +890,7 @@ impl App {
                     .iter()
                     .filter_map(|p| self.tree.nodes.iter().find(|n| &n.path == p))
                     .collect();
-                dialogs::render_delete_confirm(f, &items);
+                dialogs::render_delete_confirm(f, &items, &self.protected);
             }
             AppMode::Help => {
                 dialogs::render_help(f);
@@ -1029,6 +1051,7 @@ impl App {
             &self.vuln_results,
             &self.version_results,
             &self.brew_outdated_results,
+            &self.protected,
         );
     }
 
@@ -2193,6 +2216,236 @@ mod tests {
 
         assert!(bin.join("bun").exists(), "the Unsafe runtime must survive");
         assert!(app.status_msg.as_deref().unwrap_or("").contains("refused"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn perform_delete_refuses_a_protected_dir_reached_by_a_route_without_the_marker() {
+        // #122: `~/.bun` is a symlink to `storage/`, and `storage/` is a
+        // configured root. Nothing the TUI shows contains `.bun`, so the name-based
+        // rules call `storage/bin/bun` Safe; its identity says it is the runtime.
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = tmp.path().join("storage");
+        let bin = storage.join("bin");
+        let cache = storage.join("install/cache/pkg");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(bin.join("bun"), b"runtime").unwrap();
+        std::fs::write(cache.join("f"), b"x").unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::os::unix::fs::symlink(&storage, home.join(".bun")).unwrap();
+        let displayed = bin.join("bun");
+
+        // Precondition: the name-based path alone does not protect it, so the old
+        // refusals cannot be what keeps this test green.
+        assert_ne!(
+            crate::providers::safety(crate::providers::detect(&displayed), &displayed),
+            crate::providers::SafetyLevel::Unsafe
+        );
+
+        let (mut app, _tx, _rx) = build_app(bare_config());
+        app.protected = crate::providers::ProtectedSet::from_dirs(&[home.join(".bun/bin")]);
+        app.tree.set_roots(vec![expandable_node(
+            "storage",
+            storage.clone(),
+            CacheKind::Unknown,
+        )]);
+        app.tree.insert_children(
+            0,
+            vec![
+                expandable_node("bin", bin.clone(), CacheKind::Unknown),
+                expandable_node("install", storage.join("install"), CacheKind::Unknown),
+            ],
+        );
+        app.tree.insert_children(
+            1,
+            vec![mk_node_with_path(
+                "bun",
+                displayed.clone(),
+                CacheKind::Unknown,
+            )],
+        );
+        assert!(app.tree.nodes.iter().any(|n| n.path == displayed));
+        app.delete_candidates = vec![displayed, bin.clone()];
+
+        app.perform_delete();
+
+        assert!(bin.join("bun").exists(), "the runtime must survive");
+        assert!(bin.exists(), "and so must its directory");
+        assert!(
+            app.status_msg.as_deref().unwrap_or("").contains("Unsafe"),
+            "the refusal must be surfaced as Unsafe: {:?}",
+            app.status_msg
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn perform_delete_refuses_a_candidate_under_a_root_that_is_a_symlink_into_a_protected_dir() {
+        // The configured root is `alias -> storage/bin/tools`, a symlink whose
+        // target is BELOW the protected `storage/bin`. The tree trusts a root node
+        // as spelled, and `alias/pkg` has no protected ancestor as spelled.
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = tmp.path().join("storage");
+        let tools = storage.join("bin/tools");
+        std::fs::create_dir_all(tools.join("pkg")).unwrap();
+        std::fs::write(tools.join("pkg/f"), b"runtime data").unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::os::unix::fs::symlink(&storage, home.join(".bun")).unwrap();
+        let alias = tmp.path().join("alias");
+        std::os::unix::fs::symlink(&tools, &alias).unwrap();
+        let displayed = alias.join("pkg");
+
+        let (mut app, _tx, _rx) = build_app(bare_config());
+        app.protected = crate::providers::ProtectedSet::from_dirs(&[home.join(".bun/bin")]);
+        app.tree.set_roots(vec![expandable_node(
+            "alias",
+            alias.clone(),
+            CacheKind::Unknown,
+        )]);
+        app.tree.insert_children(
+            0,
+            vec![mk_node_with_path(
+                "pkg",
+                displayed.clone(),
+                CacheKind::Unknown,
+            )],
+        );
+        assert!(app.tree.nodes.iter().any(|n| n.path == displayed));
+        app.delete_candidates = vec![displayed];
+
+        app.perform_delete();
+
+        assert!(
+            tools.join("pkg/f").exists(),
+            "data under the protected directory must survive"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn perform_delete_refuses_a_non_root_dir_that_holds_the_runtime_but_allows_a_root() {
+        // `~/.bun -> data/storage`, with `data` the configured root: `data/storage`
+        // is an ordinary child that contains the runtime, and deleting it takes Bun
+        // with it. A tree ROOT node is different: wiping a whole configured cache
+        // root is a deliberate, confirmed action, and stays allowed.
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().canonicalize().unwrap();
+        let data = base.join("data");
+        let storage = data.join("storage");
+        std::fs::create_dir_all(storage.join("bin")).unwrap();
+        std::fs::write(storage.join("bin/bun"), b"runtime").unwrap();
+        let home = base.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::os::unix::fs::symlink(&storage, home.join(".bun")).unwrap();
+
+        // Child of a root: refused, and surfaced as Unsafe.
+        let (mut app, _tx, _rx) = build_app(bare_config());
+        app.protected = crate::providers::ProtectedSet::from_dirs(&[home.join(".bun/bin")]);
+        app.tree.set_roots(vec![expandable_node(
+            "data",
+            data.clone(),
+            CacheKind::Unknown,
+        )]);
+        app.tree.insert_children(
+            0,
+            vec![mk_node_with_path(
+                "storage",
+                storage.clone(),
+                CacheKind::Unknown,
+            )],
+        );
+        assert!(
+            app.tree
+                .nodes
+                .iter()
+                .any(|n| n.path == storage && n.parent.is_some())
+        );
+        app.delete_candidates = vec![storage.clone()];
+        app.perform_delete();
+        assert!(storage.join("bin/bun").exists(), "the runtime must survive");
+        assert!(app.status_msg.as_deref().unwrap_or("").contains("Unsafe"));
+
+        // The same directory as a ROOT node: a deliberate whole-root delete.
+        let (mut app, _tx, _rx) = build_app(bare_config());
+        app.protected = crate::providers::ProtectedSet::from_dirs(&[home.join(".bun/bin")]);
+        app.tree.set_roots(vec![expandable_node(
+            "storage",
+            storage.clone(),
+            CacheKind::Unknown,
+        )]);
+        app.delete_candidates = vec![storage.clone()];
+        app.perform_delete();
+        assert!(
+            !storage.exists(),
+            "a configured root may be deleted deliberately"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn starting_a_delete_takes_a_fresh_view_of_the_protected_dirs() {
+        // The set is not only a startup snapshot: a runtime installed (or replaced)
+        // while the TUI is open must be protected when a delete is started.
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = tmp.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let bin = storage.join("bin");
+        let (mut app, _tx, _rx) = build_app(bare_config());
+        app.protected_dirs = vec![bin.clone()];
+        app.protected = crate::providers::ProtectedSet::from_dirs(&app.protected_dirs);
+        assert!(!app.protected.contains(&bin), "nothing to protect yet");
+
+        // Bun is installed after startup.
+        std::fs::create_dir_all(&bin).unwrap();
+        app.tree.set_roots(vec![expandable_node(
+            "storage",
+            storage.clone(),
+            CacheKind::Unknown,
+        )]);
+        app.tree.marked.insert(0);
+        app.process_key(KeyEvent::new(
+            KeyCode::Char('d'),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+
+        assert!(app.protected.contains(&bin), "the new runtime is protected");
+        assert!(app.protected.holds(&storage));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn perform_delete_still_deletes_siblings_of_a_protected_dir() {
+        // Control for the test above: protection is by identity, not a blanket
+        // refusal of the root's contents.
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = tmp.path().join("storage");
+        std::fs::create_dir_all(storage.join("bin")).unwrap();
+        let victim = storage.join("install");
+        std::fs::create_dir_all(&victim).unwrap();
+        std::fs::write(victim.join("f"), b"x").unwrap();
+        let (mut app, _tx, _rx) = build_app(bare_config());
+        app.protected = crate::providers::ProtectedSet::from_dirs(&[storage.join("bin")]);
+        app.tree.set_roots(vec![expandable_node(
+            "storage",
+            storage.clone(),
+            CacheKind::Unknown,
+        )]);
+        app.tree.insert_children(
+            0,
+            vec![mk_node_with_path(
+                "install",
+                victim.clone(),
+                CacheKind::Unknown,
+            )],
+        );
+        assert!(app.tree.nodes.iter().any(|n| n.path == victim));
+        app.delete_candidates = vec![victim.clone()];
+        app.perform_delete();
+        assert!(!victim.exists(), "an unprotected sibling is deleted");
+        assert!(storage.join("bin").exists());
     }
 
     #[cfg(unix)]
