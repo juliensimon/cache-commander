@@ -83,6 +83,10 @@ are called out under Changed.
   default).
 
 ### Known limitations
+- The lookup caches are last-writer-wins across ccmd processes, as they always
+  were. A process that loaded a cache before a package was marked private can
+  write that entry back when it saves; the next scan under the new list removes
+  it again. Nothing is sent meanwhile: the list is applied before any request.
 - Tree expansion and provider file reads still follow symlinked directories;
   only sizing was fixed (#92, #93).
 - pnpm 11 and later global stores are not identified for vulnerability scanning

@@ -37,17 +37,20 @@ fn key(pkg: &PackageId) -> String {
 }
 
 /// Whether a cache key (`ecosystem|name|version`) names a package the policy
-/// withholds. The version is whatever follows the LAST `|`, so a name that
-/// itself contains one is still read whole. A key of another shape names
-/// nothing and is kept.
+/// withholds.
+///
+/// `|` is not escaped, and both a name and a version can come from a file name
+/// anyone can write, so where the name ends is not knowable from the key.
+/// Every split is tried: the key is private if the policy withholds ANY prefix
+/// that ends before a `|`. That can only over-match, which here means a cached
+/// entry is dropped and fetched again; reading the wrong boundary could leave a
+/// private name on disk. A key of another shape names nothing and is kept.
 fn key_is_private(key: &str, policy: &crate::security::privacy::PrivacyPolicy) -> bool {
     let Some((ecosystem, rest)) = key.split_once('|') else {
         return false;
     };
-    let Some((name, _version)) = rest.rsplit_once('|') else {
-        return false;
-    };
-    policy.is_private_name(ecosystem, name)
+    rest.match_indices('|')
+        .any(|(end, _)| policy.is_private_name(ecosystem, &rest[..end]))
 }
 
 fn now_secs() -> u64 {
@@ -380,6 +383,17 @@ mod tests {
             "npm|only-two",
             &PrivacyPolicy::new(["only-two"])
         ));
+    }
+
+    #[test]
+    fn key_is_private_cannot_be_hidden_by_a_delimiter_in_the_version() {
+        // `|` is not escaped in the key, and a version comes from a file name
+        // anyone can write. `PyPI|private|1.0|secret` must not be read as the
+        // package `private|1.0`.
+        let policy = crate::security::privacy::PrivacyPolicy::new(["private"]);
+        assert!(key_is_private("PyPI|private|1.0|secret", &policy));
+        assert!(key_is_private("PyPI|private|1.0", &policy));
+        assert!(!key_is_private("PyPI|other|1.0|private", &policy));
     }
 
     use super::*;
