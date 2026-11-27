@@ -3272,6 +3272,43 @@ mod tests {
     // --- recompute_node_status --------------------------------------------
 
     #[test]
+    fn a_vulnerable_package_inside_a_pnpm_index_db_marks_the_db_and_its_folders() {
+        // #39: such packages have no node of their own. Their virtual path is a
+        // child of `index.db`, so the existing ancestor roll-up reaches it.
+        let (mut app, _tx, _rx) = build_app(bare_config());
+        let mut store = TreeNode::new(PathBuf::from("/s/pnpm/store"), 0, None);
+        store.has_children = true;
+        let mut v11 = TreeNode::new(PathBuf::from("/s/pnpm/store/v11"), 1, Some(0));
+        v11.has_children = true;
+        let db = TreeNode::new(PathBuf::from("/s/pnpm/store/v11/index.db"), 2, Some(1));
+        app.tree.nodes = vec![store, v11, db];
+        app.vuln_results.insert(
+            PathBuf::from("/s/pnpm/store/v11/index.db/left-pad@1.3.0"),
+            SecurityInfo {
+                vulns: vec![Vulnerability {
+                    id: "CVE-X".into(),
+                    summary: String::new(),
+                    severity: None,
+                    fix_version: None,
+                }],
+            },
+        );
+        app.recompute_node_status();
+        for p in [
+            "/s/pnpm/store/v11/index.db",
+            "/s/pnpm/store/v11",
+            "/s/pnpm/store",
+        ] {
+            assert!(
+                app.node_status
+                    .get(&PathBuf::from(p))
+                    .is_some_and(|s| s.has_vuln),
+                "{p} must be marked"
+            );
+        }
+    }
+
+    #[test]
     fn recompute_node_status_propagates_to_ancestors() {
         let (mut app, _tx, _rx) = build_app(bare_config());
         // Build a 3-level tree: /r → /r/sub → /r/sub/pkg

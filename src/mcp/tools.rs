@@ -68,6 +68,8 @@ pub struct VulnScanReport {
     /// for them. Counted per directory, not per distinct package.
     pub unidentified_manifests: usize,
     /// The first of them, with the reason (capped; see `unidentified_manifests`).
+    /// The count is a lower bound: a pnpm `index.db` that could not be read at
+    /// all counts as one however many packages it holds.
     pub unidentified: Vec<UnidentifiedEntry>,
     pub packages: Vec<VulnResult>,
 }

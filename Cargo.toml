@@ -2,7 +2,7 @@
 name = "ccmd"
 version = "0.4.4"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 description = "Cache Commander — a TUI for browsing and managing cache directories"
 license = "MIT"
 repository = "https://github.com/juliensimon/cache-commander"
@@ -48,6 +48,7 @@ rmcp = { version = "3.9", features = ["server", "transport-io", "macros"], optio
 tokio = { version = "1", features = ["full"], optional = true }
 schemars = { version = "1", features = ["derive"], optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+rusqlite = { version = "0.43", default-features = false, features = ["bundled", "hooks"] }
 
 [profile.release]
 strip = true

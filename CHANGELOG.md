@@ -79,6 +79,25 @@ are called out under Changed.
   root to browse it. For a file, such as the links to blobs in a Hugging Face
   snapshot, the size is the blob's, counted where the blob lives; the parent
   directory already treated links as 0.
+- **pnpm 11+ global stores are scanned (#39)**: package names and versions are
+  read from the keys of the store's SQLite `index.db` (`<integrity>\t<name>@<version>`,
+  so no MessagePack decoding is needed), opened read-only, with `immutable`
+  mode, used outright when there is no write-ahead log (so a scan writes
+  nothing into the store) and as the fallback when a store with one refuses a
+  plain read-only open, in which case the scan says recent packages may be
+  missing. The file is treated as untrusted: row (250,000) and time limits,
+  past which the packages already read are kept and the rest is reported as not
+  scanned, and `package_index` must be a real table. Names and versions are validated as npm
+  coordinates. A package there is
+  reported under a virtual path below `index.db`, so a result marks that entry
+  and the folders above it. Rows that are not a registry `name@version`, and an
+  `index.db` that cannot be read, are counted as unidentified (#117), one per
+  unusable row, instead of skipped. Verified against a store written by pnpm 12.23.0.
+- **Build requirements**: adds `rusqlite` with its bundled SQLite, which is
+  built from C source, so building needs a C compiler (release binaries are
+  unaffected). The MSRV moves from 1.88 to 1.89: the patched SQLite
+  (RUSTSEC-2026-0459, fixed in `libsqlite3-sys` 0.39) ships with `rusqlite`
+  0.41, which needs 1.89. `cargo deny` is clean.
 - **Unidentified npm manifests are reported (#117)**: a package directory under
   `node_modules` whose `package.json` is missing, malformed, over 1 MiB, or has
   an invalid name or version used to vanish from the scan, so the package looked
@@ -117,8 +136,6 @@ are called out under Changed.
 - A symlinked *file* inside a package directory (for example a `package.json`
   that is a link) is still read by the provider that parses it. Directories
   reached through links are no longer entered (#92, #93).
-- pnpm 11 and later global stores are not identified for vulnerability scanning
-  because their package index moved to SQLite (#39).
 - A custom-named Maven repository inside `~/.m2` whose group id contains a
   `repository` component can be mis-parsed unless `~/.m2/settings.xml` declares
   it with an absolute `<localRepository>` (#118); the path alone cannot tell it

@@ -63,6 +63,12 @@ pub fn detect(path: &Path) -> CacheKind {
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
 
+    // A pnpm 11 store, wherever it lives: recognised by its layout, for the
+    // database and for the packages reported below it.
+    if pnpm::is_store_index_db(path) || path.parent().is_some_and(pnpm::is_store_index_db) {
+        return CacheKind::Pnpm;
+    }
+
     // Direct name match
     match name.as_str() {
         "huggingface" => return CacheKind::HuggingFace,
@@ -1329,6 +1335,45 @@ mod tests {
         assert_eq!(
             detect(&PathBuf::from("/project/node_modules/.pnpm/lodash@4.17.21")),
             CacheKind::Pnpm
+        );
+    }
+
+    #[test]
+    fn a_custom_pnpm_store_is_detected_by_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v11 = tmp.path().join("pkg-cache/v11");
+        std::fs::create_dir_all(v11.join("files/ab")).unwrap();
+        std::fs::write(v11.join("index.db"), b"").unwrap();
+        assert_eq!(detect(&v11.join("index.db")), CacheKind::Pnpm);
+        assert_eq!(
+            detect(&v11.join("index.db/left-pad@1.3.0")),
+            CacheKind::Pnpm
+        );
+        // Without the `files/` directory it is just a file called index.db.
+        let other = tmp.path().join("app/v11");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("index.db"), b"").unwrap();
+        assert_ne!(detect(&other.join("index.db")), CacheKind::Pnpm);
+        // And `v<N>` means digits.
+        let odd = tmp.path().join("pkg-cache/vault");
+        std::fs::create_dir_all(odd.join("files/ab")).unwrap();
+        std::fs::write(odd.join("index.db"), b"").unwrap();
+        assert_ne!(detect(&odd.join("index.db")), CacheKind::Pnpm);
+    }
+
+    #[test]
+    fn a_package_inside_a_pnpm_index_db_is_still_a_pnpm_path() {
+        // The virtual path of a pnpm 11 index entry must classify like the
+        // store it lives in, or MCP would label it from the file name alone.
+        let tmp = tempfile::tempdir().unwrap();
+        let v11 = tmp.path().join("Library/pnpm/store/v11");
+        std::fs::create_dir_all(&v11).unwrap();
+        std::fs::write(v11.join("index.db"), b"").unwrap();
+        let p = v11.join("index.db/left-pad@1.3.0");
+        assert_eq!(detect(&p), CacheKind::Pnpm);
+        assert_eq!(
+            package_id(CacheKind::Pnpm, &p).map(|i| (i.name, i.version)),
+            Some(("left-pad".to_string(), "1.3.0".to_string()))
         );
     }
 
