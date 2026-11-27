@@ -138,7 +138,10 @@ impl TreeNode {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| path.to_string_lossy().to_string());
 
-        let has_children = path.is_dir();
+        // `symlink_metadata`, not `is_dir`: a link to a directory is a leaf, so
+        // expanding it never lists what lies outside the root (#93). Roots
+        // are the exception; see `TreeNode::root`.
+        let has_children = std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir());
 
         Self {
             path,
@@ -156,10 +159,13 @@ impl TreeNode {
 
     pub fn root(path: PathBuf) -> Self {
         let display = path.to_string_lossy().replace(&dirs_home(), "~");
+        // A root the user named may be a link to where the cache really lives.
+        let has_children = path.is_dir();
 
         Self {
             name: display,
             is_root: true,
+            has_children,
             ..Self::new(path, 0, None)
         }
     }
@@ -174,6 +180,29 @@ fn dirs_home() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_to_a_directory_is_a_leaf_but_a_symlinked_root_is_not() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        assert!(
+            TreeNode::new(real.clone(), 1, Some(0)).has_children,
+            "control"
+        );
+        assert!(
+            !TreeNode::new(link.clone(), 1, Some(0)).has_children,
+            "a link below a root is not expandable"
+        );
+        assert!(
+            TreeNode::root(link).has_children,
+            "a root that is a link is the user's choice and still opens"
+        );
+    }
 
     #[test]
     fn new_extracts_filename_as_name() {

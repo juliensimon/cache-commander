@@ -49,6 +49,17 @@ pub fn quick_size(path: &Path) -> Option<u64> {
     Some(total)
 }
 
+/// Whether `path` is itself a symbolic link. Does not follow it, and a path that
+/// cannot be inspected is not one.
+///
+/// Below a configured root a link is a leaf: it is shown, but never entered,
+/// sized or read through (#92, #93), because it can point anywhere. The roots
+/// themselves are exempt, since the user named them and relocating a cache
+/// behind a link is common.
+pub fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+}
+
 /// List immediate children of a directory.
 pub fn list_children(path: &Path) -> Vec<std::path::PathBuf> {
     match std::fs::read_dir(path) {

@@ -209,6 +209,12 @@ impl CcmdMcp {
         if depth > 4 {
             return;
         }
+        // A link is listed as a leaf and never read through (#92, #93): it can
+        // point anywhere, and what it points at is not part of the cache.
+        if walker::is_symlink(path) {
+            nodes.push(TreeNode::new(path.to_path_buf(), depth, None));
+            return;
+        }
         let kind = providers::detect(path);
         let semantic_name = providers::semantic_name(kind, path);
         let has_package_id = providers::package_id(kind, path).is_some();
@@ -1189,6 +1195,45 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["skipped_private"], 1, "{v}");
         assert_eq!(v["lookups_blocked"], false, "{v}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn listing_shows_a_symlink_as_a_leaf_and_never_reads_through_it() {
+        // `~/.cache/huggingface -> /elsewhere/hf`: the agent may see that the
+        // link exists, but must not learn what it points at. By name alone the
+        // link looks like a Hugging Face cache, so reading through it would
+        // list the models behind it and size them.
+        let tmp = tempfile::tempdir().unwrap();
+        let tmp = tmp.path().canonicalize().unwrap();
+        let root = tmp.join("cache");
+        let outside = tmp.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        let model = outside.join("hub/models--acme--secret/snapshots/abc");
+        std::fs::create_dir_all(&model).unwrap();
+        std::fs::write(model.join("weights.bin"), vec![0u8; 64 * 1024]).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("huggingface")).unwrap();
+        // Control: a real cache next to it is still listed in full.
+        let real = root.join("whisper");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("tiny.pt"), vec![0u8; 100]).unwrap();
+
+        let nodes = CcmdMcp::walk_root_nodes(&[root], true);
+        let listed: Vec<_> = nodes.iter().map(|n| n.name.as_str()).collect();
+
+        let linked = nodes
+            .iter()
+            .find(|n| n.name == "huggingface")
+            .unwrap_or_else(|| panic!("the link itself is listed: {listed:?}"));
+        assert_eq!(linked.size, 0, "must not be sized through the link");
+        assert_eq!(linked.kind, CacheKind::Unknown, "nor classified through it");
+        assert!(!linked.has_children, "and is not expandable");
+        assert!(
+            nodes.iter().all(|n| !n.name.contains("secret")),
+            "what the link points at must not surface: {listed:?}"
+        );
+        let whisper = nodes.iter().find(|n| n.kind == CacheKind::Whisper);
+        assert_eq!(whisper.map(|n| n.size), Some(100), "control: {listed:?}");
     }
 
     #[cfg(unix)]
