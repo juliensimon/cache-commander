@@ -68,6 +68,11 @@ are called out under Changed.
   on purpose, to surface upstream releases.
 
 ### Changed
+- **Maven repository root from `settings.xml` (#118)**: when
+  `~/.m2/settings.xml` declares a `<localRepository>`, a path inside it is read
+  relative to that directory, so a repository not named `repository` keeps its
+  full group id. Paths outside it, and installs with no declaration, parse as
+  before.
 - **Behavior change (tree)**: a symlink below a root is shown as a leaf with no
   size and is not classified. For a directory, such as `~/.cache/pip` pointing
   at another volume, that also means it cannot be expanded: add its target as a
@@ -114,9 +119,11 @@ are called out under Changed.
   reached through links are no longer entered (#92, #93).
 - pnpm 11 and later global stores are not identified for vulnerability scanning
   because their package index moved to SQLite (#39).
-- A custom-named Maven repository whose group id contains a `repository`
-  component can be mis-parsed, because the scan root alone cannot tell it from
-  a nested standard repository (#118).
+- A custom-named Maven repository inside `~/.m2` whose group id contains a
+  `repository` component can be mis-parsed unless `~/.m2/settings.xml` declares
+  it with an absolute `<localRepository>` (#118); the path alone cannot tell it
+  from a nested standard repository. Only an absolute path or `${user.home}` is
+  understood, and the file is read once per process.
 - PEP 440 and SemVer ordering rest on spec-derived tests, not a reference
   implementation (Maven is checked against the real one).
 

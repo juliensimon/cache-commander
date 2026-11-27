@@ -1,5 +1,6 @@
 use super::MetadataField;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 /// The path's components with each `..` resolved against the component before
 /// it. Configured scan roots are only tilde-expanded, so a root like
@@ -59,20 +60,101 @@ fn resolve_parent_dirs(path: &Path) -> Option<Vec<String>> {
 /// ancestor or no `repository` directory below it, rather than guessing a group.
 /// `..` components are resolved lexically first (see `resolve_parent_dirs`).
 ///
-/// Known limit: the root is inferred from the path alone, so a custom root not
-/// named `repository` (e.g. `.m2/custom-repo/com/repository/acme/...`) cannot be
-/// told apart from a nested `.m2/work/repository`; see #118 (needs the scan root).
+/// When `~/.m2/settings.xml` declares a `<localRepository>` and the path is
+/// inside it, THAT directory is the root: it is Maven's own statement of where
+/// the repository is, so a custom root not named `repository`
+/// (`.m2/custom-repo/com/repository/acme/...`) is read correctly (#118). A path
+/// outside the declared repository, or no declaration, keeps the inference
+/// above, which is never worse than before.
+///
+/// Known limit: with no declaration, that custom root cannot be told apart from
+/// a nested `.m2/work/repository` by the path alone.
 fn parse_coordinates(path: &Path) -> Option<(String, String, String)> {
+    parse_coordinates_with(path, declared_repository())
+}
+
+fn parse_coordinates_with(
+    path: &Path,
+    declared: Option<&[String]>,
+) -> Option<(String, String, String)> {
     let comps = resolve_parent_dirs(path)?;
-    let m2 = comps.iter().position(|c| c == ".m2")?;
-    let root = m2 + 1 + comps[m2 + 1..].iter().position(|c| c == "repository")?;
+    // Components of the root itself; what follows is <group...>/<artifact>/<version>/<file>.
+    let root_len = match declared.filter(|d| comps.len() > d.len() && comps[..d.len()] == **d) {
+        Some(d) => d.len(),
+        None => {
+            let m2 = comps.iter().position(|c| c == ".m2")?;
+            m2 + 1 + comps[m2 + 1..].iter().position(|c| c == "repository")? + 1
+        }
+    };
     // <group...> <artifact> <version> <file>, with at least one group part.
-    let rest = &comps[root + 1..];
+    let rest = &comps[root_len..];
     if rest.len() < 4 {
         return None;
     }
     let (group, tail) = rest.split_at(rest.len() - 3);
     Some((group.join("."), tail[0].clone(), tail[1].clone()))
+}
+
+/// The largest `settings.xml` we read.
+const MAX_SETTINGS_BYTES: u64 = 1024 * 1024;
+
+/// Components of the repository `~/.m2/settings.xml` declares, read once per
+/// process (settings change rarely, and this is asked for every walked path).
+fn declared_repository() -> Option<&'static [String]> {
+    static DECLARED: OnceLock<Option<Vec<String>>> = OnceLock::new();
+    DECLARED
+        .get_or_init(|| {
+            let home = directories::BaseDirs::new()?.home_dir().to_path_buf();
+            declared_repository_in(&home)
+        })
+        .as_deref()
+}
+
+/// Components of the repository declared by `<home>/.m2/settings.xml`. `None`
+/// when the file is absent, unreadable, over the size limit, or declares
+/// nothing we can resolve exactly.
+fn declared_repository_in(home: &Path) -> Option<Vec<String>> {
+    use std::io::Read;
+    let file = std::fs::File::open(home.join(".m2").join("settings.xml")).ok()?;
+    let mut xml = String::new();
+    file.take(MAX_SETTINGS_BYTES + 1)
+        .read_to_string(&mut xml)
+        .ok()?;
+    if xml.len() as u64 > MAX_SETTINGS_BYTES {
+        return None;
+    }
+    resolve_parent_dirs(&declared_repository_from_settings(&xml, home)?)
+}
+
+/// The `<localRepository>` of a `settings.xml`, as an absolute path, or `None`
+/// when there is none or it cannot be resolved exactly. `${user.home}` is
+/// expanded; any other placeholder, and any relative path, depends on where
+/// Maven was started, so it is no declaration at all rather than a guess.
+fn declared_repository_from_settings(xml: &str, home: &Path) -> Option<PathBuf> {
+    // A commented-out element is not a declaration.
+    let mut text = String::with_capacity(xml.len());
+    let mut rest = xml;
+    while let Some(start) = rest.find("<!--") {
+        text.push_str(&rest[..start]);
+        rest = match rest[start..].find("-->") {
+            Some(end) => &rest[start + end + 3..],
+            None => "",
+        };
+    }
+    text.push_str(rest);
+
+    let open = text.find("<localRepository>")? + "<localRepository>".len();
+    let close = open + text[open..].find("</localRepository>")?;
+    let value = text[open..close].trim();
+    let value = match value.strip_prefix("${user.home}") {
+        Some(tail) => format!("{}{}", home.to_string_lossy(), tail),
+        None => value.to_string(),
+    };
+    if value.is_empty() || value.contains("${") {
+        return None;
+    }
+    let path = PathBuf::from(value);
+    path.is_absolute().then_some(path)
 }
 
 pub fn semantic_name(path: &Path) -> Option<String> {
@@ -115,6 +197,150 @@ pub fn metadata(path: &Path) -> Vec<MetadataField> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_declaration_is_read_from_home_m2_settings_xml() {
+        let home = tempfile::tempdir().unwrap();
+        // No file: nothing declared.
+        assert_eq!(declared_repository_in(home.path()), None);
+        let m2 = home.path().join(".m2");
+        std::fs::create_dir_all(&m2).unwrap();
+        // A file with a declaration, `${user.home}` expanded against THIS home.
+        std::fs::write(
+            m2.join("settings.xml"),
+            "<settings><localRepository>${user.home}/.m2/custom-repo</localRepository></settings>",
+        )
+        .unwrap();
+        let got = declared_repository_in(home.path()).unwrap();
+        assert_eq!(got.last().map(String::as_str), Some("custom-repo"));
+        assert!(got.iter().any(|c| c == ".m2"), "{got:?}");
+        // A file that declares nothing.
+        std::fs::write(m2.join("settings.xml"), "<settings/>").unwrap();
+        assert_eq!(declared_repository_in(home.path()), None);
+        // An over-size file is not read, even if it starts with a declaration.
+        let mut big = String::from("<localRepository>/data/mvn</localRepository>");
+        big.push_str(&" ".repeat(MAX_SETTINGS_BYTES as usize));
+        std::fs::write(m2.join("settings.xml"), big).unwrap();
+        assert_eq!(declared_repository_in(home.path()), None);
+        // Not UTF-8.
+        std::fs::write(m2.join("settings.xml"), [0xff, 0xfe]).unwrap();
+        assert_eq!(declared_repository_in(home.path()), None);
+    }
+
+    #[test]
+    fn an_unterminated_comment_hides_the_rest_of_the_file() {
+        // `<!--` with no `-->`: everything after it is comment, so a later
+        // element is not a declaration.
+        let home = Path::new("/home/u");
+        assert_eq!(
+            declared_repository_from_settings(
+                "<!-- never closed <localRepository>/data/mvn</localRepository>",
+                home
+            ),
+            None
+        );
+        // An element before the comment still counts.
+        assert_eq!(
+            declared_repository_from_settings(
+                "<localRepository>/data/mvn</localRepository><!-- tail",
+                home
+            ),
+            Some(PathBuf::from("/data/mvn"))
+        );
+    }
+
+    // --- #118: the repository root comes from settings.xml when it is declared ---
+
+    fn declared(root: &str) -> Option<Vec<String>> {
+        Some(
+            Path::new(root)
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect(),
+        )
+    }
+
+    fn coords(path: &str, declared_root: Option<Vec<String>>) -> Option<(String, String, String)> {
+        parse_coordinates_with(Path::new(path), declared_root.as_deref())
+    }
+
+    #[test]
+    fn a_declared_repository_decides_where_the_group_starts() {
+        // `.m2/custom-repo/com/repository/acme/...` cannot be told from a nested
+        // `.m2/work/repository` by its path. Maven's own `<localRepository>`
+        // can: it says which directory is the root.
+        let jar = "/home/u/.m2/custom-repo/com/repository/acme/widget/1.0/widget-1.0.jar";
+        assert_eq!(
+            coords(jar, declared("/home/u/.m2/custom-repo")),
+            Some(("com.repository.acme".into(), "widget".into(), "1.0".into()))
+        );
+        // Without the declaration the old inference is kept: the first
+        // `repository` component is taken as the root, so the group loses
+        // `com.repository` (the documented mis-parse this declaration fixes).
+        assert_eq!(
+            coords(jar, None),
+            Some(("acme".into(), "widget".into(), "1.0".into()))
+        );
+    }
+
+    #[test]
+    fn a_path_outside_the_declared_repository_falls_back_to_inference() {
+        let jar = "/home/u/.m2/repository/com/acme/widget/1.0/widget-1.0.jar";
+        assert_eq!(
+            coords(jar, declared("/home/u/.m2/custom-repo")),
+            coords(jar, None)
+        );
+        assert_eq!(
+            coords(jar, None),
+            Some(("com.acme".into(), "widget".into(), "1.0".into()))
+        );
+    }
+
+    #[test]
+    fn a_declared_repository_needs_a_whole_component_match() {
+        // `custom-repo-old` is not inside `custom-repo`.
+        let jar = "/home/u/.m2/custom-repo-old/repository/com/acme/widget/1.0/widget-1.0.jar";
+        assert_eq!(
+            coords(jar, declared("/home/u/.m2/custom-repo")),
+            Some(("com.acme".into(), "widget".into(), "1.0".into()))
+        );
+    }
+
+    #[test]
+    fn settings_local_repository_is_read_and_resolved() {
+        let home = Path::new("/home/u");
+        let read = |xml: &str| declared_repository_from_settings(xml, home);
+        assert_eq!(
+            read("<settings><localRepository>/data/mvn</localRepository></settings>"),
+            Some(PathBuf::from("/data/mvn"))
+        );
+        assert_eq!(
+            read(
+                "<settings><localRepository>\n  ${user.home}/.m2/custom-repo\n</localRepository></settings>"
+            ),
+            Some(PathBuf::from("/home/u/.m2/custom-repo"))
+        );
+        // A commented-out element is not a declaration.
+        assert_eq!(
+            read("<settings><!-- <localRepository>/old</localRepository> --></settings>"),
+            None
+        );
+        // Anything we cannot resolve exactly is no declaration: relative paths
+        // and other placeholders depend on where Maven was started.
+        assert_eq!(read("<localRepository>rel/path</localRepository>"), None);
+        assert_eq!(read("<localRepository>${env.M2}/x</localRepository>"), None);
+        // Absolute, but with a placeholder we cannot expand.
+        assert_eq!(
+            read("<localRepository>/data/${env.M2}/x</localRepository>"),
+            None
+        );
+        assert_eq!(
+            read("<localRepository>${user.home}/${env.X}</localRepository>"),
+            None
+        );
+        assert_eq!(read("<localRepository></localRepository>"), None);
+        assert_eq!(read("<settings/>"), None);
+    }
+
     use super::*;
     use std::path::PathBuf;
 
