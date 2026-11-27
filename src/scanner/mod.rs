@@ -45,11 +45,22 @@ pub enum ScanResult {
     ManifestsUnidentified(usize),
 }
 
-/// A package directory whose manifest could not be turned into an identity.
+/// Something discovery found but could not turn into scannable packages: an npm
+/// package directory whose manifest is unusable, or entries of a pnpm
+/// `index.db` (#117, #39).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnidentifiedManifest {
     pub path: PathBuf,
-    pub reason: &'static str,
+    pub reason: String,
+    /// How many packages this entry stands for: 1 for a directory, the number
+    /// of unusable rows for an `index.db`, so the count a scan reports is not
+    /// understated.
+    pub count: usize,
+}
+
+/// The number of packages the entries stand for.
+pub fn unidentified_total(all: &[UnidentifiedManifest]) -> usize {
+    all.iter().map(|u| u.count).sum()
 }
 
 /// What discovery found: the identified packages, and what it had to skip.
@@ -69,8 +80,9 @@ pub fn discover_packages(roots: &[PathBuf]) -> Vec<(PathBuf, crate::providers::P
 
 /// [`discover_packages`], plus the npm package directories whose manifest could
 /// not be turned into a package (#117): missing, malformed, oversized, or with
-/// an invalid name or version. Without this they vanish from the scan and the
-/// package looks absent or clean. Only npm manifests are covered; other
+/// an invalid name or version. Also the entries of a pnpm 11 `index.db` that are
+/// not scannable or could not be read (#39). Without this they vanish from the
+/// scan and the package looks absent or clean. Both are npm-ecosystem; other
 /// providers decide identity from paths or file names.
 pub fn discover(roots: &[PathBuf]) -> Discovery {
     let mut seen = std::collections::HashSet::new();
@@ -78,6 +90,8 @@ pub fn discover(roots: &[PathBuf]) -> Discovery {
     let mut unidentified = Vec::new();
     // Overlapping roots walk the same directory twice; a path is reported once.
     let mut unidentified_paths = std::collections::HashSet::new();
+    // Likewise an index.db is read once.
+    let mut index_dbs = std::collections::HashSet::new();
     for root in roots {
         if !root.exists() {
             continue;
@@ -96,6 +110,50 @@ pub fn discover(roots: &[PathBuf]) -> Discovery {
             }
             let path = entry.path();
             let kind = crate::providers::detect(&path);
+            // pnpm 11 keeps its package index in one SQLite file (#39): its
+            // packages are read from there, under virtual paths below it.
+            if kind == crate::tree::node::CacheKind::Pnpm
+                && path.file_name().is_some_and(|n| n == "index.db")
+                && entry.file_type().is_file()
+            {
+                if !index_dbs.insert(path.to_path_buf()) {
+                    continue;
+                }
+                let report = |reason: String, count: usize| UnidentifiedManifest {
+                    path: path.to_path_buf(),
+                    reason,
+                    count,
+                };
+                match crate::providers::pnpm::read_index_db(&path) {
+                    Ok(db) => {
+                        for id in db.packages {
+                            let key = (id.ecosystem, id.name.clone(), id.version.clone());
+                            if seen.insert(key) {
+                                let virtual_path =
+                                    crate::providers::pnpm::index_entry_path(&path, &id);
+                                packages.push((virtual_path, id));
+                            }
+                        }
+                        if db.unusable_keys > 0 {
+                            unidentified.push(report(
+                                format!(
+                                    "pnpm index.db has {} entries without a registry name and version",
+                                    db.unusable_keys
+                                ),
+                                db.unusable_keys,
+                            ));
+                        }
+                        if db.wal_unread {
+                            unidentified.push(report(
+                                "pnpm index.db has write-ahead-log entries that could not be read; recently installed packages may be missing".to_string(),
+                                1,
+                            ));
+                        }
+                    }
+                    Err(reason) => unidentified.push(report(reason.to_string(), 1)),
+                }
+                continue;
+            }
             if let Some(id) = crate::providers::package_id(kind, &path) {
                 let key = (id.ecosystem, id.name.clone(), id.version.clone());
                 if seen.insert(key) {
@@ -107,7 +165,8 @@ pub fn discover(roots: &[PathBuf]) -> Discovery {
             {
                 unidentified.push(UnidentifiedManifest {
                     path: path.to_path_buf(),
-                    reason: reason.describe(),
+                    reason: reason.describe().to_string(),
+                    count: 1,
                 });
             }
         }
@@ -127,7 +186,7 @@ fn discover_for_scan(
     tx: &mpsc::Sender<ScanResult>,
 ) -> (Vec<(PathBuf, crate::providers::PackageId)>, usize) {
     let found = discover(roots);
-    let skipped = found.unidentified.len();
+    let skipped = unidentified_total(&found.unidentified);
     if skipped > 0 {
         send_result(tx, ScanResult::ManifestsUnidentified(skipped));
     }
@@ -476,7 +535,7 @@ mod tests {
             .map(|u| {
                 (
                     u.path.file_name().unwrap().to_str().unwrap().to_string(),
-                    u.reason,
+                    u.reason.as_str(),
                 )
             })
             .collect();
@@ -585,6 +644,141 @@ mod tests {
             }
             _ => panic!("expected the version outcome"),
         }
+    }
+
+    const REAL_INDEX_DB: &[u8] = include_bytes!("../providers/testdata/pnpm11-index.db");
+
+    /// `<tmp>/pnpm/store/v11/index.db`, a layout `detect` classifies as pnpm.
+    fn pnpm11_store(tmp: &std::path::Path, db: &[u8]) -> PathBuf {
+        let v11 = tmp.join("pnpm/store/v11");
+        std::fs::create_dir_all(v11.join("files")).unwrap();
+        std::fs::write(v11.join("index.db"), db).unwrap();
+        v11.join("index.db")
+    }
+
+    #[test]
+    fn discover_finds_packages_in_a_pnpm_11_index_db() {
+        // #39: with the JSON index gone, global-store packages were no longer
+        // identified, so they were never scanned for vulnerabilities.
+        let tmp = tempfile::tempdir().unwrap();
+        let db = pnpm11_store(tmp.path(), REAL_INDEX_DB);
+        let found = discover(&[tmp.path().join("pnpm")]);
+        let mut ids: Vec<_> = found
+            .packages
+            .iter()
+            .map(|(_, id)| format!("{}@{}", id.name, id.version))
+            .collect();
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec!["@babel/helper-string-parser@7.25.9", "left-pad@1.3.0"]
+        );
+        assert!(found.unidentified.is_empty());
+        // They are addressed under the index.db node, so a result for one rolls
+        // up to it and to every folder above.
+        assert!(
+            found
+                .packages
+                .iter()
+                .all(|(p, _)| p.parent() == Some(db.as_path()))
+        );
+    }
+
+    #[test]
+    fn an_unreadable_pnpm_index_db_is_reported_not_silently_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        pnpm11_store(tmp.path(), b"not a database");
+        let found = discover(&[tmp.path().join("pnpm")]);
+        assert!(found.packages.is_empty());
+        assert_eq!(found.unidentified.len(), 1, "{:?}", found.unidentified);
+        assert!(found.unidentified[0].reason.contains("index.db"));
+    }
+
+    #[test]
+    fn an_index_db_with_unusable_rows_is_reported_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = pnpm11_store(tmp.path(), b"");
+        std::fs::remove_file(&db).unwrap();
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE package_index (key TEXT PRIMARY KEY, data BLOB NOT NULL) WITHOUT ROWID;
+             INSERT INTO package_index VALUES ('sha512-a\tleft-pad@1.3.0', x'00');
+             INSERT INTO package_index VALUES ('sha512-b\thttps://codeload.github.com/a/b/tar.gz/c', x'00');
+             INSERT INTO package_index VALUES ('sha512-c\tgit+ssh://x/y', x'00');",
+        )
+        .unwrap();
+        drop(conn);
+        let found = discover(&[tmp.path().join("pnpm")]);
+        assert_eq!(found.packages.len(), 1);
+        assert_eq!(found.unidentified.len(), 1, "one entry per database");
+        assert!(
+            found.unidentified[0]
+                .reason
+                .contains("2 entries without a registry name")
+        );
+        // ...but it stands for every row it could not use, so the count a scan
+        // reports is not understated.
+        assert_eq!(unidentified_total(&found.unidentified), 2);
+        // Walked twice through overlapping roots: still once.
+        let twice = discover(&[tmp.path().join("pnpm"), tmp.path().join("pnpm/store")]);
+        assert_eq!(twice.unidentified.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unread_write_ahead_log_entries_are_reported_by_discover() {
+        // The reader flags them; the scan must pass that on, or the packages
+        // installed since the last checkpoint look clean.
+        use std::os::unix::fs::PermissionsExt;
+        let live = tempfile::tempdir().unwrap();
+        let db = live.path().join("index.db");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        conn.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE package_index (key TEXT PRIMARY KEY, data BLOB NOT NULL) WITHOUT ROWID;",
+        )
+        .unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            .unwrap();
+        conn.execute(
+            "INSERT INTO package_index VALUES ('sha512-a\tleft-pad@1.3.0', x'00')",
+            [],
+        )
+        .unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let v11 = tmp.path().join("pnpm/store/v11");
+        std::fs::create_dir_all(&v11).unwrap();
+        for f in ["index.db", "index.db-wal"] {
+            std::fs::copy(live.path().join(f), v11.join(f)).unwrap();
+        }
+        std::fs::set_permissions(&v11, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let found = discover(&[tmp.path().join("pnpm")]);
+        std::fs::set_permissions(&v11, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(found.packages.is_empty(), "the row is only in the log");
+        assert_eq!(found.unidentified.len(), 1, "{:?}", found.unidentified);
+        assert!(found.unidentified[0].reason.contains("write-ahead-log"));
+    }
+
+    #[test]
+    fn an_index_db_outside_a_pnpm_store_is_not_read() {
+        // Plenty of tools have a file called index.db.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("some-app/cache");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("index.db"), REAL_INDEX_DB).unwrap();
+        let found = discover(&[tmp.path().to_path_buf()]);
+        assert!(found.packages.is_empty() && found.unidentified.is_empty());
+    }
+
+    #[test]
+    fn the_same_package_in_two_overlapping_roots_is_found_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        pnpm11_store(tmp.path(), REAL_INDEX_DB);
+        let found = discover(&[tmp.path().join("pnpm"), tmp.path().join("pnpm/store")]);
+        assert_eq!(found.packages.len(), 2);
     }
 
     #[test]

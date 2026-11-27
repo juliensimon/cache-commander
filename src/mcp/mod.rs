@@ -67,7 +67,7 @@ fn unidentified_entries(all: &[scanner::UnidentifiedManifest]) -> Vec<tools::Uni
         .take(tools::MAX_UNIDENTIFIED_LISTED)
         .map(|u| tools::UnidentifiedEntry {
             path: u.path.to_string_lossy().to_string(),
-            reason: u.reason.to_string(),
+            reason: u.reason.clone(),
         })
         .collect()
 }
@@ -572,7 +572,7 @@ impl CcmdMcp {
             let mut unidentified = found.unidentified;
             if let Some(ref eco) = ecosystem_filter {
                 packages.retain(|(_, pkg)| matches_ecosystem(pkg.ecosystem, eco));
-                // Unidentified manifests are npm's.
+                // Unidentified entries (npm manifests, pnpm index.db rows) are npm-ecosystem.
                 if !matches_ecosystem("npm", eco) {
                     unidentified.clear();
                 }
@@ -640,7 +640,7 @@ impl CcmdMcp {
                 unfixable: total_vulns - fixable,
                 skipped_private,
                 lookups_blocked,
-                unidentified_manifests: unidentified.len(),
+                unidentified_manifests: scanner::unidentified_total(&unidentified),
                 unidentified: unidentified_entries(&unidentified),
                 packages: result,
             };
@@ -666,7 +666,7 @@ impl CcmdMcp {
             let mut unidentified = found.unidentified;
             if let Some(ref eco) = ecosystem_filter {
                 packages.retain(|(_, pkg)| matches_ecosystem(pkg.ecosystem, eco));
-                // Unidentified manifests are npm's.
+                // Unidentified entries (npm manifests, pnpm index.db rows) are npm-ecosystem.
                 if !matches_ecosystem("npm", eco) {
                     unidentified.clear();
                 }
@@ -719,7 +719,7 @@ impl CcmdMcp {
                 by_ecosystem,
                 skipped_private,
                 lookups_blocked,
-                unidentified_manifests: unidentified.len(),
+                unidentified_manifests: scanner::unidentified_total(&unidentified),
                 unidentified: unidentified_entries(&unidentified),
                 packages: result,
             };
@@ -1243,7 +1243,8 @@ mod tests {
         let all: Vec<_> = (0..tools::MAX_UNIDENTIFIED_LISTED + 5)
             .map(|i| scanner::UnidentifiedManifest {
                 path: PathBuf::from(format!("/x/{i}")),
-                reason: "no package.json",
+                reason: "no package.json".to_string(),
+                count: 1,
             })
             .collect();
         assert_eq!(
@@ -1605,6 +1606,46 @@ mod tests {
         };
         let out = server.delete_packages(Parameters(input)).await.unwrap();
         serde_json::from_str(&out).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_package_inside_a_pnpm_index_db_cannot_be_previewed_or_deleted() {
+        // Such a package is reported under a virtual path that does not exist.
+        // An agent that takes it from a scan report and passes it on must be
+        // refused cleanly, and the store must be untouched.
+        let tmp = tempfile::tempdir().unwrap();
+        let tmp = tmp.path().canonicalize().unwrap();
+        let v11 = tmp.join("pnpm/store/v11");
+        std::fs::create_dir_all(&v11).unwrap();
+        let db = v11.join("index.db");
+        std::fs::write(&db, include_bytes!("../providers/testdata/pnpm11-index.db")).unwrap();
+        let mut config = Config::default_for_test();
+        config.roots = vec![tmp.join("pnpm")];
+        let server = CcmdMcp::new(&config);
+
+        let id = providers::PackageId {
+            ecosystem: "npm",
+            name: "left-pad".into(),
+            version: "1.3.0".into(),
+        };
+        let virtual_path = providers::pnpm::index_entry_path(&db, &id);
+
+        let out = server
+            .preview_delete(Parameters(tools::PreviewDeleteInput {
+                paths: vec![virtual_path.to_string_lossy().to_string()],
+            }))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["items"][0]["would_delete"], false, "{v}");
+
+        let result = call_delete(&server, &[&virtual_path], true).await;
+        assert_eq!(
+            result["deleted"].as_array().map(Vec::len),
+            Some(0),
+            "{result}"
+        );
+        assert!(db.exists(), "the store must be untouched");
     }
 
     #[tokio::test]

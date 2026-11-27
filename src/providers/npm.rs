@@ -235,7 +235,7 @@ fn is_package_location(path: &Path) -> bool {
 /// not start with `.` or `_`, and uses only `A-Za-z0-9` and `-._~` (legacy
 /// packages may contain uppercase). This keeps path separators, whitespace and
 /// shell metacharacters out of identities that end up in commands and queries.
-fn is_valid_npm_name(name: &str) -> bool {
+pub(super) fn is_valid_npm_name(name: &str) -> bool {
     let segment_ok = |s: &str| {
         !s.is_empty()
             && !s.starts_with(['.', '_'])
@@ -258,7 +258,7 @@ fn is_valid_npm_name(name: &str) -> bool {
 /// dot-separated, non-empty identifiers of `A-Za-z0-9-`. Tags (`latest`),
 /// ranges, `v`-prefixed and partial versions (`1.2`, `1..2`) are rejected:
 /// the installed version feeds dedup and OSV queries, so it must be exact.
-fn is_valid_npm_version(version: &str) -> bool {
+pub(super) fn is_valid_npm_version(version: &str) -> bool {
     let identifiers_ok = |s: &str| {
         s.split('.')
             .all(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))

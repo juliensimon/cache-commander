@@ -1333,6 +1333,22 @@ mod tests {
     }
 
     #[test]
+    fn a_package_inside_a_pnpm_index_db_is_still_a_pnpm_path() {
+        // The virtual path of a pnpm 11 index entry must classify like the
+        // store it lives in, or MCP would label it from the file name alone.
+        let tmp = tempfile::tempdir().unwrap();
+        let v11 = tmp.path().join("Library/pnpm/store/v11");
+        std::fs::create_dir_all(&v11).unwrap();
+        std::fs::write(v11.join("index.db"), b"").unwrap();
+        let p = v11.join("index.db/left-pad@1.3.0");
+        assert_eq!(detect(&p), CacheKind::Pnpm);
+        assert_eq!(
+            package_id(CacheKind::Pnpm, &p).map(|i| (i.name, i.version)),
+            Some(("left-pad".to_string(), "1.3.0".to_string()))
+        );
+    }
+
+    #[test]
     fn detect_pnpm_xdg_store() {
         assert_eq!(
             detect(&PathBuf::from(

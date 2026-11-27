@@ -6,7 +6,7 @@
 [![Release](https://github.com/juliensimon/cache-commander/actions/workflows/release.yml/badge.svg)](https://github.com/juliensimon/cache-commander/releases)
 [![GitHub release](https://img.shields.io/github/v/release/juliensimon/cache-commander)](https://github.com/juliensimon/cache-commander/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-1.88%2B-orange?logo=rust)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/Rust-1.89%2B-orange?logo=rust)](https://www.rust-lang.org)
 [![macOS](https://img.shields.io/badge/macOS-x86__64%20%7C%20ARM-black?logo=apple)](https://github.com/juliensimon/cache-commander/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64%20%7C%20ARM-black?logo=linux&logoColor=white)](https://github.com/juliensimon/cache-commander/releases)
 [![crates.io](https://img.shields.io/crates/v/ccmd)](https://crates.io/crates/ccmd)
@@ -167,7 +167,7 @@ Legend:
 Notes:
 - ¹ **SwiftPM** is intentionally disk-hygiene only in v1. Swift package identity in the on-disk `repositories/` layout requires parsing git refs, which is too brittle; OSV's `SwiftURL` ecosystem has sparse coverage; and Swift package upgrades are project-local (`Package.swift` / `Package.resolved`), not global cache operations. May be reconsidered when OSV coverage improves.
 - ² **Xcode** has no package-manager ecosystem — its caches are build artifacts, not packages. Vulnerability scanning, version checking, and upgrade commands don't apply.
-- ³ **pnpm 11** (store v11) replaced the per-package JSON index with a SQLite `index.db`, which ccmd labels but does not yet read package identities from ([#39](https://github.com/juliensimon/cache-commander/issues/39)). Scanning of v10 stores and of virtual stores (`node_modules/.pnpm/`) is unaffected.
+- ³ **pnpm 11 and later** (store v11) replaced the per-package JSON index with a SQLite `index.db`. ccmd reads package names and versions from its keys, read-only, and a vulnerable package there marks the `index.db` entry and the folders above it. Rows that are not a registry `name@version` (git and tarball URL dependencies) are not scanned and are counted, row by row, in the "could not be identified" note; a database that could not be read at all, or whose write-ahead log could not be, counts as one however many packages it holds, so that number is a lower bound. Packages found there are reported under a path below `index.db` that does not exist on disk, so the MCP `scan_vulnerabilities` / `check_outdated` reports show them but `get_package_details`, `search_packages` and `delete_packages` do not apply to them. The file is untrusted, so it is read with a row and time limit and `package_index` must be a real table. A store pnpm is writing to is read with its write-ahead log when SQLite allows it; when it does not (for example a read-only mount), the main file is read alone and the note says that recent packages may be missing. Scanning of v10 stores and of virtual stores (`node_modules/.pnpm/`) is as before.
 - ⁴ **uv** is Safe with the default link modes (`clone` on macOS/Linux, `hardlink` on Windows), where environments keep working after the cache is deleted. With the opt-in [`link-mode = symlink`](https://docs.astral.sh/uv/reference/settings/#link-mode), which uv itself discourages, environments point into the cache and deleting it breaks their installed packages. ccmd does not detect the link mode and reports Safe either way.
 
 ## Key Bindings
