@@ -300,7 +300,7 @@ impl CcmdMcp {
             entry.0 += node.size;
             entry.1 += 1;
 
-            match providers::safety_resolved(node.kind, &node.path, &self.protected) {
+            match providers::safety_resolved_deep(node.kind, &node.path, &self.protected) {
                 providers::SafetyLevel::Safe => safe_count += 1,
                 providers::SafetyLevel::Caution => caution_count += 1,
                 providers::SafetyLevel::Unsafe => unsafe_count += 1,
@@ -384,7 +384,7 @@ impl CcmdMcp {
                 })
                 .map(|node| {
                     let safety =
-                        providers::safety_resolved(node.kind, &node.path, &server.protected);
+                        providers::safety_resolved_deep(node.kind, &node.path, &server.protected);
                     PackageEntry {
                         name: node.name.clone(),
                         version: providers::package_id(node.kind, &node.path)
@@ -464,7 +464,7 @@ impl CcmdMcp {
         let protected = self.protected.clone();
         let result = tokio::task::spawn_blocking(move || {
             let kind = providers::detect(&path);
-            let safety = providers::safety_resolved(kind, &path, &protected);
+            let safety = providers::safety_resolved_deep(kind, &path, &protected);
             let size = walker::dir_size(&path);
             let last_modified = path
                 .metadata()
@@ -716,7 +716,7 @@ impl CcmdMcp {
                         }
                     };
                     let kind = providers::detect(&canonical);
-                    let safety = providers::safety_resolved(kind, &canonical, &protected);
+                    let safety = providers::safety_resolved_deep(kind, &canonical, &protected);
                     let size = walker::dir_size(&canonical);
                     let name = providers::semantic_name(kind, &canonical).unwrap_or_else(|| {
                         canonical
@@ -819,7 +819,7 @@ impl CcmdMcp {
                     }
                 };
                 let kind = providers::detect(&canonical);
-                let safety = providers::safety_resolved(kind, &canonical, &protected);
+                let safety = providers::safety_resolved_deep(kind, &canonical, &protected);
                 let name = providers::semantic_name(kind, &canonical).unwrap_or_else(|| {
                     canonical
                         .file_name()
@@ -1015,6 +1015,40 @@ mod tests {
         );
         // Control: the unprotected sibling is deleted.
         assert!(!install.exists(), "unprotected sibling: {result}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn delete_refuses_an_entry_that_contains_a_protected_dir() {
+        // The review's case: the target does not lie UNDER the protected directory,
+        // it CONTAINS it. `~/.bun -> data/storage`, so the runtime is
+        // `data/storage/bin`; with `data/` the configured root, `data/storage` is a
+        // discovered, deletable entry whose removal takes the runtime with it.
+        let dir = TempDir::new().unwrap();
+        let data = dir.path().join("data");
+        let storage = data.join("storage");
+        std::fs::create_dir_all(storage.join("bin")).unwrap();
+        std::fs::write(storage.join("bin/bun"), b"runtime").unwrap();
+        let other = data.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("f"), b"x").unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::os::unix::fs::symlink(&storage, home.join(".bun")).unwrap();
+        let mut config = Config::default_for_test();
+        config.roots = vec![data.clone()];
+        let mut server = CcmdMcp::new(&config);
+        server.protected = providers::ProtectedSet::from_dirs(&[home.join(".bun/bin")]);
+
+        let result = call_delete(&server, &[&storage, &other], true).await;
+        assert!(
+            storage.join("bin/bun").exists(),
+            "an entry that contains the runtime must not be deleted: {result}"
+        );
+        assert!(
+            !other.exists(),
+            "control: an unrelated sibling is: {result}"
+        );
     }
 
     #[cfg(unix)]

@@ -305,6 +305,10 @@ pub fn package_id(kind: CacheKind, path: &Path) -> Option<PackageId> {
 #[derive(Clone, Debug, Default)]
 pub struct ProtectedSet {
     identities: Vec<(u64, u64)>,
+    /// Identities of every directory ABOVE a protected one: removing any of them
+    /// removes the protected directory with it.
+    #[cfg_attr(not(feature = "mcp"), allow(dead_code))] // only the MCP delete uses holders
+    holders: Vec<(u64, u64)>,
 }
 
 impl ProtectedSet {
@@ -316,9 +320,27 @@ impl ProtectedSet {
 
     /// Identities of the given directories (symlinks followed, missing ones skipped).
     pub fn from_dirs(dirs: &[PathBuf]) -> Self {
+        let resolved: Vec<PathBuf> = dirs
+            .iter()
+            .filter_map(|d| std::fs::canonicalize(d).ok())
+            .collect();
         Self {
             identities: dirs.iter().filter_map(|d| identity(d)).collect(),
+            holders: resolved
+                .iter()
+                .flat_map(|d| d.ancestors().skip(1))
+                .filter_map(identity)
+                .collect(),
         }
+    }
+
+    /// True if `target` is a directory ABOVE a protected one, so deleting it would
+    /// take the protected directory with it (`data/storage` when `~/.bun` is a
+    /// symlink to it). Not used by the TUI: there, deleting a whole cache root is a
+    /// deliberate, confirmed action.
+    #[cfg_attr(not(feature = "mcp"), allow(dead_code))] // only the MCP delete uses holders
+    pub fn holds(&self, target: &Path) -> bool {
+        !self.holders.is_empty() && identity(target).is_some_and(|id| self.holders.contains(&id))
     }
 
     /// True if `target` is a protected directory or lies under one. Each of its
@@ -368,6 +390,18 @@ pub fn safety_resolved(kind: CacheKind, path: &Path, protected: &ProtectedSet) -
         SafetyLevel::Unsafe
     } else {
         safety(kind, path)
+    }
+}
+
+/// `safety_resolved`, and also Unsafe when the target HOLDS a protected directory.
+/// For callers that must not remove a directory containing a runtime, such as the
+/// agent-driven MCP delete.
+#[cfg_attr(not(feature = "mcp"), allow(dead_code))] // only the MCP delete uses holders
+pub fn safety_resolved_deep(kind: CacheKind, path: &Path, protected: &ProtectedSet) -> SafetyLevel {
+    if protected.holds(path) {
+        SafetyLevel::Unsafe
+    } else {
+        safety_resolved(kind, path, protected)
     }
 }
 
@@ -630,6 +664,47 @@ mod tests {
         assert!(!set.contains(&storage.join("binx")));
         assert!(!set.contains(&storage.join("install/cache")));
         assert!(!set.contains(&storage));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn holds_is_true_for_directories_above_a_protected_one_only() {
+        let (tmp, storage, home) = bun_behind_a_symlink();
+        let set = ProtectedSet::from_dirs(&[home.join(".bun/bin")]);
+        // `storage` contains `bin`; so does everything above it.
+        assert!(set.holds(&storage));
+        assert!(set.holds(tmp.path()));
+        // The protected directory is contained BY a holder, it does not hold itself,
+        // and what is under it holds nothing.
+        assert!(!set.holds(&storage.join("bin")));
+        assert!(!set.holds(&storage.join("bin/bun")));
+        // Unrelated directories and a sibling are not holders.
+        std::fs::create_dir_all(storage.join("install")).unwrap();
+        assert!(!set.holds(&storage.join("install")));
+        assert!(!ProtectedSet::default().holds(&storage));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_the_deep_variant_treats_a_holder_as_unsafe() {
+        // The TUI uses `safety_resolved`: deleting a whole cache root there is a
+        // deliberate, confirmed action. The agent-driven MCP delete uses the deep
+        // one. This pins the difference so it is a decision, not an accident.
+        let (_tmp, storage, home) = bun_behind_a_symlink();
+        let set = ProtectedSet::from_dirs(&[home.join(".bun/bin")]);
+        assert_ne!(
+            safety_resolved(CacheKind::Unknown, &storage, &set),
+            SafetyLevel::Unsafe
+        );
+        assert_eq!(
+            safety_resolved_deep(CacheKind::Unknown, &storage, &set),
+            SafetyLevel::Unsafe
+        );
+        // Deep still includes everything the shallow one refuses.
+        assert_eq!(
+            safety_resolved_deep(CacheKind::Unknown, &storage.join("bin/bun"), &set),
+            SafetyLevel::Unsafe
+        );
     }
 
     #[cfg(unix)]
