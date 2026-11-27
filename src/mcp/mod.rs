@@ -106,6 +106,8 @@ fn canonical_under_roots(path: &std::path::Path, roots: &[PathBuf]) -> Option<Pa
     if under_root { Some(canonical) } else { None }
 }
 
+const INDIRECT_PROTECTED_ROUTE: &str = "A protected directory (such as Bun's runtime) is reached through a symlink chain, so this server cannot prove that deleting anything is safe and refuses all deletes; use the TUI";
+
 const NOT_A_DISCOVERED_ENTRY: &str = "Not a discovered cache entry: configured roots, provider containers, symlinks and paths inside a package cannot be deleted via MCP";
 
 /// The canonical paths a client may delete: exactly the entries discovery
@@ -146,7 +148,13 @@ fn resolve_deletable(
     path: &Path,
     roots: &[PathBuf],
     deletable: &HashSet<PathBuf>,
+    protected: &providers::ProtectedSet,
 ) -> Result<PathBuf, &'static str> {
+    // Fail closed: when the route to a protected directory is indirect, which
+    // other directories it depends on is not worked out, so nothing is deletable.
+    if protected.indirect() {
+        return Err(INDIRECT_PROTECTED_ROUTE);
+    }
     let normalized: PathBuf = path.components().collect();
     if std::fs::symlink_metadata(&normalized).is_ok_and(|m| m.file_type().is_symlink()) {
         return Err(NOT_A_DISCOVERED_ENTRY);
@@ -705,7 +713,7 @@ impl CcmdMcp {
                     // safety check and size calculation. This closes the
                     // TOCTOU window where a racing symlink swap could escape
                     // the root between the check and the actual delete.
-                    let canonical = match resolve_deletable(path, &roots, &deletable) {
+                    let canonical = match resolve_deletable(path, &roots, &deletable, &protected) {
                         Ok(canonical) => canonical,
                         Err(reason) => {
                             rejected_count += 1;
@@ -812,7 +820,7 @@ impl CcmdMcp {
                 // actual deletion. This closes the TOCTOU window where a
                 // racing symlink swap could escape the root between the
                 // `is_under_roots` check and the `remove_dir_all` call.
-                let canonical = match resolve_deletable(path, &roots, &deletable) {
+                let canonical = match resolve_deletable(path, &roots, &deletable, &protected) {
                     Ok(canonical) => canonical,
                     Err(reason) => {
                         skipped.push(SkippedItem {
@@ -1096,10 +1104,12 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn delete_refuses_a_dir_the_route_to_a_protected_dir_passes_through() {
+    async fn an_indirect_protected_route_blocks_every_mcp_delete() {
         // `~/.bun -> data/A` and `data/A/bin -> outside/B` (B is the protected
-        // directory). `data/A` is a discovered, deletable entry; B is untouched by
-        // removing it, but `~/.bun/bin` would dangle and Bun stop working.
+        // directory). The route passes through `data/A`, which is neither above nor
+        // inside B, so deleting it would break Bun without touching the runtime.
+        // Rather than work out which directories the route depends on, the agent
+        // delete refuses everything while the route is indirect, and says why.
         let dir = TempDir::new().unwrap();
         let data = dir.path().join("data");
         let a = data.join("A");
@@ -1121,9 +1131,27 @@ mod tests {
 
         let result = call_delete(&server, &[&a, &other], true).await;
         assert!(a.join("bin").exists(), "the route must survive: {result}");
+        assert!(other.exists(), "so does everything else: {result}");
+        let reasons = result["skipped"].to_string();
+        assert!(reasons.contains("symlink"), "must say why: {result}");
+
+        // The preview agrees.
+        let out = server
+            .preview_delete(Parameters(tools::PreviewDeleteInput {
+                paths: vec![other.to_string_lossy().to_string()],
+            }))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["items"][0]["would_delete"], false, "{v}");
+
+        // Control: the same layout with a DIRECT route deletes an unrelated sibling.
+        let mut direct = CcmdMcp::new(&config);
+        direct.protected_dirs = vec![];
+        let result = call_delete(&direct, &[&other], true).await;
         assert!(
             !other.exists(),
-            "control: an unrelated sibling is deleted: {result}"
+            "control: no protected route, deleted: {result}"
         );
     }
 

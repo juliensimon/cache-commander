@@ -305,10 +305,13 @@ pub fn package_id(kind: CacheKind, path: &Path) -> Option<PackageId> {
 #[derive(Clone, Debug, Default)]
 pub struct ProtectedSet {
     identities: Vec<(u64, u64)>,
-    /// Identities of every directory ABOVE a protected one: removing any of them
-    /// removes the protected directory with it.
-    #[cfg_attr(not(feature = "mcp"), allow(dead_code))] // only the MCP delete uses holders
-    holders: Vec<(u64, u64)>,
+    /// The protected directories as resolved paths.
+    #[cfg_attr(not(feature = "mcp"), allow(dead_code))] // only the MCP delete uses these
+    canonical: Vec<PathBuf>,
+    /// True if reaching a protected directory leaves the directory that holds it
+    /// (`~/.bun/bin` is a link that points elsewhere): the route is indirect.
+    #[cfg_attr(not(feature = "mcp"), allow(dead_code))]
+    indirect: bool,
 }
 
 impl ProtectedSet {
@@ -320,47 +323,47 @@ impl ProtectedSet {
 
     /// Identities of the given directories (symlinks followed, missing ones skipped).
     pub fn from_dirs(dirs: &[PathBuf]) -> Self {
-        // Each directory is stat'ed ONCE; identities and holders both come from
-        // that snapshot, so they cannot disagree if a directory vanishes meanwhile.
-        // A protected directory that does not exist protects nothing, and holds
-        // nothing up either: its existing parents have no runtime to preserve.
-        let snapshot: Vec<(PathBuf, (u64, u64))> = dirs
-            .iter()
-            .filter_map(|d| identity(d).map(|id| (d.clone(), id)))
-            .collect();
-        Self::from_snapshot(&snapshot)
-    }
-
-    /// The set for directories whose identities were already taken. Does not
-    /// stat the protected directories again.
-    fn from_snapshot(snapshot: &[(PathBuf, (u64, u64))]) -> Self {
-        let identities: Vec<(u64, u64)> = snapshot.iter().map(|(_, id)| *id).collect();
-        // Everything the ROUTE to a protected directory passes through, not just
-        // what is above its final target: with `~/.bun -> A` and `A/bin -> B` the
-        // protected directory is B, but removing A leaves `~/.bun/bin` dangling.
-        // The route is resolved one link at a time (see `route_dirs`), so a link
-        // whose target itself passes through more links is followed too. The
-        // directories above each of those are held; the protected directories
-        // themselves are not "above" anything.
-        let mut holders: Vec<(u64, u64)> = snapshot
-            .iter()
-            .flat_map(|(d, _)| route_dirs(d))
-            .flat_map(|dir| dir.ancestors().filter_map(identity).collect::<Vec<_>>())
-            .collect();
-        holders.retain(|h| !identities.contains(h));
-        Self {
-            identities,
-            holders,
+        let mut set = Self::default();
+        for dir in dirs {
+            // A protected directory that does not exist protects nothing.
+            let (Some(id), Ok(canonical)) = (identity(dir), std::fs::canonicalize(dir)) else {
+                continue;
+            };
+            // Direct: the resolved directory still lies inside its resolved
+            // container (`~/.bun -> storage` keeps `storage/bin` inside `storage`).
+            // Indirect: it does not (`A/bin -> B`), so the route passes through a
+            // directory that is neither above nor inside the protected one.
+            let direct = dir
+                .parent()
+                .and_then(|container| std::fs::canonicalize(container).ok())
+                .is_some_and(|container| canonical.starts_with(container));
+            set.indirect |= !direct;
+            set.identities.push(id);
+            set.canonical.push(canonical);
         }
+        set
     }
 
     /// True if `target` is a directory ABOVE a protected one, so deleting it would
     /// take the protected directory with it (`data/storage` when `~/.bun` is a
     /// symlink to it). Not used by the TUI: there, deleting a whole cache root is a
     /// deliberate, confirmed action.
-    #[cfg_attr(not(feature = "mcp"), allow(dead_code))] // only the MCP delete uses holders
+    #[cfg_attr(not(feature = "mcp"), allow(dead_code))] // only the MCP delete uses this
     pub fn holds(&self, target: &Path) -> bool {
-        !self.holders.is_empty() && identity(target).is_some_and(|id| self.holders.contains(&id))
+        std::fs::canonicalize(target).is_ok_and(|t| {
+            self.canonical
+                .iter()
+                .any(|protected| protected != &t && protected.starts_with(&t))
+        })
+    }
+
+    /// True if a protected directory is reached through a link that leaves the
+    /// directory holding it. Which other directories the route then depends on
+    /// is not worked out: callers that cannot prove a delete safe refuse it
+    /// (the MCP delete does).
+    #[cfg_attr(not(feature = "mcp"), allow(dead_code))] // only the MCP delete uses this
+    pub fn indirect(&self) -> bool {
+        self.indirect
     }
 
     /// True if `target` is a protected directory or lies under one. The
@@ -380,78 +383,6 @@ impl ProtectedSet {
             .filter_map(identity)
             .any(|id| self.identities.contains(&id))
     }
-}
-
-/// The directories a route to `path` passes through, resolved one symlink at a
-/// time: the directory that CONTAINS each link (removing it breaks the route) and
-/// the final directory. Like `realpath`, but recording each hop; `..` and
-/// relative or absolute link targets are handled, and the number of hops is
-/// bounded so a loop terminates. Components that do not exist are kept as is.
-#[cfg(unix)]
-fn route_dirs(path: &Path) -> Vec<PathBuf> {
-    use std::collections::VecDeque;
-    use std::ffi::OsString;
-    use std::path::Component;
-    const MAX_HOPS: usize = 40; // the kernel's own limit on symlinks per lookup
-
-    /// An owned path component, so a link target can be queued after it is read.
-    enum Step {
-        Root(OsString),
-        Cur,
-        Parent,
-        Name(OsString),
-    }
-    fn steps(path: &Path) -> impl Iterator<Item = Step> + '_ {
-        path.components().map(|c| match c {
-            Component::Prefix(_) | Component::RootDir => Step::Root(c.as_os_str().to_owned()),
-            Component::CurDir => Step::Cur,
-            Component::ParentDir => Step::Parent,
-            Component::Normal(n) => Step::Name(n.to_owned()),
-        })
-    }
-
-    let mut dirs = Vec::new();
-    let mut resolved = PathBuf::new();
-    let mut pending: VecDeque<Step> = steps(path).collect();
-    let mut hops = 0;
-    while let Some(step) = pending.pop_front() {
-        match step {
-            Step::Root(root) => resolved = PathBuf::from(root),
-            Step::Cur => {}
-            Step::Parent => {
-                resolved.pop();
-            }
-            Step::Name(name) => {
-                let next = resolved.join(&name);
-                let link = std::fs::symlink_metadata(&next)
-                    .ok()
-                    .filter(|m| m.file_type().is_symlink())
-                    .and_then(|_| std::fs::read_link(&next).ok());
-                let Some(target) = link else {
-                    resolved = next;
-                    continue;
-                };
-                hops += 1;
-                if hops > MAX_HOPS {
-                    break;
-                }
-                dirs.push(resolved.clone());
-                // Continue from the link's target: an absolute one restarts at the
-                // root (its Root step resets `resolved`), a relative one is taken
-                // against the directory holding the link.
-                for step in steps(&target).collect::<Vec<_>>().into_iter().rev() {
-                    pending.push_front(step);
-                }
-            }
-        }
-    }
-    dirs.push(resolved);
-    dirs
-}
-
-#[cfg(not(unix))]
-fn route_dirs(path: &Path) -> Vec<PathBuf> {
-    vec![path.to_path_buf()]
 }
 
 /// (device, inode) of what `path` resolves to; `None` if it does not exist.
@@ -798,112 +729,48 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn holds_covers_the_directories_a_chain_of_symlinks_passes_through() {
-        // `~/.bun -> A` and `A/bin -> B`: the protected directory is B, so A is not
-        // above it, yet removing A (or the link `A/bin`) leaves `~/.bun/bin`
-        // dangling and breaks access to Bun even though the binary survives.
+    fn a_route_that_leaves_its_container_is_indirect() {
         let tmp = tempfile::tempdir().unwrap();
-        let a = tmp.path().join("A");
-        let b = tmp.path().join("B");
+        let root = tmp.path();
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+
+        // Plain real directories: direct.
+        let plain = root.join("plain/.bun/bin");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert!(!ProtectedSet::from_dirs(&[plain]).indirect());
+
+        // `~/.bun -> storage`: `storage/bin` stays inside `storage`, so direct.
+        let storage = root.join("storage");
+        std::fs::create_dir_all(storage.join("bin")).unwrap();
+        std::os::unix::fs::symlink(&storage, home.join(".bun")).unwrap();
+        assert!(!ProtectedSet::from_dirs(&[home.join(".bun/bin")]).indirect());
+
+        // `~/.bun -> A` and `A/bin -> B`: B is not inside A, so the route passes
+        // through a directory that is neither above nor inside the protected one.
+        let (a, b) = (root.join("A"), root.join("B"));
         std::fs::create_dir_all(&a).unwrap();
         std::fs::create_dir_all(&b).unwrap();
-        std::fs::write(b.join("bun"), b"runtime").unwrap();
         std::os::unix::fs::symlink(&b, a.join("bin")).unwrap();
-        let home = tmp.path().join("home");
-        std::fs::create_dir_all(&home).unwrap();
-        std::os::unix::fs::symlink(&a, home.join(".bun")).unwrap();
-        let set = ProtectedSet::from_dirs(&[home.join(".bun/bin")]);
-        assert!(set.contains(&b.join("bun")), "the binary itself");
-        assert!(set.holds(&a), "A holds the link the route passes through");
-        assert!(set.holds(tmp.path()));
-        // Control: an unrelated sibling and the protected dir itself are not holders.
-        let other = tmp.path().join("other");
-        std::fs::create_dir_all(&other).unwrap();
-        assert!(!set.holds(&other));
-        assert!(!set.holds(&b), "the protected dir is contained, not held");
-    }
+        let home2 = root.join("home2");
+        std::fs::create_dir_all(&home2).unwrap();
+        std::os::unix::fs::symlink(&a, home2.join(".bun")).unwrap();
+        assert!(ProtectedSet::from_dirs(&[home2.join(".bun/bin")]).indirect());
 
-    #[cfg(unix)]
-    #[test]
-    fn holds_follows_a_route_one_link_at_a_time() {
-        // `~/.bun -> A`, `A/bin -> ../C/link2`, `C/link2 -> B`. C holds a link the
-        // route passes through, yet it is neither a lexical ancestor of the spelled
-        // path nor above the final target B, so resolving the spelled prefixes (or
-        // only the final path) never meets it. Removing C breaks `~/.bun/bin`.
-        let tmp = tempfile::tempdir().unwrap();
-        let a = tmp.path().join("A");
-        let b = tmp.path().join("B");
-        let c = tmp.path().join("C");
-        for d in [&a, &b, &c] {
-            std::fs::create_dir_all(d).unwrap();
-        }
-        std::fs::write(b.join("bun"), b"runtime").unwrap();
+        // A longer chain (`A2/bin -> ../C/link2`, `C/link2 -> B`) is indirect too.
+        let (a2, c) = (root.join("A2"), root.join("C"));
+        std::fs::create_dir_all(&a2).unwrap();
+        std::fs::create_dir_all(&c).unwrap();
         std::os::unix::fs::symlink(&b, c.join("link2")).unwrap();
-        std::os::unix::fs::symlink("../C/link2", a.join("bin")).unwrap();
-        let home = tmp.path().join("home");
-        std::fs::create_dir_all(&home).unwrap();
-        std::os::unix::fs::symlink(&a, home.join(".bun")).unwrap();
-        let set = ProtectedSet::from_dirs(&[home.join(".bun/bin")]);
-        assert!(set.contains(&b.join("bun")), "route resolves to B");
-        assert!(set.holds(&a), "A holds the first link");
-        assert!(
-            set.holds(&c),
-            "C holds the second link, reached via a link target"
-        );
-        // Controls: an unrelated sibling is not a holder; B is contained, not held.
-        let other = tmp.path().join("other");
-        std::fs::create_dir_all(&other).unwrap();
-        assert!(!set.holds(&other));
-        assert!(!set.holds(&b));
-    }
+        std::os::unix::fs::symlink("../C/link2", a2.join("bin")).unwrap();
+        let home3 = root.join("home3");
+        std::fs::create_dir_all(&home3).unwrap();
+        std::os::unix::fs::symlink(&a2, home3.join(".bun")).unwrap();
+        assert!(ProtectedSet::from_dirs(&[home3.join(".bun/bin")]).indirect());
 
-    #[cfg(unix)]
-    #[test]
-    fn a_symlink_loop_on_the_route_terminates_and_protects_nothing_wrongly() {
-        // `x -> y` and `y -> x`: the route never resolves. It must neither hang nor
-        // panic, and must not make unrelated directories "held".
-        let tmp = tempfile::tempdir().unwrap();
-        let (x, y) = (tmp.path().join("x"), tmp.path().join("y"));
-        std::os::unix::fs::symlink(&y, &x).unwrap();
-        std::os::unix::fs::symlink(&x, &y).unwrap();
-        let other = tmp.path().join("other");
-        std::fs::create_dir_all(&other).unwrap();
-        let route = x.join("bin");
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let set = ProtectedSet::from_dirs(&[route]);
-            let _ = tx.send(set.holds(&other));
-        });
-        let held = rx
-            .recv_timeout(std::time::Duration::from_secs(10))
-            .expect("route resolution must terminate on a symlink loop");
-        assert!(!held, "an unrelated directory is not held");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn route_dirs_follows_absolute_and_relative_targets_and_dotdot() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().canonicalize().unwrap();
-        let (a, b, c, d) = (
-            root.join("a"),
-            root.join("b"),
-            root.join("c"),
-            root.join("d"),
-        );
-        for dir in [&a, &b, &c, &d] {
-            std::fs::create_dir_all(dir).unwrap();
-        }
-        // a/rel -> ../b (relative, with ..), b/abs -> <c> (absolute), c/last -> ../d
-        std::os::unix::fs::symlink("../b", a.join("rel")).unwrap();
-        std::os::unix::fs::symlink(&c, b.join("abs")).unwrap();
-        std::os::unix::fs::symlink("../d", c.join("last")).unwrap();
-        let dirs = route_dirs(&a.join("rel/abs/last"));
-        // The directories holding each link, in order, then the final directory.
-        assert_eq!(dirs, [a, b, c, d]);
-        // A path with no links resolves to itself; a missing one is kept as is.
-        assert_eq!(route_dirs(&root.join("a")), [root.join("a")]);
-        assert_eq!(route_dirs(&root.join("no/such")), [root.join("no/such")]);
+        // Nothing to protect, nothing indirect.
+        assert!(!ProtectedSet::from_dirs(&[root.join("missing/.bun/bin")]).indirect());
+        assert!(!ProtectedSet::default().indirect());
     }
 
     #[cfg(unix)]
@@ -955,27 +822,6 @@ mod tests {
         assert!(!set.contains(tmp.path()));
         assert!(!set.contains(&tmp.path().join("anything")));
         assert!(!ProtectedSet::default().contains(tmp.path()));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn identities_and_holders_come_from_one_snapshot() {
-        // The directory is stat'ed once. If it is gone by the time the holders are
-        // built, the set must still be consistent with the identity that was taken:
-        // protected AND holding up its parents, not an identity with no holders
-        // (which would leave a Caution ancestor deletable).
-        let tmp = tempfile::tempdir().unwrap();
-        let storage = tmp.path().join("storage");
-        let bin = storage.join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        let id = identity(&bin).unwrap();
-        std::fs::remove_dir(&bin).unwrap(); // vanishes after the snapshot was taken
-        let set = ProtectedSet::from_snapshot(&[(bin.clone(), id)]);
-        assert!(set.holds(&storage), "its parent is held by the snapshot");
-        assert!(set.holds(tmp.path()));
-        // The stale identity still protects, and the directory is not its own holder.
-        assert_eq!(set.identities, [id]);
-        assert!(!set.holders.contains(&id));
     }
 
     #[cfg(unix)]
