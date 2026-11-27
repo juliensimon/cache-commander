@@ -320,7 +320,21 @@ impl ProtectedSet {
 
     /// Identities of the given directories (symlinks followed, missing ones skipped).
     pub fn from_dirs(dirs: &[PathBuf]) -> Self {
-        let identities: Vec<(u64, u64)> = dirs.iter().filter_map(|d| identity(d)).collect();
+        // Each directory is stat'ed ONCE; identities and holders both come from
+        // that snapshot, so they cannot disagree if a directory vanishes meanwhile.
+        // A protected directory that does not exist protects nothing, and holds
+        // nothing up either: its existing parents have no runtime to preserve.
+        let snapshot: Vec<(PathBuf, (u64, u64))> = dirs
+            .iter()
+            .filter_map(|d| identity(d).map(|id| (d.clone(), id)))
+            .collect();
+        Self::from_snapshot(&snapshot)
+    }
+
+    /// The set for directories whose identities were already taken. Does not
+    /// stat the protected directories again.
+    fn from_snapshot(snapshot: &[(PathBuf, (u64, u64))]) -> Self {
+        let identities: Vec<(u64, u64)> = snapshot.iter().map(|(_, id)| *id).collect();
         // Everything the ROUTE to a protected directory passes through, not just
         // what is above its final target: with `~/.bun -> A` and `A/bin -> B` the
         // protected directory is B, but removing A leaves `~/.bun/bin` dangling.
@@ -328,12 +342,9 @@ impl ProtectedSet {
         // whose target itself passes through more links is followed too. The
         // directories above each of those are held; the protected directories
         // themselves are not "above" anything.
-        // A protected directory that does not exist protects nothing, so it holds
-        // nothing up either: its existing parents have no runtime to preserve.
-        let mut holders: Vec<(u64, u64)> = dirs
+        let mut holders: Vec<(u64, u64)> = snapshot
             .iter()
-            .filter(|d| identity(d).is_some())
-            .flat_map(|d| route_dirs(d))
+            .flat_map(|(d, _)| route_dirs(d))
             .flat_map(|dir| dir.ancestors().filter_map(identity).collect::<Vec<_>>())
             .collect();
         holders.retain(|h| !identities.contains(h));
@@ -944,6 +955,27 @@ mod tests {
         assert!(!set.contains(tmp.path()));
         assert!(!set.contains(&tmp.path().join("anything")));
         assert!(!ProtectedSet::default().contains(tmp.path()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn identities_and_holders_come_from_one_snapshot() {
+        // The directory is stat'ed once. If it is gone by the time the holders are
+        // built, the set must still be consistent with the identity that was taken:
+        // protected AND holding up its parents, not an identity with no holders
+        // (which would leave a Caution ancestor deletable).
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = tmp.path().join("storage");
+        let bin = storage.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let id = identity(&bin).unwrap();
+        std::fs::remove_dir(&bin).unwrap(); // vanishes after the snapshot was taken
+        let set = ProtectedSet::from_snapshot(&[(bin.clone(), id)]);
+        assert!(set.holds(&storage), "its parent is held by the snapshot");
+        assert!(set.holds(tmp.path()));
+        // The stale identity still protects, and the directory is not its own holder.
+        assert_eq!(set.identities, [id]);
+        assert!(!set.holders.contains(&id));
     }
 
     #[cfg(unix)]
