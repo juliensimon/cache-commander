@@ -61,7 +61,12 @@ pub fn render_delete_confirm(
     let mut caution_count = 0usize;
     let mut unsafe_count = 0usize;
     for item in items {
-        match crate::providers::safety_resolved(item.kind, &item.path, protected) {
+        match crate::providers::safety_for_node(
+            item.kind,
+            &item.path,
+            protected,
+            item.parent.is_none(),
+        ) {
             crate::providers::SafetyLevel::Safe => {}
             crate::providers::SafetyLevel::Caution => caution_count += 1,
             crate::providers::SafetyLevel::Unsafe => unsafe_count += 1,
@@ -247,6 +252,27 @@ mod tests {
         // Control: the same node with nothing protected is not flagged Unsafe.
         let plain = render_dialog(|f| render_delete_confirm(f, &[&node], &Default::default()));
         assert!(!plain.contains("will be refused on confirm"), "{plain}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_confirm_warns_about_a_non_root_dir_that_holds_a_protected_dir() {
+        // The directory CONTAINS the runtime. Deleting it is refused for a child,
+        // so the dialog must say so; a root node is deliberately deletable and is
+        // not flagged.
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = tmp.path().join("storage");
+        std::fs::create_dir_all(storage.join("bin")).unwrap();
+        let protected = crate::providers::ProtectedSet::from_dirs(&[storage.join("bin")]);
+        let mut child = make_node("storage", CacheKind::Unknown, 10);
+        child.path = storage.clone();
+        child.parent = Some(0); // a child; a node with no parent is a root
+        let out = render_dialog(|f| render_delete_confirm(f, &[&child], &protected));
+        assert!(out.contains("will be refused on confirm"), "{out}");
+        let mut root = child.clone();
+        root.parent = None;
+        let out = render_dialog(|f| render_delete_confirm(f, &[&root], &protected));
+        assert!(!out.contains("will be refused on confirm"), "{out}");
     }
 
     #[test]

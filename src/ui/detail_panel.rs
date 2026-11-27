@@ -114,7 +114,8 @@ pub fn render(
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled("SAFETY", theme::DIM)));
 
-    let safety = providers::safety_resolved(node.kind, &node.path, protected);
+    let safety =
+        providers::safety_for_node(node.kind, &node.path, protected, node.parent.is_none());
     let safety_style = match safety {
         SafetyLevel::Safe => theme::SAFE,
         SafetyLevel::Caution => theme::CAUTION,

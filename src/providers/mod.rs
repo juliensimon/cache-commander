@@ -306,12 +306,10 @@ pub fn package_id(kind: CacheKind, path: &Path) -> Option<PackageId> {
 pub struct ProtectedSet {
     identities: Vec<(u64, u64)>,
     /// The protected directories as resolved paths.
-    #[cfg_attr(not(feature = "mcp"), allow(dead_code))] // only the MCP delete uses these
     finals: Vec<PathBuf>,
     /// The resolved form of every directory on the path AS SPELLED to a protected
     /// directory (`~`, `~/.bun`, `~/.bun/bin` each resolved): removing any of them
     /// removes the route.
-    #[cfg_attr(not(feature = "mcp"), allow(dead_code))]
     routes: Vec<PathBuf>,
     /// True if some link on the spelled path is not a clean single hop (its target
     /// is itself a link, or passes through links): the route then depends on
@@ -350,7 +348,6 @@ impl ProtectedSet {
     /// take the protected directory with it (`data/storage` when `~/.bun` is a
     /// symlink to it). Not used by the TUI: there, deleting a whole cache root is a
     /// deliberate, confirmed action.
-    #[cfg_attr(not(feature = "mcp"), allow(dead_code))] // only the MCP delete uses this
     pub fn holds(&self, target: &Path) -> bool {
         std::fs::canonicalize(target).is_ok_and(|t| {
             !self.finals.contains(&t) && self.routes.iter().any(|route| route.starts_with(&t))
@@ -388,7 +385,7 @@ impl ProtectedSet {
 /// True if every symlink on `path` (as spelled, from the root down) is a clean
 /// single hop: its target, walked component by component from the resolved
 /// directory holding the link, passes through NO symlink and ends exactly where
-/// the link resolves. A target that is itself a link, or passes through one, is
+/// the link resolves (the same file, not the same spelling). A target that is itself a link, or passes through one, is
 /// not clean. Ordinary system links (`/var -> private/var`) are clean single hops,
 /// so they do not count.
 ///
@@ -435,7 +432,11 @@ fn clean_hops(path: &Path) -> bool {
         ) else {
             return false; // cannot tell: not clean
         };
-        walk_without_links(&base, &target).is_some_and(|reached| reached == resolved)
+        // Compared by file identity: on a case-insensitive filesystem the target can
+        // spell the same directory with other case, which differs as text.
+        walk_without_links(&base, &target).is_some_and(|reached| {
+            identity(&reached).is_some() && identity(&reached) == identity(&resolved)
+        })
     })
 }
 
@@ -458,7 +459,9 @@ fn identity(_path: &Path) -> Option<(u64, u64)> {
     None
 }
 
-/// Where each provider keeps what must not be deleted (the Unsafe set in `safety`).
+/// Where a provider keeps what must not be deleted. Today that is only Bun's
+/// runtime, because it is the only Unsafe rule in `safety`; a provider that adds
+/// one must list its directory here as well, or it is protected by name only.
 pub fn protected_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     // Bun: the runtime binary lives in `$BUN_INSTALL/bin` (default `~/.bun/bin`).
@@ -481,15 +484,30 @@ pub fn safety_resolved(kind: CacheKind, path: &Path, protected: &ProtectedSet) -
     }
 }
 
-/// `safety_resolved`, and also Unsafe when the target HOLDS a protected directory.
-/// For callers that must not remove a directory containing a runtime, such as the
-/// agent-driven MCP delete.
-#[cfg_attr(not(feature = "mcp"), allow(dead_code))] // only the MCP delete uses holders
+/// `safety_resolved`, and also Unsafe when the target HOLDS a protected directory,
+/// that is, removing it would remove the protected directory with it.
 pub fn safety_resolved_deep(kind: CacheKind, path: &Path, protected: &ProtectedSet) -> SafetyLevel {
     if protected.holds(path) {
         SafetyLevel::Unsafe
     } else {
         safety_resolved(kind, path, protected)
+    }
+}
+
+/// The safety of a tree node for a delete. A directory that HOLDS a protected one is
+/// refused unless the node is a configured tree root: wiping a whole cache root is a
+/// deliberate, confirmed action, while a child that happens to contain the runtime
+/// (`data/storage` when `~/.bun` links to it) is not.
+pub fn safety_for_node(
+    kind: CacheKind,
+    path: &Path,
+    protected: &ProtectedSet,
+    is_root: bool,
+) -> SafetyLevel {
+    if is_root {
+        safety_resolved(kind, path, protected)
+    } else {
+        safety_resolved_deep(kind, path, protected)
     }
 }
 
@@ -869,6 +887,33 @@ mod tests {
         let set = ProtectedSet::from_dirs(&[home.join(".bun/bin")]);
         assert!(set.contains(&a.join("bin")), "it does resolve to A/bin");
         assert!(set.indirect(), "a link whose target is itself a link");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_target_differing_only_in_case_is_still_a_clean_hop() {
+        // On a case-insensitive filesystem (default APFS) `real` and `Real` are the
+        // same directory, but the path the target spells and the path the link
+        // resolves to differ as text. File identity must decide, not the spelling.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = &tmp.path().canonicalize().unwrap();
+        let a = root.join("A");
+        std::fs::create_dir_all(a.join("Real")).unwrap();
+        if !a.join("real").exists() {
+            eprintln!(
+                "skipped: this filesystem is case-sensitive, so the case-only spelling cannot resolve"
+            );
+            return;
+        }
+        std::os::unix::fs::symlink("real", a.join("bin")).unwrap();
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::os::unix::fs::symlink(&a, home.join(".bun")).unwrap();
+        let set = ProtectedSet::from_dirs(&[home.join(".bun/bin")]);
+        assert!(
+            !set.indirect(),
+            "the same directory, spelled with other case"
+        );
     }
 
     #[cfg(unix)]

@@ -648,7 +648,14 @@ impl App {
             // H3: refuse Unsafe items outright — these typically contain
             // runtime binaries or state that deletion would irreversibly break.
             let kind = crate::providers::detect(path);
-            if crate::providers::safety_resolved(kind, path, &self.protected)
+            // A root is a node with no parent. (`is_root` is set from the depth at
+            // construction and not cleared when a child is inserted, so it is not used.)
+            let is_root = self
+                .tree
+                .nodes
+                .iter()
+                .any(|n| n.parent.is_none() && n.path == *path);
+            if crate::providers::safety_for_node(kind, path, &self.protected, is_root)
                 == crate::providers::SafetyLevel::Unsafe
             {
                 refused_unsafe += 1;
@@ -675,10 +682,11 @@ impl App {
             let unsafe_target = std::iter::once(target)
                 .chain(logical.iter().map(|p| p.as_path()))
                 .any(|candidate| {
-                    crate::providers::safety_resolved(
+                    crate::providers::safety_for_node(
                         crate::providers::detect(candidate),
                         candidate,
                         &self.protected,
+                        is_root,
                     ) == crate::providers::SafetyLevel::Unsafe
                 });
             if unsafe_target {
@@ -2313,6 +2321,66 @@ mod tests {
         assert!(
             tools.join("pkg/f").exists(),
             "data under the protected directory must survive"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn perform_delete_refuses_a_non_root_dir_that_holds_the_runtime_but_allows_a_root() {
+        // `~/.bun -> data/storage`, with `data` the configured root: `data/storage`
+        // is an ordinary child that contains the runtime, and deleting it takes Bun
+        // with it. A tree ROOT node is different: wiping a whole configured cache
+        // root is a deliberate, confirmed action, and stays allowed.
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().canonicalize().unwrap();
+        let data = base.join("data");
+        let storage = data.join("storage");
+        std::fs::create_dir_all(storage.join("bin")).unwrap();
+        std::fs::write(storage.join("bin/bun"), b"runtime").unwrap();
+        let home = base.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::os::unix::fs::symlink(&storage, home.join(".bun")).unwrap();
+
+        // Child of a root: refused, and surfaced as Unsafe.
+        let (mut app, _tx, _rx) = build_app(bare_config());
+        app.protected = crate::providers::ProtectedSet::from_dirs(&[home.join(".bun/bin")]);
+        app.tree.set_roots(vec![expandable_node(
+            "data",
+            data.clone(),
+            CacheKind::Unknown,
+        )]);
+        app.tree.insert_children(
+            0,
+            vec![mk_node_with_path(
+                "storage",
+                storage.clone(),
+                CacheKind::Unknown,
+            )],
+        );
+        assert!(
+            app.tree
+                .nodes
+                .iter()
+                .any(|n| n.path == storage && n.parent.is_some())
+        );
+        app.delete_candidates = vec![storage.clone()];
+        app.perform_delete();
+        assert!(storage.join("bin/bun").exists(), "the runtime must survive");
+        assert!(app.status_msg.as_deref().unwrap_or("").contains("Unsafe"));
+
+        // The same directory as a ROOT node: a deliberate whole-root delete.
+        let (mut app, _tx, _rx) = build_app(bare_config());
+        app.protected = crate::providers::ProtectedSet::from_dirs(&[home.join(".bun/bin")]);
+        app.tree.set_roots(vec![expandable_node(
+            "storage",
+            storage.clone(),
+            CacheKind::Unknown,
+        )]);
+        app.delete_candidates = vec![storage.clone()];
+        app.perform_delete();
+        assert!(
+            !storage.exists(),
+            "a configured root may be deleted deliberately"
         );
     }
 

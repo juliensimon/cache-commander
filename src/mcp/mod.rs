@@ -150,22 +150,23 @@ fn resolve_deletable(
     deletable: &HashSet<PathBuf>,
     protected: &providers::ProtectedSet,
 ) -> Result<PathBuf, &'static str> {
-    // Fail closed: when the route to a protected directory is indirect, which
-    // other directories it depends on is not worked out, so nothing is deletable.
-    if protected.indirect() {
-        return Err(INDIRECT_PROTECTED_ROUTE);
-    }
     let normalized: PathBuf = path.components().collect();
     if std::fs::symlink_metadata(&normalized).is_ok_and(|m| m.file_type().is_symlink()) {
         return Err(NOT_A_DISCOVERED_ENTRY);
     }
     let canonical =
         canonical_under_roots(path, roots).ok_or("Path is not inside any configured cache root")?;
-    if deletable.contains(&canonical) {
-        Ok(canonical)
-    } else {
-        Err(NOT_A_DISCOVERED_ENTRY)
+    if !deletable.contains(&canonical) {
+        return Err(NOT_A_DISCOVERED_ENTRY);
     }
+    // Fail closed, but only for an entry that would otherwise be deletable (so an
+    // unrelated refusal keeps its own, more specific reason): when the route to a
+    // protected directory is indirect, which other directories it depends on is not
+    // worked out, so nothing is deletable.
+    if protected.indirect() {
+        return Err(INDIRECT_PROTECTED_ROUTE);
+    }
+    Ok(canonical)
 }
 
 impl CcmdMcp {
@@ -478,8 +479,11 @@ impl CcmdMcp {
             return Ok("Path is not inside any configured cache root.".to_string());
         }
 
-        let protected = self.protected();
+        let protected_dirs = self.protected_dirs.clone();
         let result = tokio::task::spawn_blocking(move || {
+            // Built here, on the blocking thread and right before use: it stats the
+            // filesystem, and a snapshot taken earlier could be stale by now.
+            let protected = providers::ProtectedSet::from_dirs(&protected_dirs);
             let kind = providers::detect(&path);
             let safety = providers::safety_resolved_deep(kind, &path, &protected);
             let size = walker::dir_size(&path);
@@ -681,10 +685,12 @@ impl CcmdMcp {
         #[allow(clippy::unnecessary_filter_map)]
         let paths: Vec<PathBuf> = input.0.paths.iter().map(PathBuf::from).collect();
         let roots = self.roots.clone();
-        let protected = self.protected();
+        let protected_dirs = self.protected_dirs.clone();
 
         #[allow(clippy::unnecessary_filter_map)]
         let result = tokio::task::spawn_blocking(move || {
+            // Built on the blocking thread, right before use (see get_package_details).
+            let protected = providers::ProtectedSet::from_dirs(&protected_dirs);
             let deletable = deletable_paths(&roots);
             let mut total_deletable: u64 = 0;
             let mut deletable_count = 0usize;
@@ -795,9 +801,11 @@ impl CcmdMcp {
         let paths: Vec<PathBuf> = input.paths.iter().map(PathBuf::from).collect();
         let confirm_caution = input.confirm_caution;
         let roots = self.roots.clone();
-        let protected = self.protected();
+        let protected_dirs = self.protected_dirs.clone();
 
         let result = tokio::task::spawn_blocking(move || {
+            // Built on the blocking thread, right before use (see get_package_details).
+            let protected = providers::ProtectedSet::from_dirs(&protected_dirs);
             let deletable = deletable_paths(&roots);
             let mut deleted = Vec::new();
             let mut skipped = Vec::new();
@@ -1167,6 +1175,41 @@ mod tests {
             !other.exists(),
             "control: no protected route, deleted: {result}"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_indirect_route_does_not_mask_the_real_reason_a_path_is_refused() {
+        // The indirect-route refusal applies to otherwise deletable entries. A path
+        // outside every configured root keeps its own, more specific reason, so an
+        // unrelated cache is not told that Bun is to blame.
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let data = base.join("data");
+        let (a, c) = (data.join("A"), data.join("C"));
+        let b = base.join("outside/B");
+        for d in [&a, &c, &b] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::os::unix::fs::symlink(&b, c.join("link2")).unwrap();
+        std::os::unix::fs::symlink("../C/link2", a.join("bin")).unwrap();
+        let home = base.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::os::unix::fs::symlink(&a, home.join(".bun")).unwrap();
+        let mut config = Config::default_for_test();
+        config.roots = vec![data.clone()];
+        let mut server = CcmdMcp::new(&config);
+        server.protected_dirs = vec![home.join(".bun/bin")];
+        let elsewhere = base.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+
+        let result = call_delete(&server, &[&elsewhere], true).await;
+        let reasons = result["skipped"].to_string();
+        assert!(
+            reasons.contains("not inside any configured cache root"),
+            "its own reason, not the Bun one: {result}"
+        );
+        assert!(!reasons.contains("symlink chain"), "{result}");
     }
 
     #[cfg(unix)]
