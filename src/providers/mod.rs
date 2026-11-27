@@ -386,26 +386,42 @@ impl ProtectedSet {
 }
 
 /// True if every symlink on `path` (as spelled, from the root down) is a clean
-/// single hop: its target, taken against the resolved directory holding the link,
-/// is exactly what the link resolves to. A target that is itself a link, or passes
-/// through links, resolves somewhere else and is not clean. Ordinary system links
-/// (`/var -> private/var`) are clean single hops, so they do not count.
+/// single hop: its target, walked component by component from the resolved
+/// directory holding the link, passes through NO symlink and ends exactly where
+/// the link resolves. A target that is itself a link, or passes through one, is
+/// not clean. Ordinary system links (`/var -> private/var`) are clean single hops,
+/// so they do not count.
+///
+/// The walk is component by component on purpose: `..` is only resolved textually
+/// once every component before it is known to be a real directory. Resolving the
+/// whole target textually first agrees with the filesystem when a link inside the
+/// target points back at a sibling (`other/sub/../x` with `sub -> deeper`), and
+/// would call that clean.
 #[cfg(unix)]
 fn clean_hops(path: &Path) -> bool {
     use std::path::Component;
-    /// Resolve `.` and `..` lexically; valid because the base is already resolved.
-    fn normalize(path: &Path) -> PathBuf {
-        let mut out = PathBuf::new();
-        for c in path.components() {
-            match c {
+    /// Where `target` leads from the resolved directory `base`, or `None` if any
+    /// component on the way is a symlink.
+    fn walk_without_links(base: &Path, target: &Path) -> Option<PathBuf> {
+        let mut cur = base.to_path_buf();
+        for component in target.components() {
+            match component {
+                Component::RootDir | Component::Prefix(_) => {
+                    cur = PathBuf::from(component.as_os_str())
+                }
                 Component::CurDir => {}
                 Component::ParentDir => {
-                    out.pop();
+                    cur.pop();
                 }
-                other => out.push(other.as_os_str()),
+                Component::Normal(name) => {
+                    cur.push(name);
+                    if std::fs::symlink_metadata(&cur).is_ok_and(|m| m.file_type().is_symlink()) {
+                        return None;
+                    }
+                }
             }
         }
-        out
+        Some(cur)
     }
     path.ancestors().all(|prefix| {
         let is_link = std::fs::symlink_metadata(prefix).is_ok_and(|m| m.file_type().is_symlink());
@@ -419,12 +435,7 @@ fn clean_hops(path: &Path) -> bool {
         ) else {
             return false; // cannot tell: not clean
         };
-        let expected = if target.is_absolute() {
-            normalize(&target)
-        } else {
-            normalize(&base.join(target))
-        };
-        expected == resolved
+        walk_without_links(&base, &target).is_some_and(|reached| reached == resolved)
     })
 }
 
@@ -858,6 +869,42 @@ mod tests {
         let set = ProtectedSet::from_dirs(&[home.join(".bun/bin")]);
         assert!(set.contains(&a.join("bin")), "it does resolve to A/bin");
         assert!(set.indirect(), "a link whose target is itself a link");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_target_that_passes_through_a_link_before_dotdot_is_not_clean() {
+        // `A/other/sub -> deeper` and `A/bin -> other/sub/../../y`. Resolved
+        // textually the target is `A/y`; really `sub` resolves to `other/deeper`,
+        // the first `..` lands in `other`, the second in `A`, and the result is
+        // ALSO `A/y`. The two agree, so a text-only check calls the hop clean, but
+        // the route depends on the link `sub` inside `A/other`, which is neither
+        // above the final directory nor on the spelled path.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = &tmp.path().canonicalize().unwrap();
+        let a = root.join("A");
+        let other = a.join("other");
+        std::fs::create_dir_all(other.join("deeper")).unwrap();
+        std::fs::create_dir_all(a.join("y")).unwrap();
+        std::os::unix::fs::symlink("deeper", other.join("sub")).unwrap();
+        std::os::unix::fs::symlink("other/sub/../../y", a.join("bin")).unwrap();
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::os::unix::fs::symlink(&a, home.join(".bun")).unwrap();
+        let set = ProtectedSet::from_dirs(&[home.join(".bun/bin")]);
+        assert!(set.contains(&a.join("y")), "it does resolve to A/y");
+        assert!(!set.holds(&other), "`other` is not otherwise covered");
+        assert!(set.indirect(), "the target passes through the link `sub`");
+
+        // Control: the same shape with no link in the target is a clean hop.
+        let b = root.join("B");
+        std::fs::create_dir_all(b.join("other/deeper")).unwrap();
+        std::fs::create_dir_all(b.join("y")).unwrap();
+        std::os::unix::fs::symlink("other/deeper/../../y", b.join("bin")).unwrap();
+        let home2 = root.join("home2");
+        std::fs::create_dir_all(&home2).unwrap();
+        std::os::unix::fs::symlink(&b, home2.join(".bun")).unwrap();
+        assert!(!ProtectedSet::from_dirs(&[home2.join(".bun/bin")]).indirect());
     }
 
     #[cfg(unix)]
