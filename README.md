@@ -245,6 +245,20 @@ When you press `V` (or pass `--vulncheck`):
 4. Filters out vulnerabilities already fixed by the installed version
 5. Displays results in the detail panel with fix version, upgrade command, and advisory link
 
+### What Leaves Your Machine
+
+Scanning and browsing your caches is local. Apart from the update check (on by default, last row), nothing about your packages is sent until you ask for it. These are the only network requests `ccmd` makes, and what each one contains:
+
+| When | Request | What it contains |
+|---|---|---|
+| `V` / `--vulncheck` / `[vulncheck] enabled = true` | `POST api.osv.dev/v1/querybatch`, then `GET api.osv.dev/v1/vulns/<id>` | For **every package found in your caches**: its **name, version and ecosystem**. The advisory fetches carry only the advisory id. |
+| `O` / `--versioncheck` / `[versioncheck] enabled = true` | One `GET` per package to its public registry: `pypi.org`, `crates.io`, `registry.npmjs.org`, `repo1.maven.org`, `proxy.golang.org` | The package **name** only (Maven `group/artifact`, Go module path), no version. |
+| On startup (**on by default**) | `GET api.github.com/repos/juliensimon/cache-commander/releases/latest` | No package data. Disable with `[updater] enabled = false` or `CCMD_NO_UPDATE_CHECK=1`. |
+
+The MCP tools `scan_vulnerabilities` and `check_outdated` send the same requests when an agent calls them.
+
+**Private or internal packages are not excluded.** If your caches contain packages whose names you do not want to disclose to OSV or a public registry (an internal npm scope, a company Maven group, a private Go module), those names are sent as well, and a `404` from the registry does not undo that. There is no allow/deny list yet (tracked in [#95](https://github.com/juliensimon/cache-commander/issues/95)); until there is, do not run the vulnerability or version scans on such caches.
+
 ### npm Supply Chain Detection
 
 The npx cache (`~/.npm/_npx/`) contains full `node_modules` trees. `ccmd` scans every transitive dependency for:
