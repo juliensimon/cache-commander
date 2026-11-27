@@ -335,8 +335,14 @@ fn read_index_db_with(db: &Path, limits: IndexLimits) -> Result<IndexDb, &'stati
     };
     let open_immutable = || {
         // `immutable=1` needs a URI; percent-encode what a path can hold.
+        // The path's own bytes: `to_string_lossy` would open a different file
+        // when a component is not UTF-8.
+        #[cfg(unix)]
+        let path_bytes = std::os::unix::ffi::OsStrExt::as_bytes(db.as_os_str()).to_vec();
+        #[cfg(not(unix))]
+        let path_bytes = db.to_string_lossy().into_owned().into_bytes();
         let mut uri = String::from("file:");
-        for b in db.to_string_lossy().bytes() {
+        for b in path_bytes {
             match b {
                 b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => {
                     uri.push(b as char)
@@ -348,9 +354,7 @@ fn read_index_db_with(db: &Path, limits: IndexLimits) -> Result<IndexDb, &'stati
         Connection::open_with_flags(uri, flags | OpenFlags::SQLITE_OPEN_URI).and_then(probe)
     };
 
-    let mut wal = db.as_os_str().to_os_string();
-    wal.push("-wal");
-    let wal_len = std::fs::metadata(std::path::PathBuf::from(wal)).map_or(0, |m| m.len());
+    let wal_len = sidecar_len(db);
 
     let (mut conn, immutable) = if wal_len == 0 {
         (open_immutable(), true)
@@ -392,7 +396,7 @@ fn read_index_db_with(db: &Path, limits: IndexLimits) -> Result<IndexDb, &'stati
         // With an unread log the table may simply be in it, which is not the
         // same finding as a database that lacks one.
         return Err(if wal_unread {
-            "pnpm index.db has write-ahead-log entries that could not be read"
+            "pnpm index.db has write-ahead-log or journal entries that could not be read"
         } else {
             "pnpm index.db has no package_index table"
         });
@@ -430,6 +434,37 @@ fn read_index_db_with(db: &Path, limits: IndexLimits) -> Result<IndexDb, &'stati
         }
     }
     Ok(out)
+}
+
+/// The larger of the write-ahead log and the rollback journal beside `db`, 0
+/// when neither exists. The immutable open ignores both, so either having
+/// content means the main file alone may not be the whole database.
+fn sidecar_len(db: &Path) -> u64 {
+    let len = |suffix: &str| {
+        let mut name = db.as_os_str().to_os_string();
+        name.push(suffix);
+        std::fs::metadata(std::path::PathBuf::from(name)).map_or(0, |m| m.len())
+    };
+    len("-wal").max(len("-journal"))
+}
+
+/// Whether `path` is the `index.db` of a pnpm store, by layout rather than by
+/// where the store lives (`pnpm store path` can be anywhere): a file called
+/// `index.db` in a `v<digits>` directory that has a `files/` directory beside
+/// it, as `store/v11/{files,index.db,projects}` does.
+pub fn is_store_index_db(path: &Path) -> bool {
+    if path.file_name().is_none_or(|n| n != "index.db") {
+        return false;
+    }
+    let Some(dir) = path.parent() else {
+        return false;
+    };
+    let versioned = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.strip_prefix('v'))
+        .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()));
+    versioned && dir.join("files").is_dir()
 }
 
 /// `<integrity>\t<name>@<version>` to a package, or `None`.
@@ -689,7 +724,7 @@ mod tests {
         std::fs::set_permissions(snap.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(
             result.unwrap_err(),
-            "pnpm index.db has write-ahead-log entries that could not be read"
+            "pnpm index.db has write-ahead-log or journal entries that could not be read"
         );
     }
 
@@ -783,6 +818,49 @@ mod tests {
         let found = read_index_db(&db).unwrap();
         assert!(found.packages.is_empty());
         assert_eq!(found.unusable_keys, 1);
+    }
+
+    #[test]
+    fn a_sidecar_of_either_kind_counts_as_unread_content() {
+        // A write-ahead log or a rollback journal, whichever is larger: the
+        // immutable open ignores both.
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("index.db");
+        std::fs::write(&db, b"").unwrap();
+        assert_eq!(sidecar_len(&db), 0);
+        std::fs::write(tmp.path().join("index.db-journal"), b"12345").unwrap();
+        assert_eq!(sidecar_len(&db), 5);
+        std::fs::write(tmp.path().join("index.db-wal"), b"1234567").unwrap();
+        assert_eq!(sidecar_len(&db), 7);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_store_whose_path_is_not_utf8_is_read() {
+        // `to_string_lossy` would open a different path. (Linux only: macOS
+        // filesystems refuse to create such a name.)
+        use std::os::unix::ffi::OsStrExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp
+            .path()
+            .join(std::ffi::OsStr::from_bytes(b"store-\xff\xfe"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("index.db");
+        std::fs::write(&db, REAL_INDEX_DB).unwrap();
+        assert_eq!(read_index_db(&db).unwrap().packages.len(), 2);
+    }
+
+    #[test]
+    fn is_store_index_db_accepts_only_the_database_itself() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v11 = tmp.path().join("pkg-cache/v11");
+        std::fs::create_dir_all(v11.join("files")).unwrap();
+        std::fs::write(v11.join("index.db"), b"").unwrap();
+        assert!(is_store_index_db(&v11.join("index.db")));
+        // Its neighbours are not the database, whatever they sit next to.
+        assert!(!is_store_index_db(&v11.join("files")));
+        assert!(!is_store_index_db(&v11.join("projects")));
+        assert!(!is_store_index_db(&v11.join("index.db-wal")));
     }
 
     #[test]

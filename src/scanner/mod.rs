@@ -151,7 +151,7 @@ pub fn discover(roots: &[PathBuf]) -> Discovery {
                         }
                         if db.wal_unread {
                             unidentified.push(report(
-                                "pnpm index.db has write-ahead-log entries that could not be read; recently installed packages may be missing".to_string(),
+                                "pnpm index.db has write-ahead-log or journal entries that could not be read; recently installed packages may be missing".to_string(),
                                 1,
                             ));
                         }
@@ -789,6 +789,35 @@ mod tests {
         assert_eq!(found.packages.len(), cap, "the prefix is scanned");
         assert_eq!(found.unidentified.len(), 1, "{:?}", found.unidentified);
         assert!(found.unidentified[0].reason.contains("only partly read"));
+    }
+
+    #[test]
+    fn a_pnpm_store_in_a_custom_location_is_recognised_by_its_layout() {
+        // `pnpm store path` can be anywhere (`/tmp/pkg-cache/v11`), so the
+        // directory names say nothing. The layout does: `v<N>/index.db` with a
+        // `files/` directory beside it.
+        let tmp = tempfile::tempdir().unwrap();
+        let v11 = tmp.path().join("pkg-cache/v11");
+        std::fs::create_dir_all(v11.join("files")).unwrap();
+        std::fs::write(v11.join("index.db"), REAL_INDEX_DB).unwrap();
+        let found = discover(&[tmp.path().join("pkg-cache")]);
+        assert_eq!(found.packages.len(), 2, "{:?}", found.unidentified);
+        // Their virtual paths classify as pnpm too, so MCP can name them.
+        let (path, id) = &found.packages[0];
+        assert_eq!(
+            crate::providers::package_id(crate::providers::detect(path), path).as_ref(),
+            Some(id)
+        );
+    }
+
+    #[test]
+    fn a_v_directory_without_the_pnpm_layout_is_not_a_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v11 = tmp.path().join("app/v11");
+        std::fs::create_dir_all(&v11).unwrap();
+        std::fs::write(v11.join("index.db"), REAL_INDEX_DB).unwrap(); // no files/
+        let found = discover(&[tmp.path().to_path_buf()]);
+        assert!(found.packages.is_empty() && found.unidentified.is_empty());
     }
 
     #[test]
