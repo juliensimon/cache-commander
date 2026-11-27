@@ -152,11 +152,16 @@ jobs:
       # is no longer needed.
       - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
 
+      # Exact versions (#68, #106): this job gates every PR, so an upstream release
+      # must not change its behaviour, or run unreviewed code, without a repo change.
+      # Bump them deliberately. `--ignore-scripts` keeps install-time lifecycle
+      # scripts from running. The nightly E2E job floats on purpose, to surface new
+      # upstream releases within a day.
       - name: Install pnpm
-        run: npm install -g --ignore-scripts pnpm
+        run: npm install -g --ignore-scripts pnpm@12.23.0
 
       - name: Install Yarn Classic
-        run: npm install -g --ignore-scripts yarn@1
+        run: npm install -g --ignore-scripts yarn@1.22.22
 
       - name: Enable Corepack (for Yarn Berry)
         run: corepack enable

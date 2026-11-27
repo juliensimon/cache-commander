@@ -26,6 +26,10 @@ jobs:
           persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
 
+      # Deliberately NOT pinned (#68, #106): this job exists to surface upstream
+      # changes (a new pnpm major, like the v11 store change) within a day, while the
+      # PR gate in ci.yml is pinned. It runs with `contents: read` and no secrets, and
+      # installs with `--ignore-scripts`.
       - name: Install pnpm
         run: npm install -g --ignore-scripts pnpm
 
