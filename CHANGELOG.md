@@ -85,8 +85,9 @@ are called out under Changed.
   mode, used outright when there is no write-ahead log (so a scan writes
   nothing into the store) and as the fallback when a store with one refuses a
   plain read-only open, in which case the scan says recent packages may be
-  missing. The file is treated as untrusted: row and time limits, and
-  `package_index` must be a real table. Names and versions are validated as npm
+  missing. The file is treated as untrusted: row (250,000) and time limits,
+  past which the packages already read are kept and the rest is reported as not
+  scanned, and `package_index` must be a real table. Names and versions are validated as npm
   coordinates. A package there is
   reported under a virtual path below `index.db`, so a result marks that entry
   and the folders above it. Rows that are not a registry `name@version`, and an

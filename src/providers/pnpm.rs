@@ -277,6 +277,10 @@ pub struct IndexDb {
     /// read, so packages pnpm installed recently may be missing. The caller must
     /// say so: they would otherwise look clean.
     pub wal_unread: bool,
+    /// Reading stopped at the row or time limit. The packages read are kept; the
+    /// rest were not scanned, which the caller must say, so a valid store just
+    /// over the limit does not read as an empty one.
+    pub incomplete: bool,
 }
 
 /// How much of an `index.db` we are willing to read. The file comes from a
@@ -287,9 +291,12 @@ struct IndexLimits {
     max_time: std::time::Duration,
 }
 
+/// Rows read from an `index.db` before the rest is left unscanned.
+pub const MAX_INDEX_ROWS: usize = 250_000;
+
 const INDEX_LIMITS: IndexLimits = IndexLimits {
     // pnpm stores hold tens of thousands of packages at most.
-    max_rows: 250_000,
+    max_rows: MAX_INDEX_ROWS,
     max_time: std::time::Duration::from_secs(20),
 };
 
@@ -403,10 +410,19 @@ fn read_index_db_with(db: &Path, limits: IndexLimits) -> Result<IndexDb, &'stati
     };
     let mut rows = 0usize;
     for key in keys {
-        let key = key.map_err(|_| unreadable(started))?;
+        let key = match key {
+            Ok(k) => k,
+            // Out of time: keep what was read and say the rest was not.
+            Err(_) if started.elapsed() > max_time => {
+                out.incomplete = true;
+                break;
+            }
+            Err(_) => return Err("pnpm index.db could not be read"),
+        };
         rows += 1;
         if rows > limits.max_rows {
-            return Err("pnpm index.db has too many entries to read");
+            out.incomplete = true;
+            break;
         }
         match parse_index_key(&key) {
             Some(id) => out.packages.push(id),
@@ -708,22 +724,25 @@ mod tests {
     }
 
     #[test]
-    fn reading_stops_at_the_row_cap() {
+    fn reading_stops_at_the_row_cap_but_keeps_what_it_read() {
+        // A valid store just over the cap must not read as an empty scan: the
+        // packages read are kept, and the rest is reported as not scanned.
         let tmp = tempfile::tempdir().unwrap();
         let db = three_row_db(tmp.path());
         let limits = IndexLimits {
             max_rows: 3,
             max_time: INDEX_LIMITS.max_time,
         };
-        assert_eq!(read_index_db_with(&db, limits).unwrap().packages.len(), 3);
+        let all = read_index_db_with(&db, limits).unwrap();
+        assert_eq!(all.packages.len(), 3);
+        assert!(!all.incomplete, "exactly at the cap is complete");
         let limits = IndexLimits {
             max_rows: 2,
             max_time: INDEX_LIMITS.max_time,
         };
-        assert_eq!(
-            read_index_db_with(&db, limits).unwrap_err(),
-            "pnpm index.db has too many entries to read"
-        );
+        let part = read_index_db_with(&db, limits).unwrap();
+        assert_eq!(part.packages.len(), 2, "the prefix is kept");
+        assert!(part.incomplete, "and the rest is flagged as not read");
     }
 
     #[test]
@@ -743,10 +762,9 @@ mod tests {
             max_rows: usize::MAX,
             max_time: std::time::Duration::ZERO,
         };
-        assert_eq!(
-            read_index_db_with(&db, limits).unwrap_err(),
-            "pnpm index.db took too long to read"
-        );
+        let part = read_index_db_with(&db, limits).unwrap();
+        assert!(part.incomplete, "an interrupted read is flagged");
+        assert!(part.packages.len() < 200_000, "and did not read everything");
     }
 
     #[test]

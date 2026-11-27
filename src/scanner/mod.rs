@@ -143,6 +143,12 @@ pub fn discover(roots: &[PathBuf]) -> Discovery {
                                 db.unusable_keys,
                             ));
                         }
+                        if db.incomplete {
+                            unidentified.push(report(
+                                "pnpm index.db was only partly read (row or time limit); the rest was not scanned".to_string(),
+                                1,
+                            ));
+                        }
                         if db.wal_unread {
                             unidentified.push(report(
                                 "pnpm index.db has write-ahead-log entries that could not be read; recently installed packages may be missing".to_string(),
@@ -760,6 +766,29 @@ mod tests {
         assert!(found.packages.is_empty(), "the row is only in the log");
         assert_eq!(found.unidentified.len(), 1, "{:?}", found.unidentified);
         assert!(found.unidentified[0].reason.contains("write-ahead-log"));
+    }
+
+    #[test]
+    fn a_store_over_the_row_cap_is_scanned_in_part_and_says_so() {
+        // A valid store a little over the cap must not read as an empty, clean
+        // one: the packages read are scanned, and the rest is reported.
+        let cap = crate::providers::pnpm::MAX_INDEX_ROWS;
+        let tmp = tempfile::tempdir().unwrap();
+        let db = pnpm11_store(tmp.path(), b"");
+        std::fs::remove_file(&db).unwrap();
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(&format!(
+            "CREATE TABLE package_index (key TEXT PRIMARY KEY, data BLOB NOT NULL) WITHOUT ROWID;
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < {})
+             INSERT INTO package_index SELECT 'sha512-x\tp' || i || '@1.0.0', x'00' FROM n;",
+            cap + 1
+        ))
+        .unwrap();
+        drop(conn);
+        let found = discover(&[tmp.path().join("pnpm")]);
+        assert_eq!(found.packages.len(), cap, "the prefix is scanned");
+        assert_eq!(found.unidentified.len(), 1, "{:?}", found.unidentified);
+        assert!(found.unidentified[0].reason.contains("only partly read"));
     }
 
     #[test]
